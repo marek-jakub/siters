@@ -9,4 +9,5 @@ dependencies = [
     "pymupdf>=1.25.2",
     "pyqtdarktheme==2.1.0",
     "pyside6>=6.8.2",
+    "pytest-qt>=4.4.0",
 ]
