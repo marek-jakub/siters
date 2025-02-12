@@ -23,7 +23,7 @@ Siters is a .pdf file viewer.
 
 ## Running Tests
 
-The project uses uv[[1]] package and project manager. To run the test suite, make sure you have the development dependencies installed and then execute tests:
+The project uses uv[[1]](#1) package and project manager. To run the test suite, make sure you have the development dependencies installed and then execute tests:
 
 ```bash
 uv pip sync pyproject.toml
