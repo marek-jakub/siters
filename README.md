@@ -36,6 +36,6 @@ uv run pytest functional_tests.py
 
 ## Warranty
 
-This program is provided "as is" without any warranty of any kind, either expressed or implied. Use at your own risk.
+This program is provided "as is" without warranty of any kind, either expressed or implied. Use at your own risk.
 
 <a id="1">[1]</a> https://docs.astral.sh/uv/getting-started/installation/

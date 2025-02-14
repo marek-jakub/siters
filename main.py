@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/usr/bin/env python
 
 # License Notice for Qt 6.8
 # This application uses Qt version 6.8, which is licensed under the (L)GPL v3.
