@@ -54,5 +54,19 @@ dkms.conf
 # debug information files
 *.dwo
 
+# build directory
+build/
+
+# log files generated during builds
+*.log
+
+# temporary files created during development
+*.tmp
+
 # Project-specific executable
 siters
+
+# ide related
+.vscode/
+.idea/
+*.swp
