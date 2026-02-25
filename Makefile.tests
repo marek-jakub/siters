@@ -1,0 +1,82 @@
+# Makefile for building and running tests for Siters
+# Usage: make -f Makefile.tests target
+
+CC=gcc
+CFLAGS=-Wall -Wextra -Werror -g `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
+LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm
+
+# Main application
+SITERS_SRC=src/main.c src/siters.c
+SITERS_TARGET=siters
+
+# Unit tests
+UNIT_TEST_SRC=tests/test_siters_unit.c src/siters.c
+UNIT_TEST_TARGET=test_siters_unit
+
+# GUI tests
+GUI_TEST_SRC=tests/test_siters_gui.py
+GUI_TEST_TARGET=test_siters_gui.py
+
+.PHONY: all build-app build-unit-tests run-unit-tests run-gui-tests clean help
+
+all: build-app build-unit-tests help
+
+build-app:
+	@echo "Building Siters application..."
+	$(CC) $(CFLAGS) -o $(SITERS_TARGET) $(SITERS_SRC) $(LIBS)
+
+build-unit-tests:
+	@echo "Building unit tests..."
+	$(CC) $(CFLAGS) -o $(UNIT_TEST_TARGET) $(UNIT_TEST_SRC) $(LIBS) \
+		-Wl,--wrap=gtk_window_new \
+		-Wl,--wrap=gtk_window_set_title \
+		-Wl,--wrap=gtk_window_set_default_size \
+		-Wl,--wrap=g_signal_connect_data
+
+run-unit-tests: build-unit-tests
+	@echo "Running unit tests..."
+	./$(UNIT_TEST_TARGET)
+
+run-gui-tests: build-app
+	@echo "======================================"
+	@echo "GUI Tests (Dogtail)"
+	@echo "======================================"
+	@echo ""
+	@echo "Running GUI tests..."
+	@echo "These tests verify basic app functionality"
+	@echo "without relying on full AT-SPI accessibility."
+	@echo ""
+	@python3 tests/test_siters_gui.py
+
+test: run-unit-tests
+	@echo "Unit tests completed."
+	@echo ""
+	@echo "To run GUI tests, use: make -f Makefile.tests run-gui-tests"
+
+clean:
+	@echo "Cleaning up..."
+	rm -f $(SITERS_TARGET)
+	rm -f $(UNIT_TEST_TARGET)
+	rm -f *.o
+
+help:
+	@echo "Siters Test Suite"
+	@echo "=================="
+	@echo ""
+	@echo "Available targets:"
+	@echo "  make -f Makefile.tests build-app        - Build the main application"
+	@echo "  make -f Makefile.tests build-unit-tests - Build unit tests"
+	@echo "  make -f Makefile.tests run-unit-tests   - Build and run unit tests (CMocka)"
+	@echo "  make -f Makefile.tests run-gui-tests    - Build app and run GUI tests (Dogtail)"
+	@echo "  make -f Makefile.tests test             - Run unit tests"
+	@echo "  make -f Makefile.tests clean            - Remove built files"
+	@echo ""
+	@echo "Dependencies:"
+	@echo "  - CMocka: pkg-config cmocka"
+	@echo "  - GTK+3: pkg-config gtk+-3.0"
+	@echo "  - Poppler-glib: pkg-config poppler-glib"
+	@echo "  - Dogtail: pip install dogtail python3-pyatspi"
+	@echo ""
+	@echo "System packages (Ubuntu/Debian):"
+	@echo "  sudo apt install cmake pkg-config build-essential libcmocka-dev libgtk-3-dev libpoppler-glib-dev"
+	@echo ""

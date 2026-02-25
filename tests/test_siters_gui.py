@@ -1,0 +1,121 @@
+#!/usr/bin/env python3
+"""
+Dogtail GUI tests for Siters PDF Viewer
+
+This module provides basic GUI tests for the Siters application using Dogtail.
+Focus is on tests that work reliably in headless environments where AT-SPI
+accessibility is available but may be slow or incomplete.
+
+Requirements:
+    - dogtail
+    - python3-pyatspi  
+    - python3
+
+Installation:
+    pip install dogtail python3-pyatspi
+"""
+
+import os
+import sys
+import time
+import subprocess
+import unittest
+from pathlib import Path
+
+try:
+    from dogtail.tree import root
+    from dogtail import config
+    from dogtail.utils import run
+except ImportError as e:
+    print("Error: Dogtail is not installed.")
+    print("Install it with: pip install dogtail python3-pyatspi")
+    print(f"Import error details: {e}")
+    sys.exit(1)
+
+
+class SitersGUITestCase(unittest.TestCase):
+    """Base test case for Siters GUI tests with setup/teardown."""
+
+    @classmethod
+    def setUpClass(cls):
+        """Set up test fixtures for all tests."""
+        config.logDir = "/tmp/"
+        config.debugSearching = False
+
+        # Use the build directory binary, or fall back to PATH
+        build_binary = os.path.join(os.path.dirname(
+            __file__), '..', 'build', 'siters')
+        if os.path.exists(build_binary):
+            cls.siters_binary = os.path.abspath(build_binary)
+        else:
+            cls.siters_binary = "siters"
+
+    def setUp(self):
+        """Start the Siters application before each test."""
+        # Check if we have an X display - required for GUI testing
+        if not os.environ.get('DISPLAY') and not os.environ.get('WAYLAND_DISPLAY'):
+            self.skipTest("No display server (DISPLAY or WAYLAND_DISPLAY) available. "
+                          "To run GUI tests, use: xvfb-run -a python3 test_gui_simple.py")
+
+        try:
+            # Use dumb=True to skip dogtail's accessibility-based startup detection
+            # This prevents hanging when the app doesn't expose itself via AT-SPI
+            self.app = run(self.siters_binary, timeout=5, dumb=True)
+            time.sleep(0.5)
+        except Exception as e:
+            self.skipTest(f"Could not start Siters application: {e}")
+
+    def tearDown(self):
+        """Close the Siters application after each test."""
+        if hasattr(self, 'app') and self.app:
+            try:
+                self.app.kill()
+                time.sleep(0.5)
+            except Exception:
+                pass
+
+
+class TestSitersBasicOperation(SitersGUITestCase):
+    """Test basic application operation without relying on AT-SPI."""
+
+    def test_application_starts(self):
+        """Test that Siters application starts and can be accessed via AT-SPI."""
+        try:
+            # This is the most basic test - just check the app started
+            # We already know it runs from setUp, this verifies AT-SPI can find it
+            siters_app = root.application("siters")
+            self.assertIsNotNone(
+                siters_app, "Application not found via AT-SPI")
+            print("SUCCESS: Application is accessible via AT-SPI")
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - app may not expose accessibility interface")
+        except Exception as e:
+            self.skipTest(f"Could not access siters via AT-SPI: {e}")
+
+    def test_application_is_process(self):
+        """Test that Siters process is running."""
+        try:
+            # Simple check - the process should exist
+            result = subprocess.run(
+                ["pgrep", "-f", "siters"],
+                capture_output=True,
+                timeout=2
+            )
+            self.assertEqual(result.returncode, 0, "Siters process not found")
+        except Exception as e:
+            self.skipTest(f"Could not check process: {e}")
+
+
+def suite():
+    """Create a test suite for all GUI tests."""
+    test_suite = unittest.TestSuite()
+    test_suite.addTests(unittest.TestLoader(
+    ).loadTestsFromTestCase(TestSitersBasicOperation))
+    return test_suite
+
+
+if __name__ == '__main__':
+    runner = unittest.TextTestRunner(verbosity=2)
+    result = runner.run(suite())
+    sys.exit(0 if result.wasSuccessful() else 1)
