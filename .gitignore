@@ -65,6 +65,7 @@ build/
 
 # Project-specific executable
 siters
+test_siters_unit
 
 # ide related
 .vscode/
