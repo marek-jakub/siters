@@ -44,7 +44,7 @@ class SitersGUITestCase(unittest.TestCase):
 
         # Use the build directory binary, or fall back to PATH
         build_binary = os.path.join(os.path.dirname(
-            __file__), '..', 'siters')
+            __file__), '..', 'build', 'siters')
         if os.path.exists(build_binary):
             cls.siters_binary = os.path.abspath(build_binary)
         else:
