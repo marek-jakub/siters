@@ -11,12 +11,15 @@ pkg_check_modules(POPPLER REQUIRED poppler-glib)
 pkg_check_modules(CMOCKA REQUIRED cmocka)
 
 # Include directories
-include_directories(${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
+include_directories(include ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
 # Main application
 add_executable(siters 
     src/main.c
     src/siters.c
+    src/sessions_model.c
+    src/session_model.c
+    src/document_model.c
 )
 
 target_link_libraries(siters 
@@ -33,6 +36,9 @@ enable_testing()
 add_executable(test_siters_unit
     tests/test_siters_unit.c
     src/siters.c
+    src/sessions_model.c
+    src/session_model.c
+    src/document_model.c
 )
 
 target_link_libraries(test_siters_unit
