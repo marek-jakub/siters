@@ -107,7 +107,7 @@ class TestSitersBasicOperation(SitersGUITestCase):
             self.skipTest(f"Could not check process: {e}")
 
     def test_toolbar_buttons_exists(self):
-        """Test that the toolbar buttons exists in the GUI."""
+        """Test that the toolbar buttons exist in the GUI."""
         button_names = ['Sessions',
                         'Table of contents',
                         'Settings',
