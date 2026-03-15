@@ -2,7 +2,7 @@
 # Usage: make -f Makefile.tests target
 
 CC=gcc
-CFLAGS=-Wall -Wextra -Werror -g `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
+CFLAGS=-Wall -Wextra -Werror -g -Iinclude `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
 LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm
 
 # Main application
@@ -10,7 +10,7 @@ SITERS_SRC=src/main.c src/siters.c
 SITERS_TARGET=siters
 
 # Unit tests
-UNIT_TEST_SRC=tests/test_siters_unit.c src/siters.c
+UNIT_TEST_SRC=tests/test_siters_unit.c src/siters.c src/sessions_model.c src/session_model.c src/document_model.c
 UNIT_TEST_TARGET=test_siters_unit
 
 # GUI tests
