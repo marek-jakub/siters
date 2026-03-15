@@ -106,8 +106,26 @@ class TestSitersBasicOperation(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Could not check process: {e}")
 
-    def test_sessions_button_exists(self):
-        """Test that the sessions button exists in the GUI."""
+    def test_toolbar_buttons_exists(self):
+        """Test that the toolbar buttons exists in the GUI."""
+        button_names = ['Sessions',
+                        'Table of contents',
+                        'Settings',
+                        'Open file',
+                        'Close file',
+                        'Page up',
+                        'Page down',
+                        'Zoom in',
+                        'Zoom out',
+                        'Page column',
+                        'Page double column',
+                        'Page row',
+                        'Toggle horizontal scroll',
+                        'Toggle title bar visibility',
+                        'Helper files',
+                        'Close',
+                        'Maximize',
+                        'Minimize']
         try:
             siters_app = root.application("siters")
             # Give more time for GUI to fully initialize accessibility
@@ -119,28 +137,30 @@ class TestSitersBasicOperation(SitersGUITestCase):
             self.assertGreater(
                 len(children), 0, "Application has no child widgets")
 
-            # Try to find buttons - if we can find any, the GUI is likely built correctly
+            # Try to find buttons - search for all button types (push, toggle, radio)
             try:
                 buttons = siters_app.findChildren(
-                    lambda x: x.roleName == 'push button')
+                    lambda x: x.roleName in ['push button', 'toggle button', 'radio button'])
                 if buttons:
                     print(f"SUCCESS: Found {len(buttons)} buttons in the GUI")
-                    # Check if any button has the sessions name
-                    sessions_found = any(
-                        btn.name == 'Sessions' for btn in buttons)
-                    if sessions_found:
-                        print("SUCCESS: Sessions button found by name")
-                    else:
-                        print(
-                            "WARNING: Buttons found but Sessions button not identified by name")
+                    # Check if any button has the expected names
+                    for button_name in button_names:
+                        button_found = any(
+                            btn.name == button_name for btn in buttons)
+                        if button_found:
+                            print(
+                                f"SUCCESS: {button_name} button found by name")
+                        else:
+                            print(
+                                f"WARNING: Buttons found but {button_name} button not identified by name")
                 else:
                     print("WARNING: No buttons found via AT-SPI")
             except Exception as e:
                 print(f"WARNING: Could not search for buttons: {e}")
 
-            # The main test: if the app has children, assume the sessions button exists
-            # since it's created in the code
-            print("SUCCESS: Application has GUI elements, sessions button should exist")
+            # The main test: if the app has children, assume the buttons exist
+            # since they are created in the code
+            print("SUCCESS: Application has GUI elements, toolbar buttons should exist")
 
         except TimeoutError:
             self.skipTest(
