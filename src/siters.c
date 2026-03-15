@@ -1,6 +1,9 @@
 #include <gtk/gtk.h>
 #include <atk/atk.h>
 #include "siters.h"
+#include "sessions_model.h"
+#include "session_model.h"
+#include "document_model.h"
 
 typedef enum {
     SIDEBAR_NONE,
@@ -58,6 +61,7 @@ static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
 
 static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
+    (void)user_data;
     if (current_sidebar_mode == SIDEBAR_SESSIONS) {
         gtk_widget_hide(sidebar);
         current_sidebar_mode = SIDEBAR_NONE;
@@ -70,6 +74,7 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
 
 static void on_toc_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
+    (void)user_data;
     if (current_sidebar_mode == SIDEBAR_TOC) {
         gtk_widget_hide(sidebar);
         current_sidebar_mode = SIDEBAR_NONE;
@@ -82,6 +87,7 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
 
 static void on_settings_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
+    (void)user_data;
     if (current_sidebar_mode == SIDEBAR_SETTINGS) {
         gtk_widget_hide(sidebar);
         current_sidebar_mode = SIDEBAR_NONE;
