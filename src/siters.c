@@ -2,6 +2,17 @@
 #include <atk/atk.h>
 #include "siters.h"
 
+typedef enum {
+    SIDEBAR_NONE,
+    SIDEBAR_SESSIONS,
+    SIDEBAR_TOC,
+    SIDEBAR_SETTINGS
+} SidebarMode;
+
+static SidebarMode current_sidebar_mode = SIDEBAR_NONE;
+static GtkWidget *sidebar;
+static GtkWidget *sidebar_label;
+
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
     if (gtk_toggle_button_get_active(button)) {
@@ -45,6 +56,42 @@ static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    if (current_sidebar_mode == SIDEBAR_SESSIONS) {
+        gtk_widget_hide(sidebar);
+        current_sidebar_mode = SIDEBAR_NONE;
+    } else {
+        gtk_label_set_text(GTK_LABEL(sidebar_label), "Sessions\n\n• Session 1\n• Session 2\n• Session 3\n\nClick to load a session.");
+        gtk_widget_show(sidebar);
+        current_sidebar_mode = SIDEBAR_SESSIONS;
+    }
+}
+
+static void on_toc_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    if (current_sidebar_mode == SIDEBAR_TOC) {
+        gtk_widget_hide(sidebar);
+        current_sidebar_mode = SIDEBAR_NONE;
+    } else {
+        gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
+        gtk_widget_show(sidebar);
+        current_sidebar_mode = SIDEBAR_TOC;
+    }
+}
+
+static void on_settings_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    if (current_sidebar_mode == SIDEBAR_SETTINGS) {
+        gtk_widget_hide(sidebar);
+        current_sidebar_mode = SIDEBAR_NONE;
+    } else {
+        gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
+        gtk_widget_show(sidebar);
+        current_sidebar_mode = SIDEBAR_SETTINGS;
+    }
+}
+
 GtkWidget* create_main_window(void) {
     GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
@@ -61,6 +108,17 @@ GtkWidget* create_main_window(void) {
     gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "toolbar");
     gtk_box_pack_start(GTK_BOX(main_hbox), toolbar, FALSE, FALSE, 0);
 
+    /* Sidebar for sessions, toc, settings */
+    sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_widget_set_size_request(sidebar, 200, -1);
+    gtk_widget_hide(sidebar);  /* Initially hidden */
+    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+
+    /* Content for sidebar */
+    sidebar_label = gtk_label_new("");
+    gtk_label_set_justify(GTK_LABEL(sidebar_label), GTK_JUSTIFY_LEFT);
+    gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
+
     /* Content area on the right*/
     GtkWidget *content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(main_hbox), content_vbox, TRUE, TRUE, 0);
@@ -72,6 +130,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(sessions_btn), sessions_icon);
     gtk_widget_set_tooltip_text(sessions_btn, "Sessions");
     atk_object_set_name(gtk_widget_get_accessible(sessions_btn), "Sessions");
+    g_signal_connect(sessions_btn, "clicked", G_CALLBACK(on_sessions_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), sessions_btn, FALSE, FALSE, 1);
 
     /* Table of contents button */
@@ -80,6 +139,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(toc_btn), toc_icon);
     gtk_widget_set_tooltip_text(toc_btn, "Table of contents");
     atk_object_set_name(gtk_widget_get_accessible(toc_btn), "Table of contents");
+    g_signal_connect(toc_btn, "clicked", G_CALLBACK(on_toc_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), toc_btn, FALSE, FALSE, 1);
 
     /* Settings button */
@@ -88,6 +148,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(settings_btn), settings_icon);
     gtk_widget_set_tooltip_text(settings_btn, "Settings");
     atk_object_set_name(gtk_widget_get_accessible(settings_btn), "Settings");
+    g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), settings_btn, FALSE, FALSE, 1);
 
     /* Separator */
