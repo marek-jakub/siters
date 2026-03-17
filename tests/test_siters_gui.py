@@ -106,7 +106,7 @@ class TestSitersBasicOperation(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Could not check process: {e}")
 
-    def test_toolbar_buttons_exists(self):
+    def test_toolbar_buttons_exist(self):
         """Test that the toolbar buttons exist in the GUI."""
         button_names = ['Sessions',
                         'Table of contents',
@@ -190,7 +190,10 @@ class TestSitersBasicOperation(SitersGUITestCase):
                     return None
 
             # Click once: sidebar should show the label
-            sessions_btn.click()
+            if hasattr(sessions_btn, 'do_action'):
+                sessions_btn.do_action(0)
+            else:
+                sessions_btn.click()
             time.sleep(0.5)
             label = find_sidebar_label()
             if label:
