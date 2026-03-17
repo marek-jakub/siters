@@ -344,7 +344,7 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
     gtk_box_pack_end(GTK_BOX(toolbar), minimize_btn, FALSE, FALSE, 1);
 
-    /* Create a horizontal panded splitter containing two notebooks */
+    /* Create a horizontal paned splitter containing two notebooks */
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(content_vbox), paned, TRUE, TRUE, 0);
 
