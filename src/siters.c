@@ -146,17 +146,19 @@ GtkWidget* create_main_window(void) {
 
     /* Left sidebar: main toolbar */
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "toolbar");
+    gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "Toolbar");
     gtk_box_pack_start(GTK_BOX(main_hbox), toolbar, FALSE, FALSE, 0);
 
     /* Sidebar for sessions, toc, settings */
     sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     g_object_ref(sidebar);  /* Keep a reference to prevent destruction when removed */
     gtk_widget_set_size_request(sidebar, 200, -1);
+    atk_object_set_name(gtk_widget_get_accessible(sidebar), "Sidebar");
 
     /* Content for sidebar */
     sidebar_label = gtk_label_new("");
     gtk_label_set_justify(GTK_LABEL(sidebar_label), GTK_JUSTIFY_LEFT);
+    atk_object_set_name(gtk_widget_get_accessible(sidebar_label), "Sidebar label");
     gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
 
     /* Content area on the right*/

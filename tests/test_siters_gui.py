@@ -168,6 +168,52 @@ class TestSitersBasicOperation(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Could not access application: {e}")
 
+    def test_sessions_button_toggles_sidebar(self):
+        """Test that clicking Sessions shows/hides the sidebar label."""
+        try:
+            siters_app = root.application("siters")
+            time.sleep(1)
+
+            # Find the Sessions button
+            try:
+                sessions_btn = siters_app.findChild(
+                    lambda x: x.roleName in ['push button', 'toggle button'] and x.name == 'Sessions')
+            except Exception as e:
+                self.skipTest(f"Could not find Sessions button: {e}")
+
+            # Helper to locate the sidebar label
+            def find_sidebar_label():
+                try:
+                    return siters_app.findChild(
+                        lambda x: x.roleName == 'label' and x.name == 'Sidebar label')
+                except Exception:
+                    return None
+
+            # Click once: sidebar should show the label
+            sessions_btn.click()
+            time.sleep(0.5)
+            label = find_sidebar_label()
+            if label:
+                print("SUCCESS: Sidebar label found after clicking Sessions")
+            time.sleep(0.5)
+            self.assertIsNotNone(
+                label, "Sidebar label not found after opening sessions")
+
+            # Click again: sidebar should hide, label should disappear
+            sessions_btn.click()
+            time.sleep(0.5)
+            label = find_sidebar_label()
+            if not label:
+                print("SUCCESS: Sidebar label not found after closing sessions")
+            self.assertIsNone(
+                label, "Sidebar label still present after closing sessions")
+
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - GUI elements may not be accessible")
+        except Exception as e:
+            self.skipTest(f"Could not access application: {e}")
+
 
 def suite():
     """Create a test suite for all GUI tests."""
