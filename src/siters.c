@@ -15,6 +15,9 @@ typedef enum {
 static SidebarMode current_sidebar_mode = SIDEBAR_NONE;
 static GtkWidget *sidebar;
 static GtkWidget *sidebar_label;
+static GtkWidget *main_hbox;
+static GtkWidget *content_vbox;
+static GtkWidget *window;
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
@@ -27,11 +30,25 @@ static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) 
 
 static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
-    if (gtk_toggle_button_get_active(button)) {
+    gboolean active = gtk_toggle_button_get_active(button);
+    if (active) {
         gtk_image_set_from_file(image, "./data/icons/title-bar-on.png");
+        gtk_window_set_decorated(GTK_WINDOW(window), TRUE);
     } else {
         gtk_image_set_from_file(image, "./data/icons/title-bar-off.png");
+        // If window is maximized, need to unmaximize, remove decoration, then re-maximize
+        // to ensure it fills the screen properly
+        gboolean was_maximized = gtk_window_is_maximized(GTK_WINDOW(window));
+        if (was_maximized) {
+            gtk_window_unmaximize(GTK_WINDOW(window));
+        }
+        gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+        if (was_maximized) {
+            gtk_window_maximize(GTK_WINDOW(window));
+        }
     }
+    // Force layout update after changing decoration
+    gtk_widget_queue_resize(window);
 }
 
 static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -63,11 +80,17 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     if (current_sidebar_mode == SIDEBAR_SESSIONS) {
-        gtk_widget_hide(sidebar);
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
         current_sidebar_mode = SIDEBAR_NONE;
     } else {
+        if (gtk_widget_get_parent(sidebar) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        }
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Sessions\n\n• Session 1\n• Session 2\n• Session 3\n\nClick to load a session.");
-        gtk_widget_show(sidebar);
+        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_show_all(sidebar);
         current_sidebar_mode = SIDEBAR_SESSIONS;
     }
 }
@@ -76,11 +99,17 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     if (current_sidebar_mode == SIDEBAR_TOC) {
-        gtk_widget_hide(sidebar);
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
         current_sidebar_mode = SIDEBAR_NONE;
     } else {
+        if (gtk_widget_get_parent(sidebar) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        }
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
-        gtk_widget_show(sidebar);
+        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_show_all(sidebar);
         current_sidebar_mode = SIDEBAR_TOC;
     }
 }
@@ -89,24 +118,30 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
     if (current_sidebar_mode == SIDEBAR_SETTINGS) {
-        gtk_widget_hide(sidebar);
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
         current_sidebar_mode = SIDEBAR_NONE;
     } else {
+        if (gtk_widget_get_parent(sidebar) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        }
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
-        gtk_widget_show(sidebar);
+        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_show_all(sidebar);
         current_sidebar_mode = SIDEBAR_SETTINGS;
     }
 }
 
 GtkWidget* create_main_window(void) {
-    GtkWidget *window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 800);
 
     g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
 
     /* Main horizontal container: toolbar on left, content on right */
-    GtkWidget *main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
     gtk_container_add(GTK_CONTAINER(window), main_hbox);
 
     /* Left sidebar: main toolbar */
@@ -116,9 +151,8 @@ GtkWidget* create_main_window(void) {
 
     /* Sidebar for sessions, toc, settings */
     sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_ref(sidebar);  /* Keep a reference to prevent destruction when removed */
     gtk_widget_set_size_request(sidebar, 200, -1);
-    gtk_widget_hide(sidebar);  /* Initially hidden */
-    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
 
     /* Content for sidebar */
     sidebar_label = gtk_label_new("");
@@ -126,7 +160,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
 
     /* Content area on the right*/
-    GtkWidget *content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(main_hbox), content_vbox, TRUE, TRUE, 0);
 
     /* Buttons*/
@@ -309,6 +343,18 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(minimize_btn), "Minimize");
     g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
     gtk_box_pack_end(GTK_BOX(toolbar), minimize_btn, FALSE, FALSE, 1);
+
+    /* Create a horizontal panded splitter containing two notebooks */
+    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(content_vbox), paned, TRUE, TRUE, 0);
+
+    /* Left notebook (primary) */
+    GtkNotebook *left_notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(left_notebook), TRUE, FALSE);
+
+    /* Right notebook (secondary) */
+    GtkNotebook *right_notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    gtk_paned_pack2(GTK_PANED(paned), GTK_WIDGET(right_notebook), TRUE, FALSE);
 
     return window;
 }
