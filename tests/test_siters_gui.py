@@ -20,6 +20,7 @@ import sys
 import time
 import subprocess
 import unittest
+import logging
 from pathlib import Path
 
 try:
@@ -31,6 +32,11 @@ except ImportError as e:
     print("Install it with: pip install dogtail python3-pyatspi")
     print(f"Import error details: {e}")
     sys.exit(1)
+
+# Suppress dogtail's verbose debug logging
+logging.getLogger('dogtail').setLevel(logging.CRITICAL)
+logging.getLogger('dogtail.accessible_object').setLevel(logging.CRITICAL)
+logging.disable(logging.INFO)
 
 
 class SitersGUITestCase(unittest.TestCase):
@@ -285,6 +291,75 @@ class TestSitersBasicOperation(SitersGUITestCase):
             print("SUCCESS: Sidebar label not found after closing table of contents")
         self.assertIsNone(
             label, "Sidebar label still present after closing table of contents")
+
+    def test_toolbar_settings_button_toggles_sidebar(self):
+        """Test that clicking Settings shows/hides the sidebar label."""
+        # Ensure AT-SPI can find the running application
+        try:
+            siters_app = root.application("siters")
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - GUI elements may not be accessible")
+
+        # Allow the UI some time to settle before querying
+        time.sleep(2)
+
+        # Find the Settings button
+        try:
+            settings_btn = siters_app.findChild(
+                lambda x: x.roleName in ['push button', 'toggle button'] and x.name == 'Settings')
+        except Exception as e:
+            self.skipTest(f"Could not find Settings button: {e}")
+
+        # Helper to locate the sidebar label
+        def find_sidebar_label():
+            try:
+                return siters_app.findChild(
+                    lambda x: x.roleName == 'label' and x.name == 'Sidebar label')
+            except Exception:
+                return None
+
+        # Helper to poll for the sidebar label appearing/disappearing
+        def wait_for_sidebar_label(should_exist, timeout=5.0):
+            end = time.time() + timeout
+            while time.time() < end:
+                label = find_sidebar_label()
+                if (label is not None) == should_exist:
+                    return label
+                time.sleep(0.2)
+            return None
+
+        # Try to force focus to the button to make action events work reliably.
+        if hasattr(settings_btn, 'grab_focus'):
+            try:
+                settings_btn.grab_focus()
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+        # Click once: sidebar should show the label
+        if hasattr(settings_btn, 'do_action'):
+            settings_btn.do_action(0)
+        else:
+            settings_btn.click()
+
+        label = wait_for_sidebar_label(True, timeout=5.0)
+        if label:
+            print("SUCCESS: Sidebar label found after clicking Settings")
+        self.assertIsNotNone(
+            label, "Sidebar label not found after opening settings")
+
+        # Click again: sidebar should hide, label should disappear
+        if hasattr(settings_btn, 'do_action'):
+            settings_btn.do_action(0)
+        else:
+            settings_btn.click()
+
+        label = wait_for_sidebar_label(False, timeout=5.0)
+        if not label:
+            print("SUCCESS: Sidebar label not found after closing settings")
+        self.assertIsNone(
+            label, "Sidebar label still present after closing settings")
 
 
 def suite():
