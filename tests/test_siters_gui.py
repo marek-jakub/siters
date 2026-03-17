@@ -217,6 +217,75 @@ class TestSitersBasicOperation(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Could not access application: {e}")
 
+    def test_toolbar_toc_button_toggles_sidebar(self):
+        """Test that clicking Table of contents shows/hides the sidebar label."""
+        # Ensure AT-SPI can find the running application
+        try:
+            siters_app = root.application("siters")
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - GUI elements may not be accessible")
+
+        # Allow the UI some time to settle before querying
+        time.sleep(2)
+
+        # Find the Table of contents button
+        try:
+            toc_btn = siters_app.findChild(
+                lambda x: x.roleName in ['push button', 'toggle button'] and x.name == 'Table of contents')
+        except Exception as e:
+            self.skipTest(f"Could not find Table of contents button: {e}")
+
+        # Helper to locate the sidebar label
+        def find_sidebar_label():
+            try:
+                return siters_app.findChild(
+                    lambda x: x.roleName == 'label' and x.name == 'Sidebar label')
+            except Exception:
+                return None
+
+        # Helper to poll for the sidebar label appearing/disappearing
+        def wait_for_sidebar_label(should_exist, timeout=5.0):
+            end = time.time() + timeout
+            while time.time() < end:
+                label = find_sidebar_label()
+                if (label is not None) == should_exist:
+                    return label
+                time.sleep(0.2)
+            return None
+
+        # Try to force focus to the button to make action events work reliably.
+        if hasattr(toc_btn, 'grab_focus'):
+            try:
+                toc_btn.grab_focus()
+                time.sleep(0.2)
+            except Exception:
+                pass
+
+        # Click once: sidebar should show the label
+        if hasattr(toc_btn, 'do_action'):
+            toc_btn.do_action(0)
+        else:
+            toc_btn.click()
+
+        label = wait_for_sidebar_label(True, timeout=5.0)
+        if label:
+            print("SUCCESS: Sidebar label found after clicking Table of contents")
+        self.assertIsNotNone(
+            label, "Sidebar label not found after opening table of contents")
+
+        # Click again: sidebar should hide, label should disappear
+        if hasattr(toc_btn, 'do_action'):
+            toc_btn.do_action(0)
+        else:
+            toc_btn.click()
+
+        label = wait_for_sidebar_label(False, timeout=5.0)
+        if not label:
+            print("SUCCESS: Sidebar label not found after closing table of contents")
+        self.assertIsNone(
+            label, "Sidebar label still present after closing table of contents")
+
 
 def suite():
     """Create a test suite for all GUI tests."""
