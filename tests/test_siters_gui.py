@@ -168,7 +168,7 @@ class TestSitersBasicOperation(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Could not access application: {e}")
 
-    def test_sessions_button_toggles_sidebar(self):
+    def test_toolbar_sessions_button_toggles_sidebar(self):
         """Test that clicking Sessions shows/hides the sidebar label."""
         try:
             siters_app = root.application("siters")
