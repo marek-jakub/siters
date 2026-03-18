@@ -21,6 +21,7 @@ static GtkWidget *window;
 
 /* Right pane components (controlled via helper toggle) */
 static GtkWidget *paned;
+static GtkWidget *right_pane;
 static GtkWidget *right_notebook;
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -61,13 +62,13 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
 
     if (active) {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-on.png");
-        if (right_notebook) {
-            gtk_widget_show(GTK_WIDGET(right_notebook));
+        if (right_pane) {
+            gtk_widget_show(GTK_WIDGET(right_pane));
         }
     } else {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
-        if (right_notebook) {
-            gtk_widget_hide(GTK_WIDGET(right_notebook));
+        if (right_pane) {
+            gtk_widget_hide(GTK_WIDGET(right_pane));
         }
     }
 }
@@ -366,15 +367,122 @@ GtkWidget* create_main_window(void) {
     GtkNotebook *left_notebook = GTK_NOTEBOOK(gtk_notebook_new());
     gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(left_notebook), TRUE, FALSE);
 
+    /* Right pane: container with notebook and toolbar */
+    right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, FALSE);
+
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
-    gtk_paned_pack2(GTK_PANED(paned), GTK_WIDGET(right_notebook), TRUE, FALSE);
+    gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
+
+    /* Right pane toolbar (vertical) */
+    GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(right_toolbar), "Toolbar");
+    gtk_box_pack_start(GTK_BOX(right_pane), right_toolbar, FALSE, FALSE, 0);
+
+    /* Right toolbar buttons - Open file */
+    GtkWidget *right_open_file_icon = gtk_image_new_from_file("./data/icons/file-plus.png");
+    GtkWidget *right_open_file_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_open_file_btn), right_open_file_icon);
+    gtk_widget_set_tooltip_text(right_open_file_btn, "Open file");
+    atk_object_set_name(gtk_widget_get_accessible(right_open_file_btn), "Open file");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_open_file_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar - Close file */
+    GtkWidget *right_close_file_icon = gtk_image_new_from_file("./data/icons/file-minus.png");
+    GtkWidget *right_close_file_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_close_file_btn), right_close_file_icon);
+    gtk_widget_set_tooltip_text(right_close_file_btn, "Close file");
+    atk_object_set_name(gtk_widget_get_accessible(right_close_file_btn), "Close file");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_close_file_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar separator */
+    GtkWidget *right_sep_a = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_sep_a, FALSE, FALSE, 5);
+
+    /* Right toolbar - Page up */
+    GtkWidget *right_page_up_icon = gtk_image_new_from_file("./data/icons/page-up.png");
+    GtkWidget *right_page_up_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_page_up_btn), right_page_up_icon);
+    gtk_widget_set_tooltip_text(right_page_up_btn, "Page up");
+    atk_object_set_name(gtk_widget_get_accessible(right_page_up_btn), "Page up");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_page_up_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar - Page down */
+    GtkWidget *right_page_down_icon = gtk_image_new_from_file("./data/icons/page-down.png");
+    GtkWidget *right_page_down_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_page_down_btn), right_page_down_icon);
+    gtk_widget_set_tooltip_text(right_page_down_btn, "Page down");
+    atk_object_set_name(gtk_widget_get_accessible(right_page_down_btn), "Page down");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_page_down_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar separator */
+    GtkWidget *right_sep_b = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_sep_b, FALSE, FALSE, 5);
+
+    /* Right toolbar - Zoom in */
+    GtkWidget *right_zoom_in_icon = gtk_image_new_from_file("./data/icons/zoom-in.png");
+    GtkWidget *right_zoom_in_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_zoom_in_btn), right_zoom_in_icon);
+    gtk_widget_set_tooltip_text(right_zoom_in_btn, "Zoom in");
+    atk_object_set_name(gtk_widget_get_accessible(right_zoom_in_btn), "Zoom in");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_zoom_in_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar - Zoom out */
+    GtkWidget *right_zoom_out_icon = gtk_image_new_from_file("./data/icons/zoom-out.png");
+    GtkWidget *right_zoom_out_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_zoom_out_btn), right_zoom_out_icon);
+    gtk_widget_set_tooltip_text(right_zoom_out_btn, "Zoom out");
+    atk_object_set_name(gtk_widget_get_accessible(right_zoom_out_btn), "Zoom out");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_zoom_out_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar separator */
+    GtkWidget *right_sep_c = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_sep_c, FALSE, FALSE, 5);
+
+    /* Right toolbar - Page column */
+    GtkWidget *right_column_icon = gtk_image_new_from_file("./data/icons/column.png");
+    GtkWidget *right_column_btn = gtk_radio_button_new(NULL);
+    gtk_button_set_image(GTK_BUTTON(right_column_btn), right_column_icon);
+    gtk_widget_set_tooltip_text(right_column_btn, "Page column");
+    atk_object_set_name(gtk_widget_get_accessible(right_column_btn), "Page column");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_column_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar - Page double column */
+    GtkWidget *right_double_column_icon = gtk_image_new_from_file("./data/icons/double-column.png");
+    GtkWidget *right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
+    gtk_button_set_image(GTK_BUTTON(right_double_column_btn), right_double_column_icon);
+    gtk_widget_set_tooltip_text(right_double_column_btn, "Page double column");
+    atk_object_set_name(gtk_widget_get_accessible(right_double_column_btn), "Page double column");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_double_column_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar - Page row */
+    GtkWidget *right_row_icon = gtk_image_new_from_file("./data/icons/row.png");
+    GtkWidget *right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
+    gtk_button_set_image(GTK_BUTTON(right_row_btn), right_row_icon);
+    gtk_widget_set_tooltip_text(right_row_btn, "Page row");
+    atk_object_set_name(gtk_widget_get_accessible(right_row_btn), "Page row");
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_row_btn, FALSE, FALSE, 1);
+
+    /* Right toolbar separator */
+    GtkWidget *right_sep_d = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_sep_d, FALSE, FALSE, 5);
+
+    /* Right toolbar - Horizontal scroll toggle */
+    GtkWidget *right_horiz_scroll_icon = gtk_image_new_from_file("./data/icons/horiz-scroll-off.png");
+    GtkWidget *right_horiz_scroll_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_horiz_scroll_btn), right_horiz_scroll_icon);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_horiz_scroll_btn), FALSE);
+    gtk_widget_set_tooltip_text(right_horiz_scroll_btn, "Toggle horizontal scroll");
+    atk_object_set_name(gtk_widget_get_accessible(right_horiz_scroll_btn), "Toggle horizontal scroll");
+    g_signal_connect(right_horiz_scroll_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), right_horiz_scroll_icon);
+    gtk_box_pack_start(GTK_BOX(right_toolbar), right_horiz_scroll_btn, FALSE, FALSE, 1);
 
     return window;
 }
 
 void hide_right_pane(void) {
-    if (right_notebook) {
-        gtk_widget_hide(GTK_WIDGET(right_notebook));
+    if (right_pane) {
+        gtk_widget_hide(GTK_WIDGET(right_pane));
     }
 }
