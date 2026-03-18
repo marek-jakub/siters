@@ -6,6 +6,7 @@ int main(int argc, char *argv[]) {
 
     GtkWidget *window = create_main_window();
     gtk_widget_show_all(window);
+    hide_right_pane();
 
     gtk_main();
     return 0;

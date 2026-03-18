@@ -19,6 +19,10 @@ static GtkWidget *main_hbox;
 static GtkWidget *content_vbox;
 static GtkWidget *window;
 
+/* Right pane components (controlled via helper toggle) */
+static GtkWidget *paned;
+static GtkWidget *right_notebook;
+
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
     if (gtk_toggle_button_get_active(button)) {
@@ -53,10 +57,18 @@ static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
 
 static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
-    if (gtk_toggle_button_get_active(button)) {
+    gboolean active = gtk_toggle_button_get_active(button);
+
+    if (active) {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-on.png");
+        if (right_notebook) {
+            gtk_widget_show(GTK_WIDGET(right_notebook));
+        }
     } else {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
+        if (right_notebook) {
+            gtk_widget_hide(GTK_WIDGET(right_notebook));
+        }
     }
 }
 
@@ -355,8 +367,14 @@ GtkWidget* create_main_window(void) {
     gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(left_notebook), TRUE, FALSE);
 
     /* Right notebook (secondary) */
-    GtkNotebook *right_notebook = GTK_NOTEBOOK(gtk_notebook_new());
+    right_notebook = gtk_notebook_new();
     gtk_paned_pack2(GTK_PANED(paned), GTK_WIDGET(right_notebook), TRUE, FALSE);
 
     return window;
+}
+
+void hide_right_pane(void) {
+    if (right_notebook) {
+        gtk_widget_hide(GTK_WIDGET(right_notebook));
+    }
 }
