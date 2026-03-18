@@ -305,8 +305,8 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(title_bar_toggle_btn, "toggled", G_CALLBACK(on_title_bar_toggle), title_bar_toggle_icon);
     gtk_box_pack_start(GTK_BOX(toolbar), title_bar_toggle_btn, FALSE, FALSE, 1);
 
-    /* Sidebar helper toggle button*/
-    GtkWidget *helper_toggle_icon = gtk_image_new_from_file("./data/icons/sidebar-helper-on.png");
+    /* Helpers toggle button*/
+    GtkWidget *helper_toggle_icon = gtk_image_new_from_file("./data/icons/sidebar-helper-off.png");
     GtkWidget *helper_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(helper_toggle_btn), helper_toggle_icon);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(helper_toggle_btn), FALSE);
