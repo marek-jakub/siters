@@ -19,6 +19,17 @@ static GtkWidget *main_hbox;
 static GtkWidget *content_vbox;
 static GtkWidget *window;
 
+/* Sessions sidebar components */
+static GtkWidget *sessions_container;
+static GtkWidget *sessions_title;
+static GtkWidget *sessions_entry;
+static GtkWidget *sessions_add_btn;
+static GtkWidget *sessions_remove_btn;
+static GtkWidget *sessions_update_btn;
+static GtkWidget *sessions_tree_view;
+static GtkListStore *sessions_list_store;
+static sessions_model_t *sessions_model;
+
 /* Right pane components (controlled via helper toggle) */
 static GtkWidget *paned;
 static GtkWidget *right_pane;
@@ -89,9 +100,164 @@ static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+
+static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    const char *session_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
+    if (session_name && strlen(session_name) > 0) {
+        // Check if session name already exists
+        const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+        for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
+            if (strcmp((const char*)iter->data, session_name) == 0) {
+                // Show error dialog
+                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                    GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                    GTK_MESSAGE_ERROR,
+                    GTK_BUTTONS_OK,
+                    "A session with the name '%s' already exists. Please choose a different name.",
+                    session_name);
+                gtk_dialog_run(GTK_DIALOG(dialog));
+                gtk_widget_destroy(dialog);
+                return;
+            }
+        }
+        
+        // Add to model
+        sessions_model_add_session_name(sessions_model, session_name);
+        
+        // Add to tree view
+        GtkTreeIter iter;
+        gtk_list_store_append(sessions_list_store, &iter);
+        gtk_list_store_set(sessions_list_store, &iter, 0, session_name, -1);
+        
+        // Clear entry
+        gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+    }
+}
+
+static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    
+    if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        gchar *session_name;
+        gtk_tree_model_get(model, &iter, 0, &session_name, -1);
+        
+        // Prevent removing the "Default" session
+        if (strcmp(session_name, "Default") == 0) {
+            // Show a message dialog that Default session cannot be removed
+            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                GTK_MESSAGE_INFO,
+                GTK_BUTTONS_OK,
+                "The 'Default' session cannot be removed.");
+            gtk_dialog_run(GTK_DIALOG(dialog));
+            gtk_widget_destroy(dialog);
+            g_free(session_name);
+            return;
+        }
+        
+        // Remove from model
+        sessions_model_remove_session_name(sessions_model, session_name);
+        
+        // Remove from tree view
+        gtk_list_store_remove(GTK_LIST_STORE(model), &iter);
+        
+        g_free(session_name);
+    }
+}
+
+static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    
+    if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        const char *new_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
+        if (new_name && strlen(new_name) > 0) {
+            gchar *old_name;
+            gtk_tree_model_get(model, &iter, 0, &old_name, -1);
+            
+            // Prevent renaming the "Default" session
+            if (strcmp(old_name, "Default") == 0) {
+                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                    GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                    GTK_MESSAGE_INFO,
+                    GTK_BUTTONS_OK,
+                    "The 'Default' session cannot be renamed.");
+                gtk_dialog_run(GTK_DIALOG(dialog));
+                gtk_widget_destroy(dialog);
+                g_free(old_name);
+                return;
+            }
+            
+            // Check if new name already exists (excluding the current session)
+            const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+            for (const GList *iter_check = existing_sessions; iter_check != NULL; iter_check = iter_check->next) {
+                if (strcmp((const char*)iter_check->data, old_name) != 0 && 
+                    strcmp((const char*)iter_check->data, new_name) == 0) {
+                    // Show error dialog
+                    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                        GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+                        GTK_MESSAGE_ERROR,
+                        GTK_BUTTONS_OK,
+                        "A session with the name '%s' already exists. Please choose a different name.",
+                        new_name);
+                    gtk_dialog_run(GTK_DIALOG(dialog));
+                    gtk_widget_destroy(dialog);
+                    g_free(old_name);
+                    return;
+                }
+            }
+            
+            // Update in model
+            sessions_model_remove_session_name(sessions_model, old_name);
+            sessions_model_add_session_name(sessions_model, new_name);
+            
+            // Update in tree view
+            gtk_list_store_set(GTK_LIST_STORE(model), &iter, 0, new_name, -1);
+            
+            // Clear entry
+            gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+            
+            g_free(old_name);
+        }
+    }
+}
+
+static void on_sessions_tree_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+    (void)tree_view;
+    (void)path;
+    (void)column;
+    (void)user_data;
+    
+    // For now, just print the selected session name
+    // In a real implementation, this would load the session
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(tree_view);
+    GtkTreeIter iter;
+    GtkTreeModel *model;
+    
+    if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
+        gchar *session_name;
+        gtk_tree_model_get(model, &iter, 0, &session_name, -1);
+        g_print("Selected session: %s\n", session_name);
+        g_free(session_name);
+    }
+}
+
 static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
+
     if (current_sidebar_mode == SIDEBAR_SESSIONS) {
         gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
@@ -100,7 +266,124 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
-        gtk_label_set_text(GTK_LABEL(sidebar_label), "Sessions\n\n• Session 1\n• Session 2\n• Session 3\n\nClick to load a session.");
+        
+        // Hide the simple label and show the sessions container
+        if (sidebar_label) {
+            gtk_widget_hide(sidebar_label);
+        }
+        
+        // Create sessions UI if not already created
+        if (!sessions_container) {
+            sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+            gtk_container_set_border_width(GTK_CONTAINER(sessions_container), 5);
+            g_object_ref(sessions_container);  /* Keep a reference */
+            
+            // Title
+            sessions_title = gtk_label_new("Sessions");
+            gtk_widget_set_halign(sessions_title, GTK_ALIGN_START);
+            PangoAttrList *attr_list = pango_attr_list_new();
+            PangoAttribute *attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
+            pango_attr_list_insert(attr_list, attr);
+            attr = pango_attr_scale_new(PANGO_SCALE_LARGE);
+            pango_attr_list_insert(attr_list, attr);
+            gtk_label_set_attributes(GTK_LABEL(sessions_title), attr_list);
+            pango_attr_list_unref(attr_list);
+            gtk_box_pack_start(GTK_BOX(sessions_container), sessions_title, FALSE, FALSE, 0);
+            
+            // Entry field
+            sessions_entry = gtk_entry_new();
+            gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
+            gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
+            
+            // Buttons box
+            GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+            gtk_box_pack_start(GTK_BOX(sessions_container), buttons_box, FALSE, FALSE, 0);
+            
+            sessions_add_btn = gtk_button_new_with_label("Add");
+            gtk_widget_set_tooltip_text(sessions_add_btn, "Add new session");
+            atk_object_set_name(gtk_widget_get_accessible(sessions_add_btn), "Add session");
+            g_signal_connect(sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
+            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_add_btn, TRUE, TRUE, 0);
+            
+            sessions_remove_btn = gtk_button_new_with_label("Remove");
+            gtk_widget_set_tooltip_text(sessions_remove_btn, "Remove selected session");
+            atk_object_set_name(gtk_widget_get_accessible(sessions_remove_btn), "Remove session");
+            g_signal_connect(sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
+            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_remove_btn, TRUE, TRUE, 0);
+            
+            sessions_update_btn = gtk_button_new_with_label("Update");
+            gtk_widget_set_tooltip_text(sessions_update_btn, "Update selected session name");
+            atk_object_set_name(gtk_widget_get_accessible(sessions_update_btn), "Update session");
+            g_signal_connect(sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
+            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
+            
+            // Tree view
+            sessions_list_store = gtk_list_store_new(1, G_TYPE_STRING);
+            sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_list_store));
+            g_object_unref(sessions_list_store);
+            
+            GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+            GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session Name", renderer, "text", 0, NULL);
+            gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
+            
+            GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+            gtk_tree_selection_set_mode(selection, GTK_SELECTION_SINGLE);
+            
+            g_signal_connect(sessions_tree_view, "row-activated", G_CALLBACK(on_sessions_tree_row_activated), NULL);
+            
+            // Scrolled window for tree view
+            GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+            gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+            gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
+            gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
+            
+            // Initialize sessions model if not done
+            if (!sessions_model) {
+                sessions_model = sessions_model_new();
+                // Always ensure "Default" session exists
+                const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+                gboolean has_default = FALSE;
+                for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
+                    if (strcmp((const char*)iter->data, "Default") == 0) {
+                        has_default = TRUE;
+                        break;
+                    }
+                }
+                if (!has_default) {
+                    sessions_model_add_session_name(sessions_model, "Default");
+                }
+                // Add some sample sessions for demonstration (only if we don't have them already)
+                if (!existing_sessions) {
+                    sessions_model_add_session_name(sessions_model, "Work Session");
+                    sessions_model_add_session_name(sessions_model, "Reading Session");
+                }
+            }
+            
+            // Populate tree view with existing sessions
+            const GList *session_names = sessions_model_get_session_names(sessions_model);
+            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
+                GtkTreeIter tree_iter;
+                gtk_list_store_append(sessions_list_store, &tree_iter);
+                gtk_list_store_set(sessions_list_store, &tree_iter, 0, (const char*)iter->data, -1);
+            }
+            
+            // Add sessions container to sidebar
+            gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
+        }
+        
+        // Remove sidebar_label if it's in the sidebar, and ensure sessions_container is there
+        if (sidebar_label && gtk_widget_get_parent(sidebar_label) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(sidebar), sidebar_label);
+        }
+        if (gtk_widget_get_parent(sessions_container) == NULL) {
+            gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
+        }
+        
+        // Show sessions container
+        if (sessions_container) {
+            gtk_widget_show_all(sessions_container);
+        }
+        
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_show_all(sidebar);
@@ -119,6 +402,15 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
+        
+        // Remove sessions container if it's in the sidebar, and ensure sidebar_label is there
+        if (sessions_container && gtk_widget_get_parent(sessions_container) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(sidebar), sessions_container);
+        }
+        if (gtk_widget_get_parent(sidebar_label) == NULL) {
+            gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
+        }
+        
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -138,6 +430,15 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
+        
+        // Remove sessions container if it's in the sidebar, and ensure sidebar_label is there
+        if (sessions_container && gtk_widget_get_parent(sessions_container) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(sidebar), sessions_container);
+        }
+        if (gtk_widget_get_parent(sidebar_label) == NULL) {
+            gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
+        }
+        
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -172,6 +473,7 @@ GtkWidget* create_main_window(void) {
     sidebar_label = gtk_label_new("");
     gtk_label_set_justify(GTK_LABEL(sidebar_label), GTK_JUSTIFY_LEFT);
     atk_object_set_name(gtk_widget_get_accessible(sidebar_label), "Sidebar label");
+    g_object_ref(sidebar_label);  /* Keep a reference to prevent destruction when removed */
     gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
 
     /* Content area on the right*/
