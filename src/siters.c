@@ -30,9 +30,10 @@ static GtkWidget *sessions_tree_view;
 static GtkListStore *sessions_list_store;
 static sessions_model_t *sessions_model;
 
-/* Right pane components (controlled via helper toggle) */
+/* Paned widget components */
 static GtkWidget *paned;
 static GtkWidget *right_pane;
+static GtkWidget *left_notebook;
 static GtkWidget *right_notebook;
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -249,7 +250,29 @@ static void on_sessions_tree_row_activated(GtkTreeView *tree_view, GtkTreePath *
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
         gchar *session_name;
         gtk_tree_model_get(model, &iter, 0, &session_name, -1);
-        g_print("Selected session: %s\n", session_name);
+
+        // Add session to left notebook
+        if (left_notebook) {
+            GtkWidget *tab_label = gtk_label_new("Session");
+            GtkWidget *content = gtk_label_new(NULL);
+            gchar *content_text = g_strdup_printf("Loaded session: %s", session_name);
+            gtk_label_set_text(GTK_LABEL(content), content_text);
+            g_free(content_text);
+            gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), content, tab_label);
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), -1);
+        }
+
+        // Add helper tab in right notebook
+        if (right_notebook) {
+            GtkWidget *tab_label = gtk_label_new("Helpers");
+            GtkWidget *content = gtk_label_new(NULL);
+            gchar *content_text = g_strdup_printf("Helper files for session: %s", session_name);
+            gtk_label_set_text(GTK_LABEL(content), content_text);
+            g_free(content_text);
+            gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), content, tab_label);
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), -1);
+        }
+
         g_free(session_name);
     }
 }
@@ -656,13 +679,22 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
     gtk_box_pack_end(GTK_BOX(toolbar), minimize_btn, FALSE, FALSE, 1);
 
+    /* MAIN WINDOW PANED*/
     /* Create a horizontal paned splitter containing two notebooks */
     GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(content_vbox), paned, TRUE, TRUE, 0);
 
     /* Left notebook (primary) */
-    GtkNotebook *left_notebook = GTK_NOTEBOOK(gtk_notebook_new());
-    gtk_paned_pack1(GTK_PANED(paned), GTK_WIDGET(left_notebook), TRUE, FALSE);
+    left_notebook = gtk_notebook_new();
+    gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
+
+    /* Add initial placeholder page so left notebook is visible */
+    {
+        GtkWidget *placeholder_tab = gtk_label_new("Session");
+        GtkWidget *placeholder_page = gtk_label_new("No files opened.");
+        gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), placeholder_page, placeholder_tab);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), 0);
+    }
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -671,6 +703,14 @@ GtkWidget* create_main_window(void) {
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
+
+    /* Add initial placeholder page so right notebook is visible */
+    {
+        GtkWidget *placeholder_tab = gtk_label_new("Helpers");
+        GtkWidget *placeholder_page = gtk_label_new("No helper files opened.");
+        gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), placeholder_page, placeholder_tab);
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), 0);
+    }
 
     /* Right pane toolbar (vertical) */
     GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
