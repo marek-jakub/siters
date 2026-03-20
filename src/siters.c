@@ -352,11 +352,6 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
                 if (!has_default) {
                     sessions_model_add_session_name(sessions_model, "Default");
                 }
-                // Add some sample sessions for demonstration (only if we don't have them already)
-                if (!existing_sessions) {
-                    sessions_model_add_session_name(sessions_model, "Work Session");
-                    sessions_model_add_session_name(sessions_model, "Reading Session");
-                }
             }
             
             // Populate tree view with existing sessions
