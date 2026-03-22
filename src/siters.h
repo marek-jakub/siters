@@ -5,5 +5,7 @@
 
 GtkWidget* create_main_window(void);
 void hide_right_pane(void);
+void save_state();
+void load_state();
 
 #endif

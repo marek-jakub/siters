@@ -1,5 +1,7 @@
 #include <gtk/gtk.h>
 #include <atk/atk.h>
+#include <glib/gkeyfile.h>
+#include <glib/gstdio.h>
 #include "siters.h"
 #include "sessions_model.h"
 #include "session_model.h"
@@ -12,6 +14,14 @@ typedef enum {
     SIDEBAR_SETTINGS
 } SidebarMode;
 
+/* Current window geometry */
+static gint current_width = 1000;
+static gint current_height = 800;
+static gint current_x = -1;
+static gint current_y = -1;
+static gboolean current_maximized = FALSE;
+
+/* Sidebar for sessions, toc and settings */
 static SidebarMode current_sidebar_mode = SIDEBAR_NONE;
 static GtkWidget *sidebar;
 static GtkWidget *sidebar_label;
@@ -35,6 +45,168 @@ static GtkWidget *paned;
 static GtkWidget *right_pane;
 static GtkWidget *left_notebook;
 static GtkWidget *right_notebook;
+
+/* Function prototypes */
+void save_state(void);
+
+/* Save state on closing app */
+static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
+    (void)widget;
+    (void)user_data;
+    save_state();
+    gtk_main_quit();
+}
+
+static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event, gpointer user_data) {
+    (void)user_data;
+    
+    // Update current geometry
+    current_width = event->width;
+    current_height = event->height;
+    current_x = event->x;
+    current_y = event->y;
+    current_maximized = gtk_window_is_maximized(GTK_WINDOW(widget));
+    
+    return FALSE; // Allow further processing
+}
+
+/* State management functions */
+void save_state(void) {
+    GKeyFile *key_file = g_key_file_new();
+    GError *error = NULL;
+    
+    // Create config directory if it doesn't exist
+    const gchar *config_dir = g_get_user_config_dir();
+    gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
+    g_mkdir_with_parents(app_config_dir, 0755);
+    
+    // Save window state
+    if (window) {
+        g_key_file_set_integer(key_file, "Window", "width", current_width);
+        g_key_file_set_integer(key_file, "Window", "height", current_height);
+        g_key_file_set_integer(key_file, "Window", "x", current_x);
+        g_key_file_set_integer(key_file, "Window", "y", current_y);
+        g_key_file_set_boolean(key_file, "Window", "maximized", current_maximized);
+    }
+    
+    // Save sessions
+    if (sessions_model) {
+        const GList *session_names = sessions_model_get_session_names(sessions_model);
+        if (session_names) {
+            // Build comma-separated list of session names
+            GString *names_str = g_string_new("");
+            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
+                if (names_str->len > 0) {
+                    g_string_append(names_str, ",");
+                }
+                g_string_append(names_str, (const char*)iter->data);
+            }
+            g_key_file_set_string(key_file, "Sessions", "names", names_str->str);
+            g_string_free(names_str, TRUE);
+            
+            // For each session, save its data (currently placeholder, as session_model not fully integrated)
+            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
+                const char *session_name = (const char*)iter->data;
+                gchar *section_name = g_strdup_printf("Session_%s", session_name);
+                
+                // Placeholder: save empty document lists
+                // In future, would save actual document URLs from session_model
+                g_key_file_set_string(key_file, section_name, "documents", "");
+                g_key_file_set_string(key_file, section_name, "helper_documents", "");
+                g_key_file_set_string(key_file, section_name, "last_read_document", "");
+                g_key_file_set_string(key_file, section_name, "page_color", "#FFFFFF");
+                g_key_file_set_string(key_file, section_name, "last_read_help_document", "");
+                g_key_file_set_string(key_file, section_name, "helper_page_color", "#FFFFFF");
+                
+                g_free(section_name);
+            }
+        }
+    }
+    
+    // Save to file
+    gchar *config_file = g_build_filename(app_config_dir, "siters.ini", NULL);
+    if (!g_key_file_save_to_file(key_file, config_file, &error)) {
+        g_warning("Failed to save config: %s", error->message);
+        g_error_free(error);
+    }
+    
+    g_key_file_free(key_file);
+    g_free(config_file);
+    g_free(app_config_dir);
+}
+
+void load_state(void) {
+    GKeyFile *key_file = g_key_file_new();
+    GError *error = NULL;
+    
+    const gchar *config_dir = g_get_user_config_dir();
+    gchar *config_file = g_build_filename(config_dir, "siters", "siters.ini", NULL);
+    
+    if (!g_key_file_load_from_file(key_file, config_file, G_KEY_FILE_NONE, &error)) {
+        // File doesn't exist or can't be read, use defaults
+        g_key_file_free(key_file);
+        g_free(config_file);
+        return;
+    }
+    
+    // Load window state
+    gint saved_width = g_key_file_get_integer(key_file, "Window", "width", &error);
+    if (error) { saved_width = 1000; g_error_free(error); error = NULL; }
+    
+    gint saved_height = g_key_file_get_integer(key_file, "Window", "height", &error);
+    if (error) { saved_height = 800; g_error_free(error); error = NULL; }
+    
+    gint saved_x = g_key_file_get_integer(key_file, "Window", "x", &error);
+    if (error) { saved_x = -1; g_error_free(error); error = NULL; }
+    
+    gint saved_y = g_key_file_get_integer(key_file, "Window", "y", &error);
+    if (error) { saved_y = -1; g_error_free(error); error = NULL; }
+    
+    gboolean saved_maximized = g_key_file_get_boolean(key_file, "Window", "maximized", &error);
+    if (error) { saved_maximized = FALSE; g_error_free(error); error = NULL; }
+    
+    // Apply window state if window exists
+    if (window) {
+        gtk_window_set_default_size(GTK_WINDOW(window), saved_width, saved_height);
+        if (saved_x >= 0 && saved_y >= 0) {
+            gtk_window_move(GTK_WINDOW(window), saved_x, saved_y);
+        }
+        if (saved_maximized) {
+            gtk_window_maximize(GTK_WINDOW(window));
+        }
+        
+        // Update current geometry variables
+        current_width = saved_width;
+        current_height = saved_height;
+        current_x = saved_x;
+        current_y = saved_y;
+        current_maximized = saved_maximized;
+    }
+    
+    // Load sessions
+    gchar *names_str = g_key_file_get_string(key_file, "Sessions", "names", &error);
+    if (!error && names_str) {
+        // Initialize sessions_model if not done
+        if (!sessions_model) {
+            sessions_model = sessions_model_new();
+        }
+        
+        // Parse comma-separated names
+        gchar **names_array = g_strsplit(names_str, ",", -1);
+        for (gchar **name = names_array; *name != NULL; name++) {
+            g_strstrip(*name); // Remove whitespace
+            if (strlen(*name) > 0) {
+                sessions_model_add_session_name(sessions_model, *name);
+            }
+        }
+        g_strfreev(names_array);
+        g_free(names_str);
+    }
+    if (error) { g_error_free(error); }
+    
+    g_key_file_free(key_file);
+    g_free(config_file);
+}
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
@@ -101,6 +273,12 @@ static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+static void on_close_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    save_state();
+    gtk_main_quit();
+}
 
 static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
@@ -360,23 +538,6 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
             gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
             gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
             
-            // Initialize sessions model if not done
-            if (!sessions_model) {
-                sessions_model = sessions_model_new();
-                // Always ensure "Default" session exists
-                const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
-                gboolean has_default = FALSE;
-                for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
-                    if (strcmp((const char*)iter->data, "Default") == 0) {
-                        has_default = TRUE;
-                        break;
-                    }
-                }
-                if (!has_default) {
-                    sessions_model_add_session_name(sessions_model, "Default");
-                }
-            }
-            
             // Populate tree view with existing sessions
             const GList *session_names = sessions_model_get_session_names(sessions_model);
             for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
@@ -470,7 +631,25 @@ GtkWidget* create_main_window(void) {
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 800);
 
-    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+    // Initialize sessions model
+    if (!sessions_model) {
+        sessions_model = sessions_model_new();
+        // Always ensure "Default" session exists
+        const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+        gboolean has_default = FALSE;
+        for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
+            if (strcmp((const char*)iter->data, "Default") == 0) {
+                has_default = TRUE;
+                break;
+            }
+        }
+        if (!has_default) {
+            sessions_model_add_session_name(sessions_model, "Default");
+        }
+    }
+
+    g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
+    g_signal_connect(window, "configure-event", G_CALLBACK(on_window_configure), NULL);
 
     /* Main horizontal container: toolbar on left, content on right */
     main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -658,7 +837,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(close_btn), close_icon);
     gtk_widget_set_tooltip_text(close_btn, "Close");
     atk_object_set_name(gtk_widget_get_accessible(close_btn), "Close");
-    g_signal_connect(close_btn, "clicked", G_CALLBACK(gtk_main_quit), NULL);
+    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_close_clicked), NULL);
     gtk_box_pack_end(GTK_BOX(toolbar), close_btn, FALSE, FALSE, 1);
 
     /* Maximize button*/

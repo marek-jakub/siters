@@ -80,7 +80,12 @@ void sessions_model_set_theme(sessions_model_t* model, const char* theme) {
 
 // Utility functions
 void sessions_model_add_session_name(sessions_model_t* model, const char* name) {
-    model->session_names = g_list_append(model->session_names, g_strdup(name));
+        // Check if name already exists. If it exists, do nothing
+        GList* found = g_list_find_custom(model->session_names, name, (GCompareFunc)strcmp);
+        if (found == NULL) {
+            // Name doesn't exist, add it
+            model->session_names = g_list_append(model->session_names, g_strdup(name));
+        }
 }
 
 void sessions_model_remove_session_name(sessions_model_t* model, const char* name) {
