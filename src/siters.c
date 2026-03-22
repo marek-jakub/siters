@@ -40,7 +40,7 @@ static GtkWidget *sessions_tree_view;
 static GtkListStore *sessions_list_store;
 static sessions_model_t *sessions_model;
 
-/* Paned widget components */
+/* Paned/Notebook components */
 static GtkWidget *paned;
 static GtkWidget *right_pane;
 static GtkWidget *left_notebook;
@@ -48,6 +48,7 @@ static GtkWidget *right_notebook;
 
 /* Function prototypes */
 void save_state(void);
+void hide_right_pane(void);
 
 /* Save state on closing app */
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
@@ -247,7 +248,7 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
     if (active) {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-on.png");
         if (right_pane) {
-            gtk_widget_show(GTK_WIDGET(right_pane));
+            gtk_widget_show_all(GTK_WIDGET(right_pane));
         }
     } else {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
@@ -858,9 +859,9 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
     gtk_box_pack_end(GTK_BOX(toolbar), minimize_btn, FALSE, FALSE, 1);
 
-    /* MAIN WINDOW PANED*/
+    /* MAIN WINDOW PANED */
     /* Create a horizontal paned splitter containing two notebooks */
-    GtkWidget *paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(content_vbox), paned, TRUE, TRUE, 0);
 
     /* Left notebook (primary) */
