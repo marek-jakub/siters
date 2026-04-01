@@ -6,7 +6,7 @@ CFLAGS=-Wall -Wextra -Werror -g -Iinclude `pkg-config --cflags gtk+-3.0 poppler-
 LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm
 
 # Main application
-SITERS_SRC=src/main.c src/siters.c
+SITERS_SRC=src/main.c src/siters.c src/sessions_model.c src/session_model.c src/document_model.c
 SITERS_TARGET=siters
 
 # Unit tests

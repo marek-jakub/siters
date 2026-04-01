@@ -45,10 +45,14 @@ static GtkWidget *paned;
 static GtkWidget *right_pane;
 static GtkWidget *left_notebook;
 static GtkWidget *right_notebook;
+static gchar *current_selected_session = NULL;
 
 /* Function prototypes */
 void save_state(void);
+void populate_sessions_treeview(void);
 void hide_right_pane(void);
+static void set_left_notebook_session(const gchar *session_name);
+static void set_right_notebook_session(const gchar *session_name);
 
 /* Save state on closing app */
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
@@ -205,8 +209,26 @@ void load_state(void) {
     }
     if (error) { g_error_free(error); }
     
+    // Update the sessions treeview with loaded sessions
+    populate_sessions_treeview();
+    
     g_key_file_free(key_file);
     g_free(config_file);
+}
+
+void populate_sessions_treeview(void) {
+    if (!sessions_list_store) return;
+    
+    // Clear existing items
+    gtk_list_store_clear(sessions_list_store);
+    
+    // Populate tree view with existing sessions
+    const GList *session_names = sessions_model_get_session_names(sessions_model);
+    for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
+        GtkTreeIter tree_iter;
+        gtk_list_store_append(sessions_list_store, &tree_iter);
+        gtk_list_store_set(sessions_list_store, &tree_iter, 0, (const char*)iter->data, -1);
+    }
 }
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -249,6 +271,7 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-on.png");
         if (right_pane) {
             gtk_widget_show_all(GTK_WIDGET(right_pane));
+            set_right_notebook_session(current_selected_session ? current_selected_session : "Default");
         }
     } else {
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
@@ -307,10 +330,8 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
         // Add to model
         sessions_model_add_session_name(sessions_model, session_name);
         
-        // Add to tree view
-        GtkTreeIter iter;
-        gtk_list_store_append(sessions_list_store, &iter);
-        gtk_list_store_set(sessions_list_store, &iter, 0, session_name, -1);
+        // Update tree view
+        populate_sessions_treeview();
         
         // Clear entry
         gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
@@ -346,8 +367,8 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
         // Remove from model
         sessions_model_remove_session_name(sessions_model, session_name);
         
-        // Remove from tree view
-        gtk_list_store_remove(GTK_LIST_STORE(model), &iter);
+        // Update tree view
+        populate_sessions_treeview();
         
         g_free(session_name);
     }
@@ -403,8 +424,8 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
             sessions_model_remove_session_name(sessions_model, old_name);
             sessions_model_add_session_name(sessions_model, new_name);
             
-            // Update in tree view
-            gtk_list_store_set(GTK_LIST_STORE(model), &iter, 0, new_name, -1);
+            // Update tree view
+            populate_sessions_treeview();
             
             // Clear entry
             gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
@@ -414,46 +435,72 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
-static void on_sessions_tree_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
-    (void)tree_view;
-    (void)path;
-    (void)column;
-    (void)user_data;
-    
-    // For now, just print the selected session name
-    // In a real implementation, this would load the session
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(tree_view);
-    GtkTreeIter iter;
-    GtkTreeModel *model;
-    
-    if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
-        gchar *session_name;
-        gtk_tree_model_get(model, &iter, 0, &session_name, -1);
+static void set_left_notebook_session(const gchar *session_name) {
+    if (!left_notebook) return;
 
-        // Add session to left notebook
-        if (left_notebook) {
-            GtkWidget *tab_label = gtk_label_new("Session");
-            GtkWidget *content = gtk_label_new(NULL);
-            gchar *content_text = g_strdup_printf("Loaded session: %s", session_name);
-            gtk_label_set_text(GTK_LABEL(content), content_text);
-            g_free(content_text);
-            gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), content, tab_label);
-            gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), -1);
-        }
-
-        // Add helper tab in right notebook
-        if (right_notebook) {
-            GtkWidget *tab_label = gtk_label_new("Helpers");
-            GtkWidget *content = gtk_label_new(NULL);
-            gchar *content_text = g_strdup_printf("Helper files for session: %s", session_name);
-            gtk_label_set_text(GTK_LABEL(content), content_text);
-            g_free(content_text);
-            gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), content, tab_label);
-            gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), -1);
-        }
-
-        g_free(session_name);
+    while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook)) > 0) {
+        gtk_notebook_remove_page(GTK_NOTEBOOK(left_notebook), 0);
     }
+
+    gchar *tab_label_text = g_strdup_printf("%s", session_name ? session_name : "No session");
+    GtkWidget *tab_label = gtk_label_new(tab_label_text);
+    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *info_label = gtk_label_new(NULL);
+
+    gchar *info_text = g_strdup_printf("Selected session: %s", session_name ? session_name : "None");
+    gtk_label_set_text(GTK_LABEL(info_label), info_text);
+    g_free(info_text);
+
+    gtk_box_pack_start(GTK_BOX(content_box), info_label, FALSE, FALSE, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), content_box, tab_label);
+    gtk_widget_show_all(left_notebook);
+
+    g_free(tab_label_text);
+}
+
+static void set_right_notebook_session(const gchar *session_name) {
+    if (!right_notebook) return;
+
+    while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) > 0) {
+        gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), 0);
+    }
+
+    const gchar *tab_name = session_name ? session_name : "Helper";
+    gchar *content_text = g_strdup_printf("Helper content for session: %s", session_name ? session_name : "None");
+
+    GtkWidget *tab_label = gtk_label_new(tab_name);
+    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
+    GtkWidget *info_label = gtk_label_new(content_text);
+
+    gtk_box_pack_start(GTK_BOX(content_box), info_label, FALSE, FALSE, 5);
+    gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), content_box, tab_label);
+    gtk_widget_show_all(right_notebook);
+
+    g_free(content_text);
+}
+
+static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    (void)user_data;
+    if (event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_PRIMARY) {
+        GtkTreePath *path = NULL;
+        if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(widget), (gint)event->x, (gint)event->y, &path, NULL, NULL, NULL)) {
+            GtkTreeIter iter;
+            GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(widget));
+            if (gtk_tree_model_get_iter(model, &iter, path)) {
+                gchar *session_name = NULL;
+                gtk_tree_model_get(model, &iter, 0, &session_name, -1);
+                if (session_name) {
+                    set_left_notebook_session(session_name);
+                    set_right_notebook_session(session_name);
+                    if (current_selected_session) g_free(current_selected_session);
+                    current_selected_session = g_strdup(session_name);
+                    g_free(session_name);
+                }
+            }
+            gtk_tree_path_free(path);
+        }
+    }
+    return FALSE;
 }
 
 static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
@@ -469,104 +516,16 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
         
-        // Hide the simple label and show the sessions container
-        if (sidebar_label) {
-            gtk_widget_hide(sidebar_label);
-        }
-        
-        // Create sessions UI if not already created
-        if (!sessions_container) {
-            sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-            gtk_container_set_border_width(GTK_CONTAINER(sessions_container), 5);
-            g_object_ref(sessions_container);  /* Keep a reference */
-            
-            // Title
-            sessions_title = gtk_label_new("Sessions");
-            gtk_widget_set_halign(sessions_title, GTK_ALIGN_START);
-            PangoAttrList *attr_list = pango_attr_list_new();
-            PangoAttribute *attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
-            pango_attr_list_insert(attr_list, attr);
-            attr = pango_attr_scale_new(PANGO_SCALE_LARGE);
-            pango_attr_list_insert(attr_list, attr);
-            gtk_label_set_attributes(GTK_LABEL(sessions_title), attr_list);
-            pango_attr_list_unref(attr_list);
-            gtk_box_pack_start(GTK_BOX(sessions_container), sessions_title, FALSE, FALSE, 0);
-            
-            // Entry field
-            sessions_entry = gtk_entry_new();
-            gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
-            gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
-            
-            // Buttons box
-            GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-            gtk_box_pack_start(GTK_BOX(sessions_container), buttons_box, FALSE, FALSE, 0);
-            
-            sessions_add_btn = gtk_button_new_with_label("Add");
-            gtk_widget_set_tooltip_text(sessions_add_btn, "Add new session");
-            atk_object_set_name(gtk_widget_get_accessible(sessions_add_btn), "Add session");
-            g_signal_connect(sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
-            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_add_btn, TRUE, TRUE, 0);
-            
-            sessions_remove_btn = gtk_button_new_with_label("Remove");
-            gtk_widget_set_tooltip_text(sessions_remove_btn, "Remove selected session");
-            atk_object_set_name(gtk_widget_get_accessible(sessions_remove_btn), "Remove session");
-            g_signal_connect(sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
-            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_remove_btn, TRUE, TRUE, 0);
-            
-            sessions_update_btn = gtk_button_new_with_label("Update");
-            gtk_widget_set_tooltip_text(sessions_update_btn, "Update selected session name");
-            atk_object_set_name(gtk_widget_get_accessible(sessions_update_btn), "Update session");
-            g_signal_connect(sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
-            gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
-            
-            // Tree view
-            sessions_list_store = gtk_list_store_new(1, G_TYPE_STRING);
-            sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_list_store));
-            g_object_unref(sessions_list_store);
-            
-            GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-            GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session Name", renderer, "text", 0, NULL);
-            gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
-            
-            GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
-            gtk_tree_selection_set_mode(selection, GTK_SELECTION_SINGLE);
-            
-            g_signal_connect(sessions_tree_view, "row-activated", G_CALLBACK(on_sessions_tree_row_activated), NULL);
-            
-            // Scrolled window for tree view
-            GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
-            gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-            gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
-            gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
-            
-            // Populate tree view with existing sessions
-            const GList *session_names = sessions_model_get_session_names(sessions_model);
-            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
-                GtkTreeIter tree_iter;
-                gtk_list_store_append(sessions_list_store, &tree_iter);
-                gtk_list_store_set(sessions_list_store, &tree_iter, 0, (const char*)iter->data, -1);
-            }
-            
-            // Add sessions container to sidebar
-            gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
-        }
-        
-        // Remove sidebar_label if it's in the sidebar, and ensure sessions_container is there
-        if (sidebar_label && gtk_widget_get_parent(sidebar_label) != NULL) {
-            gtk_container_remove(GTK_CONTAINER(sidebar), sidebar_label);
-        }
-        if (gtk_widget_get_parent(sessions_container) == NULL) {
-            gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
-        }
+        // Hide other sidebar contents
+        gtk_widget_hide(sidebar_label);
+        gtk_widget_hide(sessions_container);
         
         // Show sessions container
-        if (sessions_container) {
-            gtk_widget_show_all(sessions_container);
-        }
+        gtk_widget_show_all(sessions_container);
         
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_show_all(sidebar);
+        gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_SESSIONS;
     }
 }
@@ -583,18 +542,17 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
         
-        // Remove sessions container if it's in the sidebar, and ensure sidebar_label is there
-        if (sessions_container && gtk_widget_get_parent(sessions_container) != NULL) {
-            gtk_container_remove(GTK_CONTAINER(sidebar), sessions_container);
-        }
-        if (gtk_widget_get_parent(sidebar_label) == NULL) {
-            gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
-        }
+        // Hide other sidebar contents
+        gtk_widget_hide(sidebar_label);
+        gtk_widget_hide(sessions_container);
         
+        // Show sidebar_label with TOC text
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
+        gtk_widget_show_all(sidebar_label);
+        
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_show_all(sidebar);
+        gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_TOC;
     }
 }
@@ -611,18 +569,17 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
         
-        // Remove sessions container if it's in the sidebar, and ensure sidebar_label is there
-        if (sessions_container && gtk_widget_get_parent(sessions_container) != NULL) {
-            gtk_container_remove(GTK_CONTAINER(sidebar), sessions_container);
-        }
-        if (gtk_widget_get_parent(sidebar_label) == NULL) {
-            gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
-        }
+        // Hide other sidebar contents
+        gtk_widget_hide(sidebar_label);
+        gtk_widget_hide(sessions_container);
         
+        // Show sidebar_label with settings text
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
+        gtk_widget_show_all(sidebar_label);
+        
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_show_all(sidebar);
+        gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_SETTINGS;
     }
 }
@@ -673,6 +630,74 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(sidebar_label), "Sidebar label");
     g_object_ref(sidebar_label);  /* Keep a reference to prevent destruction when removed */
     gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
+    gtk_widget_hide(sidebar_label);
+
+    /* Sessions container */
+    sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(sessions_container), 5);
+    g_object_ref(sessions_container);  /* Keep a reference */
+    
+    // Title
+    sessions_title = gtk_label_new("Sessions");
+    gtk_widget_set_halign(sessions_title, GTK_ALIGN_START);
+    PangoAttrList *attr_list = pango_attr_list_new();
+    PangoAttribute *attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
+    pango_attr_list_insert(attr_list, attr);
+    attr = pango_attr_scale_new(PANGO_SCALE_LARGE);
+    pango_attr_list_insert(attr_list, attr);
+    gtk_label_set_attributes(GTK_LABEL(sessions_title), attr_list);
+    pango_attr_list_unref(attr_list);
+    gtk_box_pack_start(GTK_BOX(sessions_container), sessions_title, FALSE, FALSE, 0);
+    
+    // Entry field
+    sessions_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
+    gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
+    
+    // Buttons box
+    GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
+    gtk_box_pack_start(GTK_BOX(sessions_container), buttons_box, FALSE, FALSE, 0);
+    
+    sessions_add_btn = gtk_button_new_with_label("Add");
+    gtk_widget_set_tooltip_text(sessions_add_btn, "Add new session");
+    atk_object_set_name(gtk_widget_get_accessible(sessions_add_btn), "Add session");
+    g_signal_connect(sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_add_btn, TRUE, TRUE, 0);
+    
+    sessions_remove_btn = gtk_button_new_with_label("Remove");
+    gtk_widget_set_tooltip_text(sessions_remove_btn, "Remove selected session");
+    atk_object_set_name(gtk_widget_get_accessible(sessions_remove_btn), "Remove session");
+    g_signal_connect(sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_remove_btn, TRUE, TRUE, 0);
+    
+    sessions_update_btn = gtk_button_new_with_label("Update");
+    gtk_widget_set_tooltip_text(sessions_update_btn, "Update selected session name");
+    atk_object_set_name(gtk_widget_get_accessible(sessions_update_btn), "Update session");
+    g_signal_connect(sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
+    
+    // Tree view
+    sessions_list_store = gtk_list_store_new(1, G_TYPE_STRING);
+    sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_list_store));
+    g_object_unref(sessions_list_store);
+    
+    GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session Name", renderer, "text", 0, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
+
+    g_signal_connect(sessions_tree_view, "button-press-event", G_CALLBACK(on_sessions_treeview_button_press), NULL);
+    
+    // Scrolled window for tree view
+    GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
+    gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
+    
+    // Populate tree view with existing sessions
+    populate_sessions_treeview();
+    
+    gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
+    gtk_widget_hide(sessions_container);
 
     /* Content area on the right*/
     content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -868,13 +893,8 @@ GtkWidget* create_main_window(void) {
     left_notebook = gtk_notebook_new();
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
 
-    /* Add initial placeholder page so left notebook is visible */
-    {
-        GtkWidget *placeholder_tab = gtk_label_new("Session");
-        GtkWidget *placeholder_page = gtk_label_new("No files opened.");
-        gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), placeholder_page, placeholder_tab);
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), 0);
-    }
+    // Add initial placeholder page so it is visible immediately
+    set_left_notebook_session("Default");
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -884,13 +904,9 @@ GtkWidget* create_main_window(void) {
     right_notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
 
-    /* Add initial placeholder page so right notebook is visible */
-    {
-        GtkWidget *placeholder_tab = gtk_label_new("Helpers");
-        GtkWidget *placeholder_page = gtk_label_new("No helper files opened.");
-        gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), placeholder_page, placeholder_tab);
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), 0);
-    }
+    /* Add initial content so right notebook is visible when shown */
+    set_right_notebook_session("Default");
+    current_selected_session = g_strdup("Default");
 
     /* Right pane toolbar (vertical) */
     GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

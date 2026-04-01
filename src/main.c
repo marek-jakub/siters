@@ -5,6 +5,7 @@
 extern void load_state(void);
 
 void signal_handler(int sig) {
+    (void)sig;  // Mark parameter as intentionally unused
     save_state();
     exit(0);
 }
