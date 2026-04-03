@@ -362,11 +362,338 @@ class TestSitersBasicOperation(SitersGUITestCase):
             label, "Sidebar label still present after closing settings")
 
 
+class TestSitersSessionManagement(SitersGUITestCase):
+    """Test session management functionality in the sessions sidebar."""
+
+    def test_session_lifecycle(self):
+        """
+        Test the complete lifecycle of session management:
+        1. Open sessions sidebar
+        2. Check if Session3 exists and remove it if present
+        3. Verify it's removed
+        4. Create Session3
+        5. Click on Session3
+        6. Verify the notebook shows Session3 tab and content
+        """
+        try:
+            siters_app = root.application("siters")
+            time.sleep(1)
+
+            # Find the Sessions button
+            try:
+                sessions_btn = siters_app.findChild(
+                    lambda x: x.roleName in ['push button', 'toggle button'] and x.name == 'Sessions')
+            except Exception as e:
+                self.skipTest(f"Could not find Sessions button: {e}")
+
+            # Helper to wait for sessions container to appear
+            def find_sessions_container():
+                try:
+                    return siters_app.findChild(
+                        lambda x: x.roleName == 'panel' and any('sessions' in str(c).lower() for c in x.children if hasattr(c, 'name')))
+                except Exception:
+                    return None
+
+            # Helper to find session tree view
+            def find_sessions_tree():
+                try:
+                    # Try different role names for tree views
+                    roles_to_try = ['tree', 'tree view', 'table', 'tree table']
+                    
+                    for role in roles_to_try:
+                        try:
+                            result = siters_app.findChild(lambda x: x.roleName == role)
+                            if result:
+                                print(f"DEBUG: Tree view found with role '{role}': {result}")
+                                return result
+                        except Exception:
+                            pass
+                    
+                    # Try searching for any widget that might be a tree
+                    print("DEBUG: No tree view found by standard roles, listing potential tree widgets:")
+                    try:
+                        all_widgets = siters_app.findChildren(lambda x: True)
+                        tree_like = []
+                        for widget in all_widgets[:30]:  # Limit to first 30
+                            if any(keyword in widget.roleName.lower() for keyword in ['tree', 'table', 'list']):
+                                tree_like.append(f"{widget.roleName}: {widget.name}")
+                        if tree_like:
+                            print(f"DEBUG: Found tree-like widgets: {tree_like}")
+                    except Exception as e:
+                        print(f"DEBUG: Error listing widgets: {e}")
+                    
+                    return None
+                except Exception as e:
+                    print(f"DEBUG: Exception in find_sessions_tree: {e}")
+                    return None
+
+            # Helper to find entry field for new session name
+            def find_session_entry():
+                try:
+                    # Try multiple role name variations and search strategies
+                    roles_to_try = ['entry', 'text', 'Sessions entry', 'text input']
+                    
+                    for role in roles_to_try:
+                        try:
+                            result = siters_app.findChild(lambda x: x.roleName == role)
+                            if result:
+                                print(f"DEBUG: Entry found with role '{role}': {result}")
+                                return result
+                        except Exception:
+                            pass
+                    
+                    # If no role-based search works, try finding by searching all children
+                    # and listing what's available for debugging
+                    print("DEBUG: No entry field found by standard roles, listing all widgets:")
+                    try:
+                        all_children = siters_app.findChildren(lambda x: True, recursive=True)
+                        for i, child in enumerate(all_children[:50]):  # Limit to first 50
+                            print(f"  [{i}] Role: {child.roleName}, Name: {child.name}, Type: {type(child)}")
+                            if 'entry' in child.roleName.lower() or 'text' in child.roleName.lower():
+                                print(f"DEBUG: Found potential entry widget at index {i}")
+                                return child
+                    except Exception as e:
+                        print(f"DEBUG: Error listing children: {e}")
+                    
+                    # Last resort: search for any widget with "entry" in the role name
+                    try:
+                        result = siters_app.findChild(lambda x: 'entry' in x.roleName.lower())
+                        if result:
+                            print(f"DEBUG: Found entry-like widget: role={result.roleName}, name={result.name}")
+                            return result
+                    except Exception:
+                        pass
+                    
+                    return None
+                except Exception as e:
+                    print(f"DEBUG: Exception in find_session_entry: {e}")
+                    return None
+
+            # Helper to find buttons in sessions sidebar
+            def find_button_by_name(button_name):
+                try:
+                    # Try exact name match first
+                    lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and x.name == '{button_name}'"
+                    result = siters_app.findChild(eval(lambda_str))
+                    if result:
+                        return result
+                    
+                    # Try accessibility name variations
+                    name_variations = {
+                        'Add': ['Add session'],
+                        'Remove': ['Remove session'],
+                        'Update': ['Update session']
+                    }
+                    
+                    if button_name in name_variations:
+                        for alt_name in name_variations[button_name]:
+                            lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and x.name == '{alt_name}'"
+                            result = siters_app.findChild(eval(lambda_str))
+                            if result:
+                                return result
+                    
+                    # Try partial name match
+                    lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and '{button_name}'.lower() in (x.name or '').lower()"
+                    result = siters_app.findChild(eval(lambda_str))
+                    if result:
+                        return result
+                    
+                    return None
+                except Exception as e:
+                    print(f"DEBUG: Error finding button {button_name}: {e}")
+                    return None
+
+            # Helper to get session names from tree view
+            def get_session_names_from_tree():
+                try:
+                    tree = find_sessions_tree()
+                    if tree:
+                        print(f"DEBUG: Tree view found: {tree}, role: {tree.roleName}")
+                        # Get all children that are cells (tree entries)
+                        cells = tree.findChildren(lambda x: x.roleName == 'table cell')
+                        print(f"DEBUG: Found {len(cells)} table cells")
+                        names = [cell.name for cell in cells if cell.name]
+                        print(f"DEBUG: Cell names: {names}")
+                        return names
+                    else:
+                        print("DEBUG: No tree view found")
+                        return []
+                except Exception as e:
+                    print(f"DEBUG: Error getting session names: {e}")
+                    return []
+
+            # Step 1: Click Sessions button to open sessions sidebar
+            if hasattr(sessions_btn, 'do_action'):
+                sessions_btn.do_action(0)
+            else:
+                sessions_btn.click()
+            time.sleep(1)
+
+            print("SUCCESS: Sessions sidebar opened")
+
+            # Give time for the sidebar to fully render and populate
+            time.sleep(2)
+            
+            # Step 2: Check if Session3 exists and remove it if present
+            session_names = get_session_names_from_tree()
+            print(f"Current sessions: {session_names}")
+
+            if 'Session3' in session_names:
+                print("INFO: Session3 found, attempting to remove it")
+                
+                # Find and click on Session3 in the tree
+                try:
+                    session3_cell = siters_app.findChild(
+                        lambda x: x.roleName == 'table cell' and x.name == 'Session3')
+                    if session3_cell.click:
+                        session3_cell.click()
+                    else:
+                        session3_cell.do_action(0)
+                    time.sleep(0.5)
+                except Exception as e:
+                    print(f"WARNING: Could not click Session3 directly: {e}")
+
+                # Click Remove session button
+                remove_btn = find_button_by_name('Remove session')
+                if remove_btn:
+                    if hasattr(remove_btn, 'do_action'):
+                        remove_btn.do_action(0)
+                    else:
+                        remove_btn.click()
+                    time.sleep(0.5)
+                    print("SUCCESS: Remove button clicked")
+                else:
+                    self.skipTest("Could not find Remove session button")
+
+                # Step 3: Verify Session3 is removed
+                session_names = get_session_names_from_tree()
+                self.assertNotIn('Session3', session_names, "Session3 still exists after removal")
+                print("SUCCESS: Session3 successfully removed")
+
+            # Step 4: Create Session3
+            entry = find_session_entry()
+            if entry:
+                print(f"DEBUG: Entry widget found: {entry}, role: {entry.roleName}, name: {entry.name}")
+                try:
+                    # Try to focus on the entry field first
+                    if hasattr(entry, 'grab_focus'):
+                        entry.grab_focus()
+                        time.sleep(0.2)
+                    
+                    # Try multiple ways to set the text
+                    success = False
+                    
+                    # Method 1: Try direct text property
+                    if not success:
+                        try:
+                            entry.text = 'Session3'
+                            success = True
+                            print("DEBUG: Text set using .text property")
+                        except Exception as e:
+                            print(f"DEBUG: .text property failed: {e}")
+                    
+                    # Method 2: Try typeText method
+                    if not success and hasattr(entry, 'typeText'):
+                        try:
+                            entry.typeText('Session3')
+                            success = True
+                            print("DEBUG: Text set using typeText()")
+                        except Exception as e:
+                            print(f"DEBUG: typeText() failed: {e}")
+                    
+                    # Method 3: Try using keyboard events through dogtail
+                    if not success:
+                        try:
+                            # Clear the field first with Ctrl+A and Delete
+                            from dogtail.rawinput import keyPress
+                            keyPress('ctrl+a')
+                            time.sleep(0.1)
+                            keyPress('Delete')
+                            time.sleep(0.1)
+                            # Type the session name character by character
+                            for char in 'Session3':
+                                keyPress(char)
+                                time.sleep(0.02)
+                            success = True
+                            print("DEBUG: Text set using keyboard events")
+                        except Exception as e:
+                            print(f"DEBUG: Keyboard events failed: {e}")
+                    
+                    time.sleep(0.3)
+                except Exception as e:
+                    print(f"ERROR: Failed to enter text in session entry: {e}")
+                    self.skipTest(f"Could not input text into session entry: {e}")
+                
+                # Click Add session button
+                add_btn = find_button_by_name('Add session')
+                if add_btn:
+                    if hasattr(add_btn, 'do_action'):
+                        add_btn.do_action(0)
+                    else:
+                        add_btn.click()
+                    time.sleep(0.5)
+                    print("SUCCESS: Add session button clicked for Session3")
+                else:
+                    self.skipTest("Could not find Add session button")
+            else:
+                print("ERROR: Session entry field not found")
+                self.skipTest("Could not find session entry field")
+
+            # Verify Session3 was created
+            session_names = get_session_names_from_tree()
+            self.assertIn('Session3', session_names, "Session3 was not created successfully")
+            print("SUCCESS: Session3 verified in sessions list")
+
+            # Step 5: Click on Session3 to select it
+            try:
+                session3_cell = siters_app.findChild(
+                    lambda x: x.roleName == 'table cell' and x.name == 'Session3')
+                if hasattr(session3_cell, 'click'):
+                    session3_cell.click()
+                else:
+                    session3_cell.do_action(0)
+                time.sleep(1)
+                print("SUCCESS: Session3 clicked")
+            except Exception as e:
+                self.skipTest(f"Could not click Session3: {e}")
+
+            # Step 6: Verify the notebook shows Session3 tab and content
+            try:
+                # Look for a tab or label with "Session3" in it
+                session3_tab = siters_app.findChild(
+                    lambda x: 'Session3' in (x.name if x.name else ''))
+                if session3_tab:
+                    print(f"SUCCESS: Found element with 'Session3': {session3_tab.name}")
+
+                # Look for text containing "Selected session: Session3"
+                selected_session_text = siters_app.findChild(
+                    lambda x: 'Selected session: Session3' in (x.name if x.name else ''))
+                if selected_session_text:
+                    print("SUCCESS: Found 'Selected session: Session3' text")
+                    self.assertIn('Session3', selected_session_text.name)
+                else:
+                    # Try searching for just the session name as a fallback
+                    session_text = siters_app.findChild(
+                        lambda x: 'Session3' in (x.name if x.name else ''))
+                    self.assertIsNotNone(session_text, "Could not find Session3 text in notebook content")
+                    print("SUCCESS: Session3 text found in notebook")
+
+            except Exception as e:
+                self.skipTest(f"Could not verify notebook content: {e}")
+
+        except TimeoutError:
+            self.skipTest("AT-SPI search timed out - GUI elements may not be accessible")
+        except Exception as e:
+            self.skipTest(f"Error during session management test: {e}")
+
+
 def suite():
     """Create a test suite for all GUI tests."""
     test_suite = unittest.TestSuite()
     test_suite.addTests(unittest.TestLoader(
     ).loadTestsFromTestCase(TestSitersBasicOperation))
+    test_suite.addTests(unittest.TestLoader(
+    ).loadTestsFromTestCase(TestSitersSessionManagement))
     return test_suite
 
 

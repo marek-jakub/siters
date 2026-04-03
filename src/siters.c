@@ -653,6 +653,7 @@ GtkWidget* create_main_window(void) {
     sessions_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
     gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
+    atk_object_set_name(gtk_widget_get_accessible(sessions_entry), "Sessions entry");
     
     // Buttons box
     GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
