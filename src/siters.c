@@ -109,6 +109,12 @@ void save_state(void) {
             g_key_file_set_string(key_file, "Sessions", "names", names_str->str);
             g_string_free(names_str, TRUE);
             
+            // Save the last open session
+            const char *last_session = sessions_model_get_last_open_session(sessions_model);
+            if (last_session) {
+                g_key_file_set_string(key_file, "Sessions", "last_open_session", last_session);
+            }
+            
             // For each session, save its data (currently placeholder, as session_model not fully integrated)
             for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
                 const char *session_name = (const char*)iter->data;
@@ -207,10 +213,33 @@ void load_state(void) {
         g_strfreev(names_array);
         g_free(names_str);
     }
+    if (error) { g_error_free(error); error = NULL; }
+    
+    // Load last open session
+    gchar *last_session = g_key_file_get_string(key_file, "Sessions", "last_open_session", &error);
+    if (!error && last_session && sessions_model) {
+        sessions_model_set_last_open_session(sessions_model, last_session);
+        g_free(last_session);
+    } else if (sessions_model) {
+        // If no last session was saved, default to "Default"
+        sessions_model_set_last_open_session(sessions_model, "Default");
+    }
     if (error) { g_error_free(error); }
     
     // Update the sessions treeview with loaded sessions
     populate_sessions_treeview();
+    
+    // If the loaded last_open_session is different from current_selected_session, update the UI
+    if (sessions_model && current_selected_session) {
+        const char *loaded_session = sessions_model_get_last_open_session(sessions_model);
+        if (loaded_session && strcmp(loaded_session, current_selected_session) != 0) {
+            // Update current_selected_session and switch notebooks to the loaded session
+            g_free(current_selected_session);
+            current_selected_session = g_strdup(loaded_session);
+            set_left_notebook_session(loaded_session);
+            set_right_notebook_session(loaded_session);
+        }
+    }
     
     g_key_file_free(key_file);
     g_free(config_file);
@@ -494,6 +523,12 @@ static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventBut
                     set_right_notebook_session(session_name);
                     if (current_selected_session) g_free(current_selected_session);
                     current_selected_session = g_strdup(session_name);
+                    
+                    // Update the last open session in the model
+                    if (sessions_model) {
+                        sessions_model_set_last_open_session(sessions_model, session_name);
+                    }
+                    
                     g_free(session_name);
                 }
             }
@@ -895,7 +930,15 @@ GtkWidget* create_main_window(void) {
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
 
     // Add initial placeholder page so it is visible immediately
-    set_left_notebook_session("Default");
+    // Use last open session if available, otherwise default to "Default"
+    const char *initial_session = "Default";
+    if (sessions_model) {
+        const char *last_session = sessions_model_get_last_open_session(sessions_model);
+        if (last_session) {
+            initial_session = last_session;
+        }
+    }
+    set_left_notebook_session(initial_session);
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -906,8 +949,8 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
 
     /* Add initial content so right notebook is visible when shown */
-    set_right_notebook_session("Default");
-    current_selected_session = g_strdup("Default");
+    set_right_notebook_session(initial_session);
+    current_selected_session = g_strdup(initial_session);
 
     /* Right pane toolbar (vertical) */
     GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

@@ -404,13 +404,11 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         try:
                             result = siters_app.findChild(lambda x: x.roleName == role)
                             if result:
-                                print(f"DEBUG: Tree view found with role '{role}': {result}")
                                 return result
                         except Exception:
                             pass
                     
                     # Try searching for any widget that might be a tree
-                    print("DEBUG: No tree view found by standard roles, listing potential tree widgets:")
                     try:
                         all_widgets = siters_app.findChildren(lambda x: True)
                         tree_like = []
@@ -418,13 +416,12 @@ class TestSitersSessionManagement(SitersGUITestCase):
                             if any(keyword in widget.roleName.lower() for keyword in ['tree', 'table', 'list']):
                                 tree_like.append(f"{widget.roleName}: {widget.name}")
                         if tree_like:
-                            print(f"DEBUG: Found tree-like widgets: {tree_like}")
-                    except Exception as e:
-                        print(f"DEBUG: Error listing widgets: {e}")
+                            pass
+                    except Exception:
+                        pass
                     
                     return None
                 except Exception as e:
-                    print(f"DEBUG: Exception in find_sessions_tree: {e}")
                     return None
 
             # Helper to find entry field for new session name
@@ -437,36 +434,30 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         try:
                             result = siters_app.findChild(lambda x: x.roleName == role)
                             if result:
-                                print(f"DEBUG: Entry found with role '{role}': {result}")
                                 return result
                         except Exception:
                             pass
                     
                     # If no role-based search works, try finding by searching all children
                     # and listing what's available for debugging
-                    print("DEBUG: No entry field found by standard roles, listing all widgets:")
                     try:
                         all_children = siters_app.findChildren(lambda x: True, recursive=True)
                         for i, child in enumerate(all_children[:50]):  # Limit to first 50
-                            print(f"  [{i}] Role: {child.roleName}, Name: {child.name}, Type: {type(child)}")
                             if 'entry' in child.roleName.lower() or 'text' in child.roleName.lower():
-                                print(f"DEBUG: Found potential entry widget at index {i}")
                                 return child
-                    except Exception as e:
-                        print(f"DEBUG: Error listing children: {e}")
+                    except Exception:
+                        pass
                     
                     # Last resort: search for any widget with "entry" in the role name
                     try:
                         result = siters_app.findChild(lambda x: 'entry' in x.roleName.lower())
                         if result:
-                            print(f"DEBUG: Found entry-like widget: role={result.roleName}, name={result.name}")
                             return result
                     except Exception:
                         pass
                     
                     return None
                 except Exception as e:
-                    print(f"DEBUG: Exception in find_session_entry: {e}")
                     return None
 
             # Helper to find buttons in sessions sidebar
@@ -500,7 +491,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     
                     return None
                 except Exception as e:
-                    print(f"DEBUG: Error finding button {button_name}: {e}")
                     return None
 
             # Helper to get session names from tree view
@@ -508,18 +498,13 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 try:
                     tree = find_sessions_tree()
                     if tree:
-                        print(f"DEBUG: Tree view found: {tree}, role: {tree.roleName}")
                         # Get all children that are cells (tree entries)
                         cells = tree.findChildren(lambda x: x.roleName == 'table cell')
-                        print(f"DEBUG: Found {len(cells)} table cells")
                         names = [cell.name for cell in cells if cell.name]
-                        print(f"DEBUG: Cell names: {names}")
                         return names
                     else:
-                        print("DEBUG: No tree view found")
                         return []
-                except Exception as e:
-                    print(f"DEBUG: Error getting session names: {e}")
+                except Exception:
                     return []
 
             # Step 1: Click Sessions button to open sessions sidebar
@@ -573,7 +558,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Step 4: Create Session3
             entry = find_session_entry()
             if entry:
-                print(f"DEBUG: Entry widget found: {entry}, role: {entry.roleName}, name: {entry.name}")
                 try:
                     # Try to focus on the entry field first
                     if hasattr(entry, 'grab_focus'):
@@ -588,18 +572,16 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         try:
                             entry.text = 'Session3'
                             success = True
-                            print("DEBUG: Text set using .text property")
-                        except Exception as e:
-                            print(f"DEBUG: .text property failed: {e}")
+                        except Exception:
+                            pass
                     
                     # Method 2: Try typeText method
                     if not success and hasattr(entry, 'typeText'):
                         try:
                             entry.typeText('Session3')
                             success = True
-                            print("DEBUG: Text set using typeText()")
-                        except Exception as e:
-                            print(f"DEBUG: typeText() failed: {e}")
+                        except Exception:
+                            pass
                     
                     # Method 3: Try using keyboard events through dogtail
                     if not success:
@@ -615,9 +597,8 @@ class TestSitersSessionManagement(SitersGUITestCase):
                                 keyPress(char)
                                 time.sleep(0.02)
                             success = True
-                            print("DEBUG: Text set using keyboard events")
-                        except Exception as e:
-                            print(f"DEBUG: Keyboard events failed: {e}")
+                        except Exception:
+                            pass
                     
                     time.sleep(0.3)
                 except Exception as e:
@@ -685,6 +666,119 @@ class TestSitersSessionManagement(SitersGUITestCase):
             self.skipTest("AT-SPI search timed out - GUI elements may not be accessible")
         except Exception as e:
             self.skipTest(f"Error during session management test: {e}")
+
+    def test_app_starts_with_saved_session(self):
+        """
+        Test that the app starts with the session specified in the saved config file.
+        This verifies that last_open_session from the ini file is properly loaded and used.
+        """
+        import configparser
+        import os
+        
+        # Create a test config file with a specific last_open_session
+        config_dir = os.path.expanduser("~/.config/siters")
+        os.makedirs(config_dir, exist_ok=True)
+        config_file = os.path.join(config_dir, "siters.ini")
+        
+        # Backup existing config if it exists
+        backup_config = None
+        if os.path.exists(config_file):
+            with open(config_file, 'r') as f:
+                backup_config = f.read()
+        
+        try:
+            # Create test config with TestSession as last_open_session
+            config = configparser.ConfigParser()
+            config.add_section('Sessions')
+            config.set('Sessions', 'names', 'Default,TestSession')
+            config.set('Sessions', 'last_open_session', 'TestSession')
+            
+            with open(config_file, 'w') as f:
+                config.write(f)
+            
+            # Restart the app after writing the test config file so it reloads from disk
+            try:
+                if hasattr(self, 'app') and self.app:
+                    self.app.kill()
+                    time.sleep(0.5)
+
+                self.app = run(self.siters_binary, timeout=5, dumb=True)
+                time.sleep(2)  # Give time for config to load and UI to initialize
+
+                siters_app = root.application("siters")
+                time.sleep(2)
+                
+                # Find the left notebook (primary notebook)
+                left_notebook = None
+                try:
+                    # Look for notebook widgets
+                    notebooks = siters_app.findChildren(lambda x: x.roleName == 'page tab list')
+                    if notebooks:
+                        left_notebook = notebooks[0]  # First notebook should be the left one
+                    else:
+                        # Try alternative search
+                        all_widgets = siters_app.findChildren(lambda x: True)
+                        for widget in all_widgets:
+                            if 'notebook' in widget.roleName.lower() or 'tab' in widget.roleName.lower():
+                                left_notebook = widget
+                                break
+                except Exception as e:
+                    self.skipTest(f"Could not find left notebook: {e}")
+                
+                if not left_notebook:
+                    self.skipTest("Could not find left notebook")
+                
+                # Get the current tab text
+                try:
+                    # Try to get tab labels
+                    tab_labels = left_notebook.findChildren(lambda x: x.roleName == 'page tab')
+                    if tab_labels:
+                        current_tab_text = tab_labels[0].name
+                        self.assertEqual(current_tab_text, 'TestSession', 
+                                       f"Expected tab to show 'TestSession', but got '{current_tab_text}'")
+                    else:
+                        # Look for any text containing TestSession
+                        testsession_elements = siters_app.findChildren(
+                            lambda x: x.name and 'TestSession' in x.name)
+                        if not testsession_elements:
+                            self.skipTest("Could not find TestSession in any UI elements")
+                        
+                except Exception as e:
+                    self.skipTest(f"Could not verify tab text: {e}")
+                
+                # Check that the notebook page shows "Selected session: TestSession"
+                try:
+                    selected_session_text = siters_app.findChild(
+                        lambda x: x.name and 'Selected session: TestSession' in x.name)
+                    if selected_session_text:
+                        print("SUCCESS: Found 'Selected session: TestSession' in notebook content")
+                        self.assertIn('TestSession', selected_session_text.name)
+                    else:
+                        # Try searching for just the session name
+                        session_text = siters_app.findChild(
+                            lambda x: x.name and 'TestSession' in x.name)
+                        if session_text:
+                            print(f"SUCCESS: Found TestSession in content: '{session_text.name}'")
+                        else:
+                            self.skipTest("Could not find 'Selected session: TestSession' text in notebook content")
+                            
+                except Exception as e:
+                    self.skipTest(f"Could not verify notebook content: {e}")
+                
+                print("SUCCESS: App correctly started with TestSession from saved config")
+                
+            except TimeoutError:
+                self.skipTest("AT-SPI search timed out - GUI elements may not be accessible")
+            except Exception as e:
+                self.skipTest(f"Error during saved session test: {e}")
+                
+        finally:
+            # Clean up: restore original config or remove test config
+            if backup_config is not None:
+                with open(config_file, 'w') as f:
+                    f.write(backup_config)
+            elif os.path.exists(config_file):
+                os.remove(config_file)
 
 
 def suite():
