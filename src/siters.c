@@ -1243,6 +1243,12 @@ GtkWidget* create_main_window(void) {
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 800);
 
+    // Set minimal size to prevent unusable layouts
+    GdkGeometry hints = {0};
+    hints.min_width = 1000;
+    hints.min_height = 800;
+    gtk_window_set_geometry_hints(GTK_WINDOW(window), NULL, &hints, GDK_HINT_MIN_SIZE);
+
     // Initialize sessions model
     if (!sessions_model) {
         sessions_model = sessions_model_new();
