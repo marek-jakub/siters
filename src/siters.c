@@ -114,6 +114,15 @@ static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event,
     return FALSE; // Allow further processing
 }
 
+static void update_window_title_for_session(const char *session_name) {
+    if (!window) return;
+
+    const char *name = (session_name && *session_name) ? session_name : "Default";
+    gchar *title = g_strdup_printf("Siters - %s", name);
+    gtk_window_set_title(GTK_WINDOW(window), title);
+    g_free(title);
+}
+
 /* State management functions */
 void save_state(void) {
     // Save current session's open tabs before saving state
@@ -382,6 +391,7 @@ void load_state(void) {
             g_free(current_selected_session);
             current_selected_session = g_strdup(loaded_session);
             restore_open_tabs_for_session(loaded_session);
+            update_window_title_for_session(current_selected_session);
         }
     }
     
@@ -556,6 +566,20 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
         
         // Update tree view
         populate_sessions_treeview();
+
+        // If the removed session is currently selected, switch to "Default" or first remaining session
+        if (current_selected_session && strcmp(current_selected_session, session_name) == 0) {
+            g_free(current_selected_session);
+            current_selected_session = g_strdup("Default"); // or first remaining session
+
+            restore_open_tabs_for_session(current_selected_session);
+
+            if (sessions_model) {
+                sessions_model_set_last_open_session(sessions_model, current_selected_session);
+            }
+
+            update_window_title_for_session(current_selected_session);
+        }
         
         g_free(session_name);
 
@@ -616,6 +640,16 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
             
             // Update tree view
             populate_sessions_treeview();
+
+            // If the updated session is currently selected, update current_selected_session and window title
+            if (current_selected_session && strcmp(current_selected_session, old_name) == 0) {
+                g_free(current_selected_session);
+                current_selected_session = g_strdup(new_name);
+                if (sessions_model) {
+                    sessions_model_set_last_open_session(sessions_model, current_selected_session);
+                }
+                update_window_title_for_session(current_selected_session);
+            }
             
             // Clear entry
             gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
@@ -678,6 +712,7 @@ static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventBut
                     
                     if (current_selected_session) g_free(current_selected_session);
                     current_selected_session = g_strdup(session_name);
+                    update_window_title_for_session(current_selected_session);
                     
                     // Update the last open session in the model
                     if (sessions_model) {
@@ -1591,6 +1626,7 @@ GtkWidget* create_main_window(void) {
     /* Add initial content so right notebook is visible when shown */
     // Note: restore_open_tabs_for_session already handles both notebooks
     current_selected_session = g_strdup(initial_session);
+    update_window_title_for_session(current_selected_session);
 
     /* Right pane toolbar (vertical) */
     GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
