@@ -2,10 +2,30 @@
 #include <atk/atk.h>
 #include <glib/gkeyfile.h>
 #include <glib/gstdio.h>
+#include <poppler.h>
+#include <math.h>
 #include "siters.h"
 #include "sessions_model.h"
 #include "session_model.h"
 #include "document_model.h"
+
+#define MAX_SURFACE_DIM 5000
+
+typedef struct {
+    PopplerDocument *doc;
+    int n_pages;
+    int cur_page;
+    GtkWidget *drawing;
+    double zoom;
+    GdkRGBA page_color;
+    /* per-document storage */
+    char *current_file;
+    GtkWidget *tab_label;  /* reference to the label widget in the tab */
+    /* continuous view widgets */
+    GtkWidget *scrolled;
+    GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
+    int layout_mode; /* 0=single-column,1=two-column,2=horizontal */
+} TabData;
 
 typedef enum {
     SIDEBAR_NONE,
@@ -40,6 +60,9 @@ static GtkWidget *sessions_tree_view;
 static GtkListStore *sessions_list_store;
 static sessions_model_t *sessions_model;
 
+/* Session models - map from session name to session_model_t */
+static GHashTable *session_models;
+
 /* Paned/Notebook components */
 static GtkWidget *paned;
 static GtkWidget *right_pane;
@@ -51,8 +74,24 @@ static gchar *current_selected_session = NULL;
 void save_state(void);
 void populate_sessions_treeview(void);
 void hide_right_pane(void);
-static void set_left_notebook_session(const gchar *session_name);
 static void set_right_notebook_session(const gchar *session_name);
+static void on_tab_close_clicked(GtkButton *btn, gpointer user_data);
+
+/* Session tab persistence functions */
+static void save_open_tabs_for_session(const char *session_name);
+static void restore_open_tabs_for_session(const char *session_name);
+
+/* PDF handling function prototypes */
+static TabData *create_new_tab(GtkWidget *notebook);
+static void load_file_into_tab(TabData *tab, const char *filename);
+static void queue_draw(TabData *tab);
+static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
+static void build_continuous_view(TabData *tab, int target_width);
+static void scroll_to_page(TabData *tab, int page);
+static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
+static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
+static void on_open_file_clicked(GtkButton *button, gpointer user_data);
+static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
 
 /* Save state on closing app */
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
@@ -77,6 +116,11 @@ static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event,
 
 /* State management functions */
 void save_state(void) {
+    // Save current session's open tabs before saving state
+    if (current_selected_session) {
+        save_open_tabs_for_session(current_selected_session);
+    }
+    
     GKeyFile *key_file = g_key_file_new();
     GError *error = NULL;
     
@@ -120,14 +164,50 @@ void save_state(void) {
                 const char *session_name = (const char*)iter->data;
                 gchar *section_name = g_strdup_printf("Session_%s", session_name);
                 
-                // Placeholder: save empty document lists
-                // In future, would save actual document URLs from session_model
-                g_key_file_set_string(key_file, section_name, "documents", "");
-                g_key_file_set_string(key_file, section_name, "helper_documents", "");
-                g_key_file_set_string(key_file, section_name, "last_read_document", "");
-                g_key_file_set_string(key_file, section_name, "page_color", "#FFFFFF");
-                g_key_file_set_string(key_file, section_name, "last_read_help_document", "");
-                g_key_file_set_string(key_file, section_name, "helper_page_color", "#FFFFFF");
+                // Get session model for this session
+                session_model_t *session = g_hash_table_lookup(session_models, session_name);
+                if (session) {
+                    // Save document URLs
+                    const GList *docs = session_model_get_document_urls(session);
+                    GString *docs_str = g_string_new("");
+                    for (const GList *doc_iter = docs; doc_iter != NULL; doc_iter = doc_iter->next) {
+                        if (docs_str->len > 0) g_string_append(docs_str, ",");
+                        g_string_append(docs_str, (const char*)doc_iter->data);
+                    }
+                    g_key_file_set_string(key_file, section_name, "documents", docs_str->str);
+                    g_string_free(docs_str, TRUE);
+                    
+                    // Save helper document URLs
+                    const GList *helper_docs = session_model_get_helper_document_urls(session);
+                    GString *helper_docs_str = g_string_new("");
+                    for (const GList *doc_iter = helper_docs; doc_iter != NULL; doc_iter = doc_iter->next) {
+                        if (helper_docs_str->len > 0) g_string_append(helper_docs_str, ",");
+                        g_string_append(helper_docs_str, (const char*)doc_iter->data);
+                    }
+                    g_key_file_set_string(key_file, section_name, "helper_documents", helper_docs_str->str);
+                    g_string_free(helper_docs_str, TRUE);
+                    
+                    // Save other session properties
+                    const char *last_read = session_model_get_last_read_document(session);
+                    g_key_file_set_string(key_file, section_name, "last_read_document", last_read ? last_read : "");
+                    
+                    const char *page_color = session_model_get_page_color(session);
+                    g_key_file_set_string(key_file, section_name, "page_color", page_color ? page_color : "#FFFFFF");
+                    
+                    const char *last_read_help = session_model_get_last_read_help_document(session);
+                    g_key_file_set_string(key_file, section_name, "last_read_help_document", last_read_help ? last_read_help : "");
+                    
+                    const char *helper_page_color = session_model_get_helper_page_color(session);
+                    g_key_file_set_string(key_file, section_name, "helper_page_color", helper_page_color ? helper_page_color : "#FFFFFF");
+                } else {
+                    // Placeholder: save empty document lists
+                    g_key_file_set_string(key_file, section_name, "documents", "");
+                    g_key_file_set_string(key_file, section_name, "helper_documents", "");
+                    g_key_file_set_string(key_file, section_name, "last_read_document", "");
+                    g_key_file_set_string(key_file, section_name, "page_color", "#FFFFFF");
+                    g_key_file_set_string(key_file, section_name, "last_read_help_document", "");
+                    g_key_file_set_string(key_file, section_name, "helper_page_color", "#FFFFFF");
+                }
                 
                 g_free(section_name);
             }
@@ -202,12 +282,77 @@ void load_state(void) {
             sessions_model = sessions_model_new();
         }
         
-        // Parse comma-separated names
+        // Parse comma-separated names and load session data
         gchar **names_array = g_strsplit(names_str, ",", -1);
         for (gchar **name = names_array; *name != NULL; name++) {
             g_strstrip(*name); // Remove whitespace
             if (strlen(*name) > 0) {
                 sessions_model_add_session_name(sessions_model, *name);
+                
+                // Load session data for this session
+                gchar *section_name = g_strdup_printf("Session_%s", *name);
+                
+                // Create session model for this session
+                session_model_t *session = session_model_new();
+                session_model_set_session_name(session, *name);
+                
+                // Load documents
+                gchar *docs_str = g_key_file_get_string(key_file, section_name, "documents", NULL);
+                if (docs_str) {
+                    gchar **docs_array = g_strsplit(docs_str, ",", -1);
+                    for (gchar **doc = docs_array; *doc != NULL; doc++) {
+                        g_strstrip(*doc);
+                        if (strlen(*doc) > 0) {
+                            session_model_add_document_url(session, *doc);
+                        }
+                    }
+                    g_strfreev(docs_array);
+                    g_free(docs_str);
+                }
+                
+                // Load helper documents
+                gchar *helper_docs_str = g_key_file_get_string(key_file, section_name, "helper_documents", NULL);
+                if (helper_docs_str) {
+                    gchar **helper_docs_array = g_strsplit(helper_docs_str, ",", -1);
+                    for (gchar **doc = helper_docs_array; *doc != NULL; doc++) {
+                        g_strstrip(*doc);
+                        if (strlen(*doc) > 0) {
+                            session_model_add_helper_document_url(session, *doc);
+                        }
+                    }
+                    g_strfreev(helper_docs_array);
+                    g_free(helper_docs_str);
+                }
+                
+                // Load other properties
+                gchar *last_read = g_key_file_get_string(key_file, section_name, "last_read_document", NULL);
+                if (last_read) {
+                    session_model_set_last_read_document(session, last_read);
+                    g_free(last_read);
+                }
+                
+                gchar *page_color = g_key_file_get_string(key_file, section_name, "page_color", NULL);
+                if (page_color) {
+                    session_model_set_page_color(session, page_color);
+                    g_free(page_color);
+                }
+                
+                gchar *last_read_help = g_key_file_get_string(key_file, section_name, "last_read_help_document", NULL);
+                if (last_read_help) {
+                    session_model_set_last_read_help_document(session, last_read_help);
+                    g_free(last_read_help);
+                }
+                
+                gchar *helper_page_color = g_key_file_get_string(key_file, section_name, "helper_page_color", NULL);
+                if (helper_page_color) {
+                    session_model_set_helper_page_color(session, helper_page_color);
+                    g_free(helper_page_color);
+                }
+                
+                // Store session model
+                g_hash_table_insert(session_models, g_strdup(*name), session);
+                
+                g_free(section_name);
             }
         }
         g_strfreev(names_array);
@@ -233,11 +378,10 @@ void load_state(void) {
     if (sessions_model && current_selected_session) {
         const char *loaded_session = sessions_model_get_last_open_session(sessions_model);
         if (loaded_session && strcmp(loaded_session, current_selected_session) != 0) {
-            // Update current_selected_session and switch notebooks to the loaded session
+            // Update current_selected_session and restore open tabs for the loaded session
             g_free(current_selected_session);
             current_selected_session = g_strdup(loaded_session);
-            set_left_notebook_session(loaded_session);
-            set_right_notebook_session(loaded_session);
+            restore_open_tabs_for_session(loaded_session);
         }
     }
     
@@ -303,6 +447,10 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
             set_right_notebook_session(current_selected_session ? current_selected_session : "Default");
         }
     } else {
+        // Save current helper tabs before hiding
+        if (current_selected_session) {
+            save_open_tabs_for_session(current_selected_session);
+        }
         gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
         if (right_pane) {
             gtk_widget_hide(GTK_WIDGET(right_pane));
@@ -358,12 +506,22 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
         
         // Add to model
         sessions_model_add_session_name(sessions_model, session_name);
+
+        // Create per-session model so notebook restore can find it
+        if (session_models && !g_hash_table_lookup(session_models, session_name)) {
+            session_model_t *session = session_model_new();
+            session_model_set_session_name(session, session_name);
+            g_hash_table_insert(session_models, g_strdup(session_name), session);
+        }
         
         // Update tree view
         populate_sessions_treeview();
         
         // Clear entry
         gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+
+        // Save state to persist the new session
+        save_state();
     }
 }
 
@@ -400,6 +558,9 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
         populate_sessions_treeview();
         
         g_free(session_name);
+
+        // Save state to persist the removed session
+        save_state();
     }
 }
 
@@ -464,48 +625,36 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
-static void set_left_notebook_session(const gchar *session_name) {
-    if (!left_notebook) return;
-
-    while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook)) > 0) {
-        gtk_notebook_remove_page(GTK_NOTEBOOK(left_notebook), 0);
-    }
-
-    gchar *tab_label_text = g_strdup_printf("%s", session_name ? session_name : "No session");
-    GtkWidget *tab_label = gtk_label_new(tab_label_text);
-    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    GtkWidget *info_label = gtk_label_new(NULL);
-
-    gchar *info_text = g_strdup_printf("Selected session: %s", session_name ? session_name : "None");
-    gtk_label_set_text(GTK_LABEL(info_label), info_text);
-    g_free(info_text);
-
-    gtk_box_pack_start(GTK_BOX(content_box), info_label, FALSE, FALSE, 5);
-    gtk_notebook_append_page(GTK_NOTEBOOK(left_notebook), content_box, tab_label);
-    gtk_widget_show_all(left_notebook);
-
-    g_free(tab_label_text);
-}
-
 static void set_right_notebook_session(const gchar *session_name) {
-    if (!right_notebook) return;
+    if (!right_notebook || !session_name || !session_models) return;
 
+    // Clear current right notebook
     while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) > 0) {
         gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), 0);
     }
 
-    const gchar *tab_name = session_name ? session_name : "Helper";
-    gchar *content_text = g_strdup_printf("Helper content for session: %s", session_name ? session_name : "None");
+    // Get the session model
+    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    if (!session) return;
 
-    GtkWidget *tab_label = gtk_label_new(tab_name);
-    GtkWidget *content_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 10);
-    GtkWidget *info_label = gtk_label_new(content_text);
+    // Restore saved helper documents in right notebook
+    const GList *helper_docs = session_model_get_helper_document_urls(session);
+    for (const GList *iter = helper_docs; iter != NULL; iter = iter->next) {
+        const char *uri = (const char*)iter->data;
+        char *filename = g_filename_from_uri(uri, NULL, NULL);
+        if (filename) {
+            TabData *tab = create_new_tab(right_notebook);
+            if (tab) {
+                load_file_into_tab(tab, filename);
+            }
+            g_free(filename);
+        }
+    }
 
-    gtk_box_pack_start(GTK_BOX(content_box), info_label, FALSE, FALSE, 5);
-    gtk_notebook_append_page(GTK_NOTEBOOK(right_notebook), content_box, tab_label);
-    gtk_widget_show_all(right_notebook);
-
-    g_free(content_text);
+    // If no helper documents, show an empty right notebook
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) == 0) {
+        gtk_widget_show_all(right_notebook);
+    }
 }
 
 static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
@@ -519,8 +668,14 @@ static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventBut
                 gchar *session_name = NULL;
                 gtk_tree_model_get(model, &iter, 0, &session_name, -1);
                 if (session_name) {
-                    set_left_notebook_session(session_name);
-                    set_right_notebook_session(session_name);
+                    // Save current session's open tabs before switching
+                    if (current_selected_session) {
+                        save_open_tabs_for_session(current_selected_session);
+                    }
+                    
+                    // Switch to new session
+                    restore_open_tabs_for_session(session_name);
+                    
                     if (current_selected_session) g_free(current_selected_session);
                     current_selected_session = g_strdup(session_name);
                     
@@ -619,6 +774,470 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+static void save_open_tabs_for_session(const char *session_name) {
+    if (!session_name || !session_models) return;
+    
+    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    if (!session) return;
+    
+    // Replace current saved document URLs with the currently open tabs.
+    if (session->document_urls) {
+        g_list_free_full(session->document_urls, g_free);
+        session->document_urls = NULL;
+    }
+    if (session->helper_document_urls) {
+        g_list_free_full(session->helper_document_urls, g_free);
+        session->helper_document_urls = NULL;
+    }
+    
+    // Save open tabs from left notebook
+    if (left_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
+        for (int i = 0; i < n_pages; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), i);
+            if (page) {
+                TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+                if (tab && tab->current_file) {
+                    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                    if (uri) {
+                        session_model_add_document_url(session, uri);
+                        g_free(uri);
+                    }
+                }
+            }
+        }
+    }
+    
+    // Save open tabs from right notebook
+    if (right_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
+        for (int i = 0; i < n_pages; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), i);
+            if (page) {
+                TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+                if (tab && tab->current_file) {
+                    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                    if (uri) {
+                        session_model_add_helper_document_url(session, uri);
+                        g_free(uri);
+                    }
+                }
+            }
+        }
+    }
+}
+
+static void restore_open_tabs_for_session(const char *session_name) {
+    if (!session_name || !session_models) return;
+    
+    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    if (!session) {
+        session = session_model_new();
+        session_model_set_session_name(session, session_name);
+        g_hash_table_insert(session_models, g_strdup(session_name), session);
+    }
+    
+    // Clear current notebooks
+    if (left_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
+        for (int i = n_pages - 1; i >= 0; i--) {
+            gtk_notebook_remove_page(GTK_NOTEBOOK(left_notebook), i);
+        }
+    }
+    
+    if (right_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
+        for (int i = n_pages - 1; i >= 0; i--) {
+            gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), i);
+        }
+    }
+    
+    // Restore saved documents in left notebook
+    const GList *docs = session_model_get_document_urls(session);
+    for (const GList *iter = docs; iter != NULL; iter = iter->next) {
+        const char *uri = (const char*)iter->data;
+        char *filename = g_filename_from_uri(uri, NULL, NULL);
+        if (filename) {
+            TabData *tab = create_new_tab(left_notebook);
+            if (tab) {
+                load_file_into_tab(tab, filename);
+            }
+            g_free(filename);
+        }
+    }
+    
+    // Restore saved helper documents in right notebook
+    const GList *helper_docs = session_model_get_helper_document_urls(session);
+    for (const GList *iter = helper_docs; iter != NULL; iter = iter->next) {
+        const char *uri = (const char*)iter->data;
+        char *filename = g_filename_from_uri(uri, NULL, NULL);
+        if (filename) {
+            TabData *tab = create_new_tab(right_notebook);
+            if (tab) {
+                load_file_into_tab(tab, filename);
+            }
+            g_free(filename);
+        }
+    }
+}
+
+static void queue_draw(TabData *tab) {
+    if (tab && tab->pages_drawing)
+        gtk_widget_queue_draw(tab->pages_drawing);
+}
+
+static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
+    TabData *tab = user_data;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+
+    if (!tab || !tab->doc) {
+        return FALSE;
+    }
+
+    /* continuous mode: draw multiple pages vertically inside this drawing area
+       Render only pages intersecting the current clip extents to save work. */
+    double clip_x1, clip_y1, clip_x2, clip_y2;
+    cairo_clip_extents(cr, &clip_x1, &clip_y1, &clip_x2, &clip_y2);
+
+    const double spacing = 6.0;
+    if (tab->layout_mode == 0) {
+        int target_w = alloc.width - 40;
+        if (target_w < 100) target_w = alloc.width;
+        double y = spacing; /* top padding */
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
+            double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
+            double page_w = pw * scale;
+            double page_h = ph * scale;
+            double off_x = (alloc.width - page_w) / 2.0;
+            double off_y = y;
+
+            /* skip if page is outside clip */
+            if (!(off_y + page_h < clip_y1 || off_y > clip_y2)) {
+                /* draw background rectangle */
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
+                cairo_rectangle(cr, off_x, off_y, page_w, page_h);
+                cairo_fill(cr);
+                cairo_restore(cr);
+                cairo_save(cr);
+                cairo_translate(cr, off_x, off_y);
+                cairo_scale(cr, scale, scale);
+                poppler_page_render(page, cr);
+                cairo_restore(cr);
+            }
+
+            y += page_h + spacing;
+            g_object_unref(page);
+        }
+    }
+
+    return FALSE;
+}
+
+static void build_continuous_view(TabData *tab, int target_width) {
+    if (!tab || !tab->doc || !tab->pages_drawing) return;
+    const double spacing = 6.0;
+    if (tab->layout_mode == 0) {
+        /* single-column (top-to-bottom) */
+        double total_h = 0.0;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            double scale = (double)target_width / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
+            double page_h = ph * scale;
+            total_h += page_h + spacing;
+            g_object_unref(page);
+        }
+        if (total_h < 1.0) total_h = 1.0;
+        gtk_widget_set_size_request(tab->pages_drawing, target_width, (int)ceil(total_h));
+    }
+    gtk_widget_queue_draw(tab->pages_drawing);
+}
+
+static void scroll_to_page(TabData *tab, int page) {
+    if (!tab || !tab->scrolled || !tab->pages_drawing || !tab->doc) return;
+    if (page < 0 || page >= tab->n_pages) return;
+    /* compute vertical offset of requested page */
+    int target_w = 800;
+    GtkAllocation salloc;
+    gtk_widget_get_allocation(tab->scrolled, &salloc);
+    if (salloc.width > 100) target_w = salloc.width - 40;
+
+    double y = 0.0;
+    for (int i = 0; i < page; ++i) {
+        PopplerPage *p = poppler_document_get_page(tab->doc, i);
+        if (!p) continue;
+        double pw, ph;
+        poppler_page_get_size(p, &pw, &ph);
+        double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
+        double page_h = ph * scale;
+        y += page_h + 6;
+        g_object_unref(p);
+    }
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    gtk_adjustment_set_value(vadj, y);
+}
+
+static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
+    TabData *tab = user_data;
+    if (!tab || !tab->doc) return;
+    
+    /* Calculate which page is at the top of the visible area */
+    double scroll_y = gtk_adjustment_get_value(adj);
+    const double spacing = 6.0;
+    int target_w = 800;
+    if (tab->scrolled) {
+        GtkAllocation alloc;
+        gtk_widget_get_allocation(tab->scrolled, &alloc);
+        if (alloc.width > 100) target_w = alloc.width - 40;
+    }
+    
+    double y = spacing;
+    int visible_page = 0;
+    
+    if (tab->layout_mode == 0) {
+        /* single-column layout */
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
+            double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
+            double page_h = ph * scale;
+            if (y + page_h / 2.0 > scroll_y) {
+                visible_page = i;
+                g_object_unref(page);
+                break;
+            }
+            y += page_h + spacing;
+            g_object_unref(page);
+        }
+    }
+    
+    tab->cur_page = visible_page;
+}
+
+static void load_file_into_tab(TabData *tab, const char *filename) {
+    if (!tab || !filename) return;
+    GError *error = NULL;
+    char *uri = g_filename_to_uri(filename, NULL, &error);
+    if (!uri) {
+        g_warning("Failed to convert filename to URI: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    PopplerDocument *doc = poppler_document_new_from_file(uri, NULL, &error);
+    g_free(uri);
+
+    if (!doc) {
+        g_warning("Failed to open PDF: %s", error->message);
+        g_clear_error(&error);
+        return;
+    }
+
+    if (tab->doc)
+        g_object_unref(tab->doc);
+
+    tab->doc = doc;
+    tab->n_pages = poppler_document_get_n_pages(doc);
+    tab->cur_page = 0;
+    tab->zoom = 1.0;
+    /* track current filename for per-document settings */
+    if (tab->current_file)
+        g_free(tab->current_file);
+    tab->current_file = g_strdup(filename);
+
+    /* Update the tab's label with filename */
+    if (tab->tab_label) {
+        const char *basename = g_path_get_basename(filename);
+        gtk_label_set_text(GTK_LABEL(tab->tab_label), basename);
+    }
+
+    queue_draw(tab);
+
+    {
+        /* rebuild continuous pages using scrolled allocation if available */
+        int target_w = 800;
+        if (tab->scrolled) {
+            GtkAllocation alloc;
+            gtk_widget_get_allocation(tab->scrolled, &alloc);
+            if (alloc.width > 100) target_w = alloc.width - 40;
+        }
+        build_continuous_view(tab, target_w);
+        scroll_to_page(tab, tab->cur_page);
+    }
+}
+
+static TabData *create_new_tab(GtkWidget *notebook) {
+    TabData *tab = g_malloc0(sizeof(TabData));
+    tab->zoom = 1.0;
+    tab->layout_mode = 0;    /* single-column by default */
+    tab->n_pages = 0;
+    tab->cur_page = 0;
+    
+    if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
+        g_free(tab);
+        return NULL;
+    }
+
+    gdk_rgba_parse(&tab->page_color, "white");
+    
+    /* Create container for tab content */
+    GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    
+    /* Create scrolled window and a single drawing area used for both single and continuous views */
+    tab->scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_widget_set_vexpand(tab->scrolled, TRUE);
+    gtk_widget_set_hexpand(tab->scrolled, TRUE);
+    /* connect scroll adjustment to update page display */
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    g_signal_connect(G_OBJECT(vadj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
+    tab->pages_drawing = gtk_drawing_area_new();
+    gtk_widget_set_hexpand(tab->pages_drawing, TRUE);
+    gtk_widget_set_vexpand(tab->pages_drawing, TRUE);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "draw", G_CALLBACK(on_draw), tab);
+    gtk_container_add(GTK_CONTAINER(tab->scrolled), tab->pages_drawing);
+    gtk_box_pack_start(GTK_BOX(tab_box), tab->scrolled, TRUE, TRUE, 0);
+    
+    gtk_widget_show_all(tab_box);
+    
+    /* Store tab data in the widget */
+    g_object_set_data(G_OBJECT(tab_box), "tab-data", tab);
+    
+    /* Create tab label with close button */
+    GtkWidget *label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    GtkWidget *label = gtk_label_new("New Document");
+    gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+    tab->tab_label = label;  /* Store reference to label for updates */
+    GtkWidget *close_btn = gtk_button_new_with_label("×");
+    gtk_widget_set_size_request(close_btn, 30, -1);
+    /* allocate CloseInfo linking the notebook and this page so close removes correct page */
+    typedef struct {
+        GtkNotebook *notebook;
+        GtkWidget *page;
+    } CloseInfo;
+    CloseInfo *ci = g_malloc(sizeof(CloseInfo));
+    ci->notebook = GTK_NOTEBOOK(notebook);
+    ci->page = tab_box;
+    g_signal_connect(close_btn, "clicked", G_CALLBACK(on_tab_close_clicked), ci);
+    gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
+    gtk_widget_show_all(label_box);
+    
+    /* Add tab to notebook */
+    int page_num = gtk_notebook_append_page(GTK_NOTEBOOK(notebook), tab_box, label_box);
+    gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), page_num);
+    
+    return tab;
+}
+
+static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
+    if (!notebook) return;
+    GtkWidget *dialog = gtk_file_chooser_dialog_new("Open PDF",
+                                                   GTK_WINDOW(window),
+                                                   GTK_FILE_CHOOSER_ACTION_OPEN,
+                                                   "_Cancel", GTK_RESPONSE_CANCEL,
+                                                   "_Open", GTK_RESPONSE_ACCEPT,
+                                                   NULL);
+
+    GtkFileFilter *filter = gtk_file_filter_new();
+    gtk_file_filter_add_pattern(filter, "*.pdf");
+    gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+
+    if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
+        char *fname = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+        
+        /* Create a new tab for the document */
+        TabData *tab = create_new_tab(notebook);
+        if (tab) {
+            /* load into the tab */
+            load_file_into_tab(tab, fname);
+            
+            /* Add to session model */
+            if (current_selected_session) {
+                session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+                if (session) {
+                    char *uri = g_filename_to_uri(fname, NULL, NULL);
+                    if (uri) {
+                        if (is_helper) {
+                            session_model_add_helper_document_url(session, uri);
+                        } else {
+                            session_model_add_document_url(session, uri);
+                            /* Add filename to sessions sidebar tree */
+                            // TODO: Implement adding to tree view
+                        }
+                        g_free(uri);
+                    }
+                }
+            }
+        }
+        g_free(fname);
+    }
+    gtk_widget_destroy(dialog);
+}
+
+static void on_open_file_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    open_file_in_notebook(left_notebook, FALSE);
+}
+
+static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    open_file_in_notebook(right_notebook, TRUE);
+}
+
+static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    typedef struct {
+        GtkNotebook *notebook;
+        GtkWidget *page;
+    } CloseInfo;
+    CloseInfo *ci = user_data;
+    if (!ci || !ci->notebook || !GTK_IS_NOTEBOOK(ci->notebook) || !ci->page) {
+        if (ci) g_free(ci);
+        return;
+    }
+    int page_idx = gtk_notebook_page_num(ci->notebook, ci->page);
+    if (page_idx >= 0) {
+        GtkWidget *child = gtk_notebook_get_nth_page(ci->notebook, page_idx);
+        if (child) {
+            TabData *tab = g_object_get_data(G_OBJECT(child), "tab-data");
+            if (tab && tab->current_file && current_selected_session) {
+                // Remove from open documents list
+                session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+                if (session) {
+                    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                    if (uri) {
+                        if (ci->notebook == GTK_NOTEBOOK(left_notebook)) {
+                            session_model_remove_document_url(session, uri);
+                        } else if (ci->notebook == GTK_NOTEBOOK(right_notebook)) {
+                            session_model_remove_helper_document_url(session, uri);
+                        }
+                        g_free(uri);
+                    }
+                }
+                
+                if (tab->doc) g_object_unref(tab->doc);
+                if (tab->current_file) g_free(tab->current_file);
+                g_free(tab);
+            }
+        }
+        gtk_notebook_remove_page(ci->notebook, page_idx);
+    }
+    g_free(ci);
+}
+
 GtkWidget* create_main_window(void) {
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
@@ -627,6 +1246,8 @@ GtkWidget* create_main_window(void) {
     // Initialize sessions model
     if (!sessions_model) {
         sessions_model = sessions_model_new();
+        // Initialize session models hash table
+        session_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)session_model_free);
         // Always ensure "Default" session exists
         const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
         gboolean has_default = FALSE;
@@ -638,6 +1259,17 @@ GtkWidget* create_main_window(void) {
         }
         if (!has_default) {
             sessions_model_add_session_name(sessions_model, "Default");
+            // Create session model for Default
+            session_model_t *default_session = session_model_new();
+            session_model_set_session_name(default_session, "Default");
+            g_hash_table_insert(session_models, g_strdup("Default"), default_session);
+        } else {
+            // Ensure we have a session model for Default
+            if (!g_hash_table_lookup(session_models, "Default")) {
+                session_model_t *default_session = session_model_new();
+                session_model_set_session_name(default_session, "Default");
+                g_hash_table_insert(session_models, g_strdup("Default"), default_session);
+            }
         }
     }
 
@@ -777,6 +1409,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(open_file_btn), open_file_icon);
     gtk_widget_set_tooltip_text(open_file_btn, "Open file");
     atk_object_set_name(gtk_widget_get_accessible(open_file_btn), "Open file");
+    g_signal_connect(open_file_btn, "clicked", G_CALLBACK(on_open_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), open_file_btn, FALSE, FALSE, 1);
 
     /* Close file button*/
@@ -928,6 +1561,7 @@ GtkWidget* create_main_window(void) {
     /* Left notebook (primary) */
     left_notebook = gtk_notebook_new();
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
+    atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
 
     // Add initial placeholder page so it is visible immediately
     // Use last open session if available, otherwise default to "Default"
@@ -938,7 +1572,7 @@ GtkWidget* create_main_window(void) {
             initial_session = last_session;
         }
     }
-    set_left_notebook_session(initial_session);
+    restore_open_tabs_for_session(initial_session);
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -949,7 +1583,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
 
     /* Add initial content so right notebook is visible when shown */
-    set_right_notebook_session(initial_session);
+    // Note: restore_open_tabs_for_session already handles both notebooks
     current_selected_session = g_strdup(initial_session);
 
     /* Right pane toolbar (vertical) */
@@ -963,6 +1597,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(right_open_file_btn), right_open_file_icon);
     gtk_widget_set_tooltip_text(right_open_file_btn, "Open file");
     atk_object_set_name(gtk_widget_get_accessible(right_open_file_btn), "Open file");
+    g_signal_connect(right_open_file_btn, "clicked", G_CALLBACK(on_open_helper_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(right_toolbar), right_open_file_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Close file */
