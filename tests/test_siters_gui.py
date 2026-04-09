@@ -369,11 +369,11 @@ class TestSitersSessionManagement(SitersGUITestCase):
         """
         Test the complete lifecycle of session management:
         1. Open sessions sidebar
-        2. Check if Session3 exists and remove it if present
+        2. Check if TestSession exists and remove it if present
         3. Verify it's removed
-        4. Create Session3
-        5. Click on Session3
-        6. Verify the notebook shows Session3 tab and content
+        4. Create TestSession
+        5. Click on TestSession
+        6. Verify the notebook shows TestSession tab and content
         """
         try:
             siters_app = root.application("siters")
@@ -385,14 +385,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     lambda x: x.roleName in ['push button', 'toggle button'] and x.name == 'Sessions')
             except Exception as e:
                 self.skipTest(f"Could not find Sessions button: {e}")
-
-            # Helper to wait for sessions container to appear
-            def find_sessions_container():
-                try:
-                    return siters_app.findChild(
-                        lambda x: x.roleName == 'panel' and any('sessions' in str(c).lower() for c in x.children if hasattr(c, 'name')))
-                except Exception:
-                    return None
 
             # Helper to find session tree view
             def find_sessions_tree():
@@ -519,24 +511,24 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Give time for the sidebar to fully render and populate
             time.sleep(2)
             
-            # Step 2: Check if Session3 exists and remove it if present
+            # Step 2: Check if TestSession exists and remove it if present
             session_names = get_session_names_from_tree()
             print(f"Current sessions: {session_names}")
 
-            if 'Session3' in session_names:
-                print("INFO: Session3 found, attempting to remove it")
+            if 'TestSession' in session_names:
+                print("INFO: TestSession found, attempting to remove it")
                 
-                # Find and click on Session3 in the tree
+                # Find and click on TestSession in the tree
                 try:
                     session3_cell = siters_app.findChild(
-                        lambda x: x.roleName == 'table cell' and x.name == 'Session3')
+                        lambda x: x.roleName == 'table cell' and x.name == 'TestSession')
                     if session3_cell.click:
                         session3_cell.click()
                     else:
                         session3_cell.do_action(0)
                     time.sleep(0.5)
                 except Exception as e:
-                    print(f"WARNING: Could not click Session3 directly: {e}")
+                    print(f"WARNING: Could not click TestSession directly: {e}")
 
                 # Click Remove session button
                 remove_btn = find_button_by_name('Remove session')
@@ -550,12 +542,12 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 else:
                     self.skipTest("Could not find Remove session button")
 
-                # Step 3: Verify Session3 is removed
+                # Step 3: Verify TestSession is removed
                 session_names = get_session_names_from_tree()
-                self.assertNotIn('Session3', session_names, "Session3 still exists after removal")
-                print("SUCCESS: Session3 successfully removed")
+                self.assertNotIn('TestSession', session_names, "TestSession still exists after removal")
+                print("SUCCESS: TestSession successfully removed")
 
-            # Step 4: Create Session3
+            # Step 4: Create TestSession
             entry = find_session_entry()
             if entry:
                 try:
@@ -570,7 +562,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     # Method 1: Try direct text property
                     if not success:
                         try:
-                            entry.text = 'Session3'
+                            entry.text = 'TestSession'
                             success = True
                         except Exception:
                             pass
@@ -578,7 +570,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     # Method 2: Try typeText method
                     if not success and hasattr(entry, 'typeText'):
                         try:
-                            entry.typeText('Session3')
+                            entry.typeText('TestSession')
                             success = True
                         except Exception:
                             pass
@@ -593,7 +585,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                             keyPress('Delete')
                             time.sleep(0.1)
                             # Type the session name character by character
-                            for char in 'Session3':
+                            for char in 'TestSession':
                                 keyPress(char)
                                 time.sleep(0.02)
                             success = True
@@ -613,51 +605,68 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     else:
                         add_btn.click()
                     time.sleep(0.5)
-                    print("SUCCESS: Add session button clicked for Session3")
+                    print("SUCCESS: Add session button clicked for TestSession")
                 else:
                     self.skipTest("Could not find Add session button")
             else:
                 print("ERROR: Session entry field not found")
                 self.skipTest("Could not find session entry field")
 
-            # Verify Session3 was created
+            # Verify TestSession was created
             session_names = get_session_names_from_tree()
-            self.assertIn('Session3', session_names, "Session3 was not created successfully")
-            print("SUCCESS: Session3 verified in sessions list")
+            self.assertIn('TestSession', session_names, "TestSession was not created successfully")
+            print("SUCCESS: TestSession verified in sessions list")
 
-            # Step 5: Click on Session3 to select it
+            # Step 5: Click on TestSession to select it
             try:
                 session3_cell = siters_app.findChild(
-                    lambda x: x.roleName == 'table cell' and x.name == 'Session3')
+                    lambda x: x.roleName == 'table cell' and x.name == 'TestSession')
                 if hasattr(session3_cell, 'click'):
                     session3_cell.click()
                 else:
                     session3_cell.do_action(0)
                 time.sleep(1)
-                print("SUCCESS: Session3 clicked")
+                print("SUCCESS: TestSession clicked")
             except Exception as e:
-                self.skipTest(f"Could not click Session3: {e}")
+                self.skipTest(f"Could not click TestSession: {e}")
 
-            # Step 6: Verify the notebook shows Session3 tab and content
+            # Helper to wait for window title to contain expected text
+            def wait_for_window_title_contains(app, expected_text, timeout=3.0):
+                end = time.time() + timeout
+                while time.time() < end:
+                    try:
+                        # Usually the top-level app window is exposed as a frame/window
+                        win = app.findChild(
+                            lambda x: x.roleName in [
+                                'frame', 'window'] and x.name and 'Siters' in x.name
+                        )
+                        if expected_text in (win.name or ''):
+                            return win.name
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                return None
+
+            # After clicking TestSession
+            title = wait_for_window_title_contains(
+                siters_app, "TestSession", timeout=3.0)
+            self.assertIsNotNone(
+                title,
+                "Window title did not update to include selected session 'TestSession'"
+            )
+
+            # Step 6: Verify the 'Left Notebook' widget is empty
             try:
-                # Look for a tab or label with "Session3" in it
-                session3_tab = siters_app.findChild(
-                    lambda x: 'Session3' in (x.name if x.name else ''))
-                if session3_tab:
-                    print(f"SUCCESS: Found element with 'Session3': {session3_tab.name}")
-
-                # Look for text containing "Selected session: Session3"
-                selected_session_text = siters_app.findChild(
-                    lambda x: 'Selected session: Session3' in (x.name if x.name else ''))
-                if selected_session_text:
-                    print("SUCCESS: Found 'Selected session: Session3' text")
-                    self.assertIn('Session3', selected_session_text.name)
+                # Find the 'Left Notebook' widget
+                left_notebook = siters_app.findChild(lambda x: x.name == 'Left Notebook')
+                if left_notebook:
+                    # Check if the 'Left Notebook' widget is empty (no text or children)
+                    if not left_notebook.name.strip() or not left_notebook.children:
+                        print("SUCCESS: 'Left Notebook' widget is empty")
+                    else:
+                        self.fail("FAILURE: 'Left Notebook' widget is not empty")
                 else:
-                    # Try searching for just the session name as a fallback
-                    session_text = siters_app.findChild(
-                        lambda x: 'Session3' in (x.name if x.name else ''))
-                    self.assertIsNotNone(session_text, "Could not find Session3 text in notebook content")
-                    print("SUCCESS: Session3 text found in notebook")
+                    self.fail("FAILURE: Could not find 'Left Notebook' widget")
 
             except Exception as e:
                 self.skipTest(f"Could not verify notebook content: {e}")
@@ -728,44 +737,34 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 if not left_notebook:
                     self.skipTest("Could not find left notebook")
                 
-                # Get the current tab text
-                try:
-                    # Try to get tab labels
-                    tab_labels = left_notebook.findChildren(lambda x: x.roleName == 'page tab')
-                    if tab_labels:
-                        current_tab_text = tab_labels[0].name
-                        self.assertEqual(current_tab_text, 'TestSession', 
-                                       f"Expected tab to show 'TestSession', but got '{current_tab_text}'")
-                    else:
-                        # Look for any text containing TestSession
-                        testsession_elements = siters_app.findChildren(
-                            lambda x: x.name and 'TestSession' in x.name)
-                        if not testsession_elements:
-                            self.skipTest("Could not find TestSession in any UI elements")
-                        
-                except Exception as e:
-                    self.skipTest(f"Could not verify tab text: {e}")
                 
-                # Check that the notebook page shows "Selected session: TestSession"
-                try:
-                    selected_session_text = siters_app.findChild(
-                        lambda x: x.name and 'Selected session: TestSession' in x.name)
-                    if selected_session_text:
-                        print("SUCCESS: Found 'Selected session: TestSession' in notebook content")
-                        self.assertIn('TestSession', selected_session_text.name)
-                    else:
-                        # Try searching for just the session name
-                        session_text = siters_app.findChild(
-                            lambda x: x.name and 'TestSession' in x.name)
-                        if session_text:
-                            print(f"SUCCESS: Found TestSession in content: '{session_text.name}'")
-                        else:
-                            self.skipTest("Could not find 'Selected session: TestSession' text in notebook content")
-                            
-                except Exception as e:
-                    self.skipTest(f"Could not verify notebook content: {e}")
-                
-                print("SUCCESS: App correctly started with TestSession from saved config")
+                # Verify window title reflects loaded last_open_session
+                def wait_for_window_title_contains(app, expected_text, timeout=5.0):
+                    end = time.time() + timeout
+                    while time.time() < end:
+                        try:
+                            win = app.findChild(
+                                lambda x: x.roleName in [
+                                    'frame', 'window'] and x.name and 'Siters' in x.name
+                            )
+                            title = win.name or ""
+                            if expected_text in title:
+                                return title
+                        except Exception:
+                            pass
+                        time.sleep(0.1)
+                    return None
+
+                title = wait_for_window_title_contains(
+                    siters_app, "TestSession", timeout=5.0)
+                self.assertIsNotNone(
+                    title,
+                    "Window title did not include last_open_session 'TestSession' after startup"
+                )
+
+                # Optional stricter check if format is fixed:
+                # self.assertEqual(title, "Siters - TestSession")
+                print(f"SUCCESS: Window title after startup: {title}")
                 
             except TimeoutError:
                 self.skipTest("AT-SPI search timed out - GUI elements may not be accessible")
