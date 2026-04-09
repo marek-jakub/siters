@@ -32,6 +32,7 @@ build-unit-tests:
 		-Wl,--wrap=gtk_window_set_title \
 		-Wl,--wrap=gtk_window_set_default_size \
 		-Wl,--wrap=g_signal_connect_data
+		-Wl,--wrap=gtk_window_set_geometry_hints
 
 run-unit-tests: build-unit-tests
 	@echo "Running unit tests..."

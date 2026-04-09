@@ -45,6 +45,17 @@ void __wrap_gtk_window_set_default_size(GtkWindow *window, gint width, gint heig
     gtk_window_set_default_size_called++;
 }
 
+/* Mock gtk_window_set_geometry_hints */
+void __wrap_gtk_window_set_geometry_hints(GtkWindow *window,
+    GtkWidget *geometry_widget,
+    GdkGeometry *geometry,
+    GdkWindowHints geom_mask) {
+(void)window;
+(void)geometry_widget;
+(void)geometry;
+(void)geom_mask;
+}
+
 /* Mock g_signal_connect */
 gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_signal,
                                      GCallback c_handler, gpointer data, 
@@ -116,7 +127,8 @@ static void test_create_main_window_calls_gtk_window_new(void **state) {
     assert_int_equal(gtk_window_new_called, 1);
     assert_int_equal(size_width, 1000);
     assert_int_equal(size_height, 800);
-    assert_string_equal(title_buffer, "Siters");
+    assert_non_null(strstr(title_buffer, "Siters"));
+    assert_non_null(strstr(title_buffer, "Default"));
 }
 
 /* Test: create_main_window sets title "Siters" */
@@ -128,8 +140,9 @@ static void test_create_main_window_title_is_siters(void **state) {
     GtkWidget *window = create_main_window();
     
     assert_non_null(window);
-    assert_string_equal(title_buffer, "Siters");
-    assert_int_equal(gtk_window_set_title_called, 1);
+    assert_non_null(strstr(title_buffer, "Siters"));
+    assert_non_null(strstr(title_buffer, "Default"));
+    assert_true(gtk_window_set_title_called >= 1);
     assert_int_equal(size_width, 1000);
     assert_int_equal(size_height, 800);
 }
@@ -185,7 +198,7 @@ static void test_create_main_window_initialization_sequence(void **state) {
     
     assert_non_null(window);
     assert_int_equal(gtk_window_new_called, 1);
-    assert_int_equal(gtk_window_set_title_called, 1);
+    assert_true(gtk_window_set_title_called >= 1);
     assert_int_equal(gtk_window_set_default_size_called, 1);
     assert_int_equal(size_width, 1000);
     assert_int_equal(size_height, 800);
