@@ -106,6 +106,8 @@ void session_model_set_helper_page_color(session_model_t* model, const char* col
 
 // Utility functions
 void session_model_add_document_url(session_model_t* model, const char* url) {
+    if (!model || !url || !*url) return;
+    if (g_list_find_custom(model->document_urls, url, (GCompareFunc)strcmp)) return;
     model->document_urls = g_list_append(model->document_urls, g_strdup(url));
 }
 
@@ -118,6 +120,8 @@ void session_model_remove_document_url(session_model_t* model, const char* url) 
 }
 
 void session_model_add_helper_document_url(session_model_t* model, const char* url) {
+    if (!model || !url || !*url) return;
+    if (g_list_find_custom(model->helper_document_urls, url, (GCompareFunc)strcmp)) return;
     model->helper_document_urls = g_list_append(model->helper_document_urls, g_strdup(url));
 }
 

@@ -69,6 +69,7 @@ static GtkWidget *right_pane;
 static GtkWidget *left_notebook;
 static GtkWidget *right_notebook;
 static gchar *current_selected_session = NULL;
+static gboolean is_restoring_session_tabs = FALSE;
 
 /* Function prototypes */
 void save_state(void);
@@ -92,6 +93,10 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
+static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
+static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
+static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
+static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
 
 /* Save state on closing app */
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
@@ -702,23 +707,35 @@ static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventBut
                 gchar *session_name = NULL;
                 gtk_tree_model_get(model, &iter, 0, &session_name, -1);
                 if (session_name) {
+                    // No-op if clicking the already selected session
+                    if (current_selected_session && g_strcmp0(current_selected_session, session_name) == 0) {
+                        g_free(session_name);
+                        gtk_tree_path_free(path);
+                        return FALSE;
+                    }
+
                     // Save current session's open tabs before switching
                     if (current_selected_session) {
                         save_open_tabs_for_session(current_selected_session);
                     }
-                    
-                    // Switch to new session
-                    restore_open_tabs_for_session(session_name);
-                    
-                    if (current_selected_session) g_free(current_selected_session);
+
+                    // Switch selected session FIRST so notebook callbacks use the right session
+                    if (current_selected_session) {
+                        g_free(current_selected_session);
+                    }
                     current_selected_session = g_strdup(session_name);
+
+                    // Restore tabs for the new active session
+                    restore_open_tabs_for_session(session_name);
+
+                    // Update window title
                     update_window_title_for_session(current_selected_session);
-                    
-                    // Update the last open session in the model
+
+                    // Persist "last open session" in sessions model
                     if (sessions_model) {
                         sessions_model_set_last_open_session(sessions_model, session_name);
                     }
-                    
+
                     g_free(session_name);
                 }
             }
@@ -860,18 +877,45 @@ static void save_open_tabs_for_session(const char *session_name) {
             }
         }
     }
+
+    /* Also snapshot the currently focused tabs as last-read markers */
+    if (left_notebook) {
+        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(left_notebook));
+        if (cur >= 0) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), cur);
+            if (page) {
+                update_last_read_for_notebook(GTK_NOTEBOOK(left_notebook), page, (guint)cur);
+            }
+        } else {
+            session_model_set_last_read_document(session, "");
+        }
+    }
+
+    if (right_notebook) {
+        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(right_notebook));
+        if (cur >= 0) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), cur);
+            if (page) {
+                update_last_read_for_notebook(GTK_NOTEBOOK(right_notebook), page, (guint)cur);
+            }
+        } else {
+            session_model_set_last_read_help_document(session, "");
+        }
+    }
 }
 
 static void restore_open_tabs_for_session(const char *session_name) {
     if (!session_name || !session_models) return;
-    
+
     session_model_t *session = g_hash_table_lookup(session_models, session_name);
     if (!session) {
         session = session_model_new();
         session_model_set_session_name(session, session_name);
         g_hash_table_insert(session_models, g_strdup(session_name), session);
     }
-    
+
+    is_restoring_session_tabs = TRUE;
+
     // Clear current notebooks
     if (left_notebook) {
         int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
@@ -879,14 +923,22 @@ static void restore_open_tabs_for_session(const char *session_name) {
             gtk_notebook_remove_page(GTK_NOTEBOOK(left_notebook), i);
         }
     }
-    
+
     if (right_notebook) {
         int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
         for (int i = n_pages - 1; i >= 0; i--) {
             gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), i);
         }
     }
-    
+
+    const char *last_read_uri = session_model_get_last_read_document(session);
+    const char *last_read_help_uri = session_model_get_last_read_help_document(session);
+
+    int matched_left_index = -1;
+    int matched_right_index = -1;
+    int left_index = 0;
+    int right_index = 0;
+
     // Restore saved documents in left notebook
     const GList *docs = session_model_get_document_urls(session);
     for (const GList *iter = docs; iter != NULL; iter = iter->next) {
@@ -899,8 +951,13 @@ static void restore_open_tabs_for_session(const char *session_name) {
             }
             g_free(filename);
         }
+
+        if (last_read_uri && *last_read_uri && g_strcmp0(uri, last_read_uri) == 0) {
+            matched_left_index = left_index;
+        }
+        left_index++;
     }
-    
+
     // Restore saved helper documents in right notebook
     const GList *helper_docs = session_model_get_helper_document_urls(session);
     for (const GList *iter = helper_docs; iter != NULL; iter = iter->next) {
@@ -913,7 +970,25 @@ static void restore_open_tabs_for_session(const char *session_name) {
             }
             g_free(filename);
         }
+
+        if (last_read_help_uri && *last_read_help_uri && g_strcmp0(uri, last_read_help_uri) == 0) {
+            matched_right_index = right_index;
+        }
+        right_index++;
     }
+
+    // Re-focus last-read tabs if present
+    if (left_notebook && matched_left_index >= 0 &&
+        matched_left_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook))) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), matched_left_index);
+    }
+
+    if (right_notebook && matched_right_index >= 0 &&
+        matched_right_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook))) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), matched_right_index);
+    }
+
+    is_restoring_session_tabs = FALSE;
 }
 
 static void queue_draw(TabData *tab) {
@@ -1189,33 +1264,38 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
 
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
-        char *fname = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-        
-        /* Create a new tab for the document */
-        TabData *tab = create_new_tab(notebook);
-        if (tab) {
-            /* load into the tab */
-            load_file_into_tab(tab, fname);
-            
-            /* Add to session model */
-            if (current_selected_session) {
-                session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
-                if (session) {
-                    char *uri = g_filename_to_uri(fname, NULL, NULL);
-                    if (uri) {
+    char *fname = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
+    if (fname) {
+        char *uri = g_filename_to_uri(fname, NULL, NULL);
+        int existing_idx = -1;
+        if (uri) {
+            existing_idx = find_matching_tab_index(GTK_NOTEBOOK(notebook), uri);
+        }
+        if (existing_idx >= 0) {
+            /* Already open in this notebook: focus existing tab */
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), existing_idx);
+        } else {
+            /* Not open yet: create tab and load */
+            TabData *tab = create_new_tab(notebook);
+            if (tab) {
+                load_file_into_tab(tab, fname);
+                /* Add to session model only for newly opened docs */
+                if (current_selected_session) {
+                    session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+                    if (session && uri) {
                         if (is_helper) {
                             session_model_add_helper_document_url(session, uri);
                         } else {
                             session_model_add_document_url(session, uri);
-                            /* Add filename to sessions sidebar tree */
-                            // TODO: Implement adding to tree view
+                            /* TODO: Implement adding to tree view */
                         }
-                        g_free(uri);
                     }
                 }
             }
         }
+        if (uri) g_free(uri);
         g_free(fname);
+        }
     }
     gtk_widget_destroy(dialog);
 }
@@ -1232,6 +1312,51 @@ static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data) {
     open_file_in_notebook(right_notebook, TRUE);
 }
 
+static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri) {
+    if (!notebook || !target_uri || !*target_uri) return -1;
+    int n_pages = gtk_notebook_get_n_pages(notebook);
+    for (int i = 0; i < n_pages; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(notebook, i);
+        if (!page) continue;
+        TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+        if (!tab || !tab->current_file) continue;
+        char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+        if (!uri) continue;
+        gboolean matched = (g_strcmp0(uri, target_uri) == 0);
+        g_free(uri);
+        if (matched) return i;
+    }
+    return -1;
+}
+
+static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num) {
+    (void)page_num;
+    if (is_restoring_session_tabs) return;
+    if (!notebook || !page || !current_selected_session || !session_models) return;
+    session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+    if (!session) return;
+    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+    if (!tab || !tab->current_file) return;
+    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+    if (!uri) return;
+    if (notebook == GTK_NOTEBOOK(left_notebook)) {
+        session_model_set_last_read_document(session, uri);
+    } else if (notebook == GTK_NOTEBOOK(right_notebook)) {
+        session_model_set_last_read_help_document(session, uri);
+    }
+    g_free(uri);
+}
+
+static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
+    (void)user_data;
+    update_last_read_for_notebook(notebook, page, page_num);
+}
+
+static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
+    (void)user_data;
+    update_last_read_for_notebook(notebook, page, page_num);
+}
+
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     typedef struct {
@@ -1243,33 +1368,67 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
         if (ci) g_free(ci);
         return;
     }
+
+    gboolean is_left = (ci->notebook == GTK_NOTEBOOK(left_notebook));
+    gboolean is_right = (ci->notebook == GTK_NOTEBOOK(right_notebook));
+    session_model_t *session = NULL;
+    if (current_selected_session && session_models) {
+        session = g_hash_table_lookup(session_models, current_selected_session);
+    }
+
+    char *closed_uri = NULL;
     int page_idx = gtk_notebook_page_num(ci->notebook, ci->page);
     if (page_idx >= 0) {
         GtkWidget *child = gtk_notebook_get_nth_page(ci->notebook, page_idx);
         if (child) {
             TabData *tab = g_object_get_data(G_OBJECT(child), "tab-data");
-            if (tab && tab->current_file && current_selected_session) {
+            if (tab && tab->current_file && session) {
+                closed_uri = g_filename_to_uri(tab->current_file, NULL, NULL);
                 // Remove from open documents list
-                session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
-                if (session) {
-                    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
-                    if (uri) {
-                        if (ci->notebook == GTK_NOTEBOOK(left_notebook)) {
-                            session_model_remove_document_url(session, uri);
-                        } else if (ci->notebook == GTK_NOTEBOOK(right_notebook)) {
-                            session_model_remove_helper_document_url(session, uri);
-                        }
-                        g_free(uri);
-                    }
+                if (closed_uri) {
+                    if (is_left) {
+                        session_model_remove_document_url(session, closed_uri);
+                    } else if (is_right) {
+                        session_model_remove_helper_document_url(session, closed_uri);
                 }
-                
+            }
                 if (tab->doc) g_object_unref(tab->doc);
                 if (tab->current_file) g_free(tab->current_file);
                 g_free(tab);
             }
         }
         gtk_notebook_remove_page(ci->notebook, page_idx);
+
+        if (session) {
+            gboolean closed_was_last_read = FALSE;
+            if (closed_uri) {
+                if (is_left) {
+                    const char *last = session_model_get_last_read_document(session);
+                    closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
+                } else if (is_right) {
+                    const char *last = session_model_get_last_read_help_document(session);
+                    closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
+                }
+            }
+            if (closed_was_last_read) {
+                int cur = gtk_notebook_get_current_page(ci->notebook);
+                if (cur >= 0) {
+                    GtkWidget *new_page = gtk_notebook_get_nth_page(ci->notebook, cur);
+                    if (new_page) {
+                        update_last_read_for_notebook(ci->notebook, new_page, (guint)cur);
+                    }
+                } else {
+                    if (is_left) {
+                        session_model_set_last_read_document(session, "");
+                    } else if (is_right) {
+                        session_model_set_last_read_help_document(session, "");
+                    }
+                }
+            }
+        }
     }
+
+    if (closed_uri) g_free(closed_uri);
     g_free(ci);
 }
 
@@ -1603,6 +1762,7 @@ GtkWidget* create_main_window(void) {
     left_notebook = gtk_notebook_new();
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
     atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
+    g_signal_connect(left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
 
     // Add initial placeholder page so it is visible immediately
     // Use last open session if available, otherwise default to "Default"
@@ -1622,6 +1782,7 @@ GtkWidget* create_main_window(void) {
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
+    g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
 
     /* Add initial content so right notebook is visible when shown */
     // Note: restore_open_tabs_for_session already handles both notebooks
