@@ -57,8 +57,23 @@ static GtkWidget *sessions_add_btn;
 static GtkWidget *sessions_remove_btn;
 static GtkWidget *sessions_update_btn;
 static GtkWidget *sessions_tree_view;
-static GtkListStore *sessions_list_store;
+static GtkTreeStore *sessions_tree_store;
 static sessions_model_t *sessions_model;
+static gboolean sessions_tree_syncing = FALSE;
+static gchar *last_tree_selection_key = NULL;
+
+typedef enum {
+    SESSION_COL_LABEL = 0,      // visible text
+    SESSION_COL_ROW_KIND,       // 0=session, 1=file
+    SESSION_COL_SESSION_NAME,   // owning session
+    SESSION_COL_DOC_URI,        // file row only
+    SESSION_COL_COUNT
+} SessionTreeCols;
+
+typedef enum {
+    SESSION_ROW_SESSION = 0,
+    SESSION_ROW_FILE = 1
+} SessionRowKind;
 
 /* Session models - map from session name to session_model_t */
 static GHashTable *session_models;
@@ -404,19 +419,82 @@ void load_state(void) {
     g_free(config_file);
 }
 
-void populate_sessions_treeview(void) {
-    if (!sessions_list_store) return;
-    
-    // Clear existing items
-    gtk_list_store_clear(sessions_list_store);
-    
-    // Populate tree view with existing sessions
-    const GList *session_names = sessions_model_get_session_names(sessions_model);
-    for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
-        GtkTreeIter tree_iter;
-        gtk_list_store_append(sessions_list_store, &tree_iter);
-        gtk_list_store_set(sessions_list_store, &tree_iter, 0, (const char*)iter->data, -1);
+static void switch_to_session(const char *session_name) {
+    if (!session_name || !*session_name) return;
+
+    if (current_selected_session && g_strcmp0(current_selected_session, session_name) == 0) {
+        return;
     }
+
+    if (current_selected_session) {
+        save_open_tabs_for_session(current_selected_session);
+        g_free(current_selected_session);
+    }
+
+    current_selected_session = g_strdup(session_name);
+    restore_open_tabs_for_session(session_name);
+    update_window_title_for_session(current_selected_session);
+
+    if (sessions_model) {
+        sessions_model_set_last_open_session(sessions_model, session_name);
+    }
+}
+
+static void reset_sessions_tree_selection_guard(void) {
+    g_clear_pointer(&last_tree_selection_key, g_free);
+}
+
+void populate_sessions_treeview(void) {
+    if (!sessions_tree_store || !sessions_model) return;
+
+    sessions_tree_syncing = TRUE;
+    reset_sessions_tree_selection_guard();
+
+    gtk_tree_store_clear(sessions_tree_store);
+
+    const GList *session_names = sessions_model_get_session_names(sessions_model);
+    for (const GList *s = session_names; s; s = s->next) {
+        const char *session_name = (const char *)s->data;
+        GtkTreeIter parent;
+
+        gtk_tree_store_append(sessions_tree_store, &parent, NULL);
+        gtk_tree_store_set(
+            sessions_tree_store, &parent,
+            SESSION_COL_LABEL, session_name,
+            SESSION_COL_ROW_KIND, SESSION_ROW_SESSION,
+            SESSION_COL_SESSION_NAME, session_name,
+            SESSION_COL_DOC_URI, "",
+            -1
+        );
+
+        session_model_t *session = g_hash_table_lookup(session_models, session_name);
+        if (!session) continue;
+
+        // ONLY document_urls (left notebook docs), no helper_document_urls
+        const GList *docs = session_model_get_document_urls(session);
+        for (const GList *d = docs; d; d = d->next) {
+            const char *uri = (const char *)d->data;
+            GtkTreeIter child;
+
+            char *filename = g_filename_from_uri(uri, NULL, NULL);
+            char *basename = filename ? g_path_get_basename(filename) : g_strdup(uri);
+
+            gtk_tree_store_append(sessions_tree_store, &child, &parent);
+            gtk_tree_store_set(
+                sessions_tree_store, &child,
+                SESSION_COL_LABEL, basename,
+                SESSION_COL_ROW_KIND, SESSION_ROW_FILE,
+                SESSION_COL_SESSION_NAME, session_name,
+                SESSION_COL_DOC_URI, uri,
+                -1
+            );
+
+            g_free(basename);
+            g_free(filename);
+        }
+    }
+
+    sessions_tree_syncing = FALSE;
 }
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -696,53 +774,52 @@ static void set_right_notebook_session(const gchar *session_name) {
     }
 }
 
-static gboolean on_sessions_treeview_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+static void on_sessions_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data) {
     (void)user_data;
-    if (event->type == GDK_BUTTON_PRESS && event->button == GDK_BUTTON_PRIMARY) {
-        GtkTreePath *path = NULL;
-        if (gtk_tree_view_get_path_at_pos(GTK_TREE_VIEW(widget), (gint)event->x, (gint)event->y, &path, NULL, NULL, NULL)) {
-            GtkTreeIter iter;
-            GtkTreeModel *model = gtk_tree_view_get_model(GTK_TREE_VIEW(widget));
-            if (gtk_tree_model_get_iter(model, &iter, path)) {
-                gchar *session_name = NULL;
-                gtk_tree_model_get(model, &iter, 0, &session_name, -1);
-                if (session_name) {
-                    // No-op if clicking the already selected session
-                    if (current_selected_session && g_strcmp0(current_selected_session, session_name) == 0) {
-                        g_free(session_name);
-                        gtk_tree_path_free(path);
-                        return FALSE;
-                    }
+    if (sessions_tree_syncing) return;
 
-                    // Save current session's open tabs before switching
-                    if (current_selected_session) {
-                        save_open_tabs_for_session(current_selected_session);
-                    }
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(tree_view);
+    GtkTreeModel *model = NULL;
+    GtkTreeIter iter;
+    if (!gtk_tree_selection_get_selected(sel, &model, &iter)) return;
 
-                    // Switch selected session FIRST so notebook callbacks use the right session
-                    if (current_selected_session) {
-                        g_free(current_selected_session);
-                    }
-                    current_selected_session = g_strdup(session_name);
+    gint row_kind = SESSION_ROW_SESSION;
+    gchar *session_name = NULL;
+    gchar *doc_uri = NULL;
 
-                    // Restore tabs for the new active session
-                    restore_open_tabs_for_session(session_name);
+    gtk_tree_model_get(model, &iter,
+        SESSION_COL_ROW_KIND, &row_kind,
+        SESSION_COL_SESSION_NAME, &session_name,
+        SESSION_COL_DOC_URI, &doc_uri,
+        -1);
 
-                    // Update window title
-                    update_window_title_for_session(current_selected_session);
+    if (!session_name || !*session_name) goto cleanup;
 
-                    // Persist "last open session" in sessions model
-                    if (sessions_model) {
-                        sessions_model_set_last_open_session(sessions_model, session_name);
-                    }
+    /* Build stable key for dedupe */
+    gchar *key = (row_kind == SESSION_ROW_FILE && doc_uri && *doc_uri)
+        ? g_strdup_printf("F|%s|%s", session_name, doc_uri)
+        : g_strdup_printf("S|%s", session_name);
 
-                    g_free(session_name);
-                }
-            }
-            gtk_tree_path_free(path);
+    if (last_tree_selection_key && g_strcmp0(last_tree_selection_key, key) == 0) {
+        g_free(key);
+        goto cleanup; /* noisy repeat */
+    }
+
+    g_free(last_tree_selection_key);
+    last_tree_selection_key = key;
+
+    switch_to_session(session_name);
+
+    if (row_kind == SESSION_ROW_FILE && doc_uri && *doc_uri) {
+        int idx = find_matching_tab_index(GTK_NOTEBOOK(left_notebook), doc_uri);
+        if (idx >= 0) {
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), idx);
         }
     }
-    return FALSE;
+
+cleanup:
+    g_free(session_name);
+    g_free(doc_uri);
 }
 
 static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
@@ -1545,15 +1622,22 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
     
     // Tree view
-    sessions_list_store = gtk_list_store_new(1, G_TYPE_STRING);
-    sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_list_store));
-    g_object_unref(sessions_list_store);
+    sessions_tree_store = gtk_tree_store_new(
+    SESSION_COL_COUNT,
+    G_TYPE_STRING,  // label
+    G_TYPE_INT,     // row kind
+    G_TYPE_STRING,  // session name
+    G_TYPE_STRING   // doc uri
+    );
+
+    sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_tree_store));
+    g_object_unref(sessions_tree_store);
     
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
-    GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session Name", renderer, "text", 0, NULL);
+    GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session / File", renderer, "text", SESSION_COL_LABEL, NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
 
-    g_signal_connect(sessions_tree_view, "button-press-event", G_CALLBACK(on_sessions_treeview_button_press), NULL);
+    g_signal_connect(sessions_tree_view, "cursor-changed", G_CALLBACK(on_sessions_treeview_cursor_changed), NULL);
     
     // Scrolled window for tree view
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
@@ -1563,7 +1647,7 @@ GtkWidget* create_main_window(void) {
     
     // Populate tree view with existing sessions
     populate_sessions_treeview();
-    
+
     gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
     gtk_widget_hide(sessions_container);
 
