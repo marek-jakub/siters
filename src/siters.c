@@ -25,6 +25,7 @@ typedef struct {
     GtkWidget *scrolled;
     GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
     int layout_mode; /* 0=single-column,1=two-column,2=horizontal */
+    int last_target_width; /* used to track when we need to rebuild the continuous view */
 } TabData;
 
 typedef enum {
@@ -86,12 +87,28 @@ static GtkWidget *right_notebook;
 static gchar *current_selected_session = NULL;
 static gboolean is_restoring_session_tabs = FALSE;
 
+/* Page jump widget */
+static GtkWidget *page_entry = NULL;
+static GtkWidget *page_total_label = NULL;
+static gboolean page_spin_syncing = FALSE;
+
+static TabData *get_current_left_tab(void);
+static void sync_page_widget_from_tab(TabData *tab);
+static void on_page_entry_activate(GtkEntry *entry, gpointer user_data);
+
 /* Function prototypes */
 void save_state(void);
 void populate_sessions_treeview(void);
 void hide_right_pane(void);
 static void set_right_notebook_session(const gchar *session_name);
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data);
+static void on_page_entry_insert_text(GtkEditable *editable,
+                                      const gchar *text,
+                                      gint length,
+                                      gint *position,
+                                      gpointer user_data);
+static int get_target_width_for_tab(TabData *tab);
+static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data);
 
 /* Session tab persistence functions */
 static void save_open_tabs_for_session(const char *session_name);
@@ -411,6 +428,7 @@ void load_state(void) {
             g_free(current_selected_session);
             current_selected_session = g_strdup(loaded_session);
             restore_open_tabs_for_session(loaded_session);
+            sync_page_widget_from_tab(get_current_left_tab()); 
             update_window_title_for_session(current_selected_session);
         }
     }
@@ -433,6 +451,7 @@ static void switch_to_session(const char *session_name) {
 
     current_selected_session = g_strdup(session_name);
     restore_open_tabs_for_session(session_name);
+    sync_page_widget_from_tab(get_current_left_tab()); 
     update_window_title_for_session(current_selected_session);
 
     if (sessions_model) {
@@ -656,6 +675,7 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
             current_selected_session = g_strdup("Default"); // or first remaining session
 
             restore_open_tabs_for_session(current_selected_session);
+            sync_page_widget_from_tab(get_current_left_tab());
 
             if (sessions_model) {
                 sessions_model_set_last_open_session(sessions_model, current_selected_session);
@@ -1073,6 +1093,31 @@ static void queue_draw(TabData *tab) {
         gtk_widget_queue_draw(tab->pages_drawing);
 }
 
+static int get_target_width_for_tab(TabData *tab) {
+    int target_w = 800;
+    if (tab && tab->scrolled) {
+        GtkAllocation alloc;
+        gtk_widget_get_allocation(tab->scrolled, &alloc);
+        if (alloc.width > 100) target_w = alloc.width - 40;
+    }
+    if (target_w < 1) target_w = 1;
+    return target_w;
+}
+
+static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data) {
+    (void)widget;
+    (void)allocation;
+    TabData *tab = user_data;
+    if (!tab || !tab->doc) return;
+    if (tab->layout_mode != 0) return;
+
+    int target_w = get_target_width_for_tab(tab);
+    if (target_w == tab->last_target_width) return;  /* no real width change */
+
+    tab->last_target_width = target_w;
+    build_continuous_view(tab, target_w);
+}
+
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     TabData *tab = user_data;
     GtkAllocation alloc;
@@ -1089,7 +1134,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
     const double spacing = 6.0;
     if (tab->layout_mode == 0) {
-        int target_w = alloc.width - 40;
+        int target_w = get_target_width_for_tab(tab);
         if (target_w < 100) target_w = alloc.width;
         double y = spacing; /* top padding */
         for (int i = 0; i < tab->n_pages; ++i) {
@@ -1132,7 +1177,7 @@ static void build_continuous_view(TabData *tab, int target_width) {
     const double spacing = 6.0;
     if (tab->layout_mode == 0) {
         /* single-column (top-to-bottom) */
-        double total_h = 0.0;
+        double total_h = spacing; /* top padding to match draw*/
         for (int i = 0; i < tab->n_pages; ++i) {
             PopplerPage *page = poppler_document_get_page(tab->doc, i);
             if (!page) continue;
@@ -1153,12 +1198,13 @@ static void scroll_to_page(TabData *tab, int page) {
     if (!tab || !tab->scrolled || !tab->pages_drawing || !tab->doc) return;
     if (page < 0 || page >= tab->n_pages) return;
     /* compute vertical offset of requested page */
-    int target_w = 800;
+    const double spacing = 6.0;
+    int target_w = get_target_width_for_tab(tab);
     GtkAllocation salloc;
     gtk_widget_get_allocation(tab->scrolled, &salloc);
     if (salloc.width > 100) target_w = salloc.width - 40;
 
-    double y = 0.0;
+    double y = spacing; /* match on_draw top padding */
     for (int i = 0; i < page; ++i) {
         PopplerPage *p = poppler_document_get_page(tab->doc, i);
         if (!p) continue;
@@ -1180,15 +1226,27 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
     /* Calculate which page is at the top of the visible area */
     double scroll_y = gtk_adjustment_get_value(adj);
     const double spacing = 6.0;
-    int target_w = 800;
+    int target_w = get_target_width_for_tab(tab);
     if (tab->scrolled) {
         GtkAllocation alloc;
         gtk_widget_get_allocation(tab->scrolled, &alloc);
         if (alloc.width > 100) target_w = alloc.width - 40;
     }
+
+    /* Robust end-of-document clamp:
+       at (or extremely near) the bottom, always report last page */
+    double upper = gtk_adjustment_get_upper(adj);
+    double page_size = gtk_adjustment_get_page_size(adj);
+    if (tab->n_pages > 0 && scroll_y >= (upper - page_size - 1.0)) {
+        tab->cur_page = tab->n_pages - 1;
+        if (tab == get_current_left_tab()) {
+            sync_page_widget_from_tab(tab);
+        }
+        return;
+    }
     
     double y = spacing;
-    int visible_page = 0;
+    int visible_page = (tab->n_pages > 0) ? (tab->n_pages - 1) : 0;
     
     if (tab->layout_mode == 0) {
         /* single-column layout */
@@ -1211,6 +1269,90 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
     }
     
     tab->cur_page = visible_page;
+
+    if (tab == get_current_left_tab()) {
+        sync_page_widget_from_tab(tab);
+    }
+}
+
+static TabData *get_current_left_tab(void) {
+    if (!left_notebook) return NULL;
+    int idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(left_notebook));
+    if (idx < 0) return NULL;
+
+    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), idx);
+    if (!page) return NULL;
+
+    return g_object_get_data(G_OBJECT(page), "tab-data");
+}
+
+static void sync_page_widget_from_tab(TabData *tab) {
+    if (!page_entry || !page_total_label) return;
+
+    int total = 0;
+    int current = 0;
+
+    if (tab && tab->n_pages > 0) {
+        total = tab->n_pages;
+        current = tab->cur_page + 1; /* UI is 1-based */
+        if (current < 1) current = 1;
+        if (current > total) current = total;
+    }
+
+    page_spin_syncing = TRUE;
+    if (total == 0) {
+        /* pick one of these two lines */
+        gtk_entry_set_text(GTK_ENTRY(page_entry), "");   /* blank */
+        /* gtk_entry_set_text(GTK_ENTRY(page_entry), "0"); */ /* or 0 */
+    } else {
+        gchar *cur_txt = g_strdup_printf("%d", current);
+        gtk_entry_set_text(GTK_ENTRY(page_entry), cur_txt);
+        g_free(cur_txt);
+    }
+    page_spin_syncing = FALSE;
+
+    gchar *txt = g_strdup_printf("/ %d", total);
+    gtk_label_set_text(GTK_LABEL(page_total_label), txt);
+    g_free(txt);
+}
+
+static void on_page_entry_insert_text(GtkEditable *editable,
+                                      const gchar *text,
+                                      gint length,
+                                      gint *position,
+                                      gpointer user_data) {
+    (void)position;
+    (void)user_data;
+
+    /* Allow only ASCII digits to be inserted (typed or pasted). */
+    for (gint i = 0; i < length; i++) {
+        if (!g_ascii_isdigit((guchar)text[i])) {
+            g_signal_stop_emission_by_name(editable, "insert-text");
+            return;
+        }
+    }
+}
+
+static void on_page_entry_activate(GtkEntry *entry, gpointer user_data) {
+    (void)user_data;
+    if (page_spin_syncing) return;
+
+    TabData *tab = get_current_left_tab();
+    if (!tab || tab->n_pages <= 0) return;
+
+    const char *raw = gtk_entry_get_text(GTK_ENTRY(entry));
+    char *endptr = NULL;
+    long requested_ui = strtol(raw, &endptr, 10);
+    if (endptr == raw || *endptr != '\0') {
+        sync_page_widget_from_tab(tab);
+        return;
+    }
+
+    if (requested_ui < 1 || requested_ui > tab->n_pages) return;
+
+    int target_zero_based = requested_ui - 1;
+    tab->cur_page = target_zero_based;
+    scroll_to_page(tab, target_zero_based);
 }
 
 static void load_file_into_tab(TabData *tab, const char *filename) {
@@ -1254,7 +1396,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
 
     {
         /* rebuild continuous pages using scrolled allocation if available */
-        int target_w = 800;
+        int target_w = get_target_width_for_tab(tab);
         if (tab->scrolled) {
             GtkAllocation alloc;
             gtk_widget_get_allocation(tab->scrolled, &alloc);
@@ -1262,6 +1404,11 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
         }
         build_continuous_view(tab, target_w);
         scroll_to_page(tab, tab->cur_page);
+
+        /* Ensure page counter shows real total immediately after load. */
+        if (tab == get_current_left_tab()) {
+            sync_page_widget_from_tab(tab);
+        }
     }
 }
 
@@ -1271,6 +1418,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->layout_mode = 0;    /* single-column by default */
     tab->n_pages = 0;
     tab->cur_page = 0;
+    tab->last_target_width = -1;
     
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
@@ -1289,6 +1437,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     /* connect scroll adjustment to update page display */
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
     g_signal_connect(G_OBJECT(vadj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
+    g_signal_connect(G_OBJECT(tab->scrolled), "size-allocate", G_CALLBACK(on_tab_scrolled_size_allocate), tab);
     tab->pages_drawing = gtk_drawing_area_new();
     gtk_widget_set_hexpand(tab->pages_drawing, TRUE);
     gtk_widget_set_vexpand(tab->pages_drawing, TRUE);
@@ -1427,11 +1576,15 @@ static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
     (void)user_data;
     update_last_read_for_notebook(notebook, page, page_num);
+    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+    sync_page_widget_from_tab(tab);
 }
 
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
     (void)user_data;
     update_last_read_for_notebook(notebook, page, page_num);
+    /* keep widget tied to primary (left) document */
+    sync_page_widget_from_tab(get_current_left_tab());
 }
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
@@ -1560,6 +1713,7 @@ GtkWidget* create_main_window(void) {
     /* Left sidebar: main toolbar */
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "Toolbar");
+    gtk_widget_set_size_request(toolbar, 48, -1);
     gtk_box_pack_start(GTK_BOX(main_hbox), toolbar, FALSE, FALSE, 0);
 
     /* Sidebar for sessions, toc, settings */
@@ -1724,6 +1878,33 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page down");
     gtk_box_pack_start(GTK_BOX(toolbar), page_down_btn, FALSE, FALSE, 1);
 
+    /* Page number jump: [spin] / total */
+    GtkWidget *page_nav_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_widget_set_halign(page_nav_box, GTK_ALIGN_CENTER);
+    gtk_widget_set_hexpand(page_nav_box, FALSE);
+
+    page_entry = gtk_entry_new();
+    gtk_widget_set_size_request(page_entry, 42, -1);
+    gtk_entry_set_max_length(GTK_ENTRY(page_entry), 4);
+    gtk_entry_set_width_chars(GTK_ENTRY(page_entry), 2);
+    gtk_entry_set_max_width_chars(GTK_ENTRY(page_entry), 3);
+    gtk_entry_set_input_purpose(GTK_ENTRY(page_entry), GTK_INPUT_PURPOSE_DIGITS);
+    gtk_widget_set_tooltip_text(page_entry, "Current page (press Enter to jump)");
+    atk_object_set_name(gtk_widget_get_accessible(page_entry), "Current page");
+
+    page_total_label = gtk_label_new("/ 0");
+    gtk_box_pack_start(GTK_BOX(page_nav_box), page_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(page_nav_box), page_total_label, FALSE, FALSE, 0);
+    gtk_label_set_width_chars(GTK_LABEL(page_total_label), 4);
+    gtk_label_set_xalign(GTK_LABEL(page_total_label), 0.5f);
+    gtk_box_pack_start(GTK_BOX(toolbar), page_nav_box, FALSE, FALSE, 1);
+
+    /* Allow only digits to be entered */
+    g_signal_connect(page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
+
+    /* Enter in spin jumps to page */
+    g_signal_connect(page_entry, "activate", G_CALLBACK(on_page_entry_activate), NULL);
+
     /* Separator */
     GtkWidget *separator_c = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(toolbar), separator_c, FALSE, FALSE, 5);
@@ -1848,7 +2029,6 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
     g_signal_connect(left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
 
-    // Add initial placeholder page so it is visible immediately
     // Use last open session if available, otherwise default to "Default"
     const char *initial_session = "Default";
     if (sessions_model) {
@@ -1858,6 +2038,7 @@ GtkWidget* create_main_window(void) {
         }
     }
     restore_open_tabs_for_session(initial_session);
+    sync_page_widget_from_tab(get_current_left_tab());
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
@@ -1868,7 +2049,6 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
     g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
 
-    /* Add initial content so right notebook is visible when shown */
     // Note: restore_open_tabs_for_session already handles both notebooks
     current_selected_session = g_strdup(initial_session);
     update_window_title_for_session(current_selected_session);
