@@ -21,7 +21,7 @@ import subprocess
 import sys
 import time
 import unittest
-from pathlib import Path
+from typing import Any
 
 try:
     from dogtail import config
@@ -42,11 +42,13 @@ logging.disable(logging.INFO)
 class SitersGUITestCase(unittest.TestCase):
     """Base test case for Siters GUI tests with setup/teardown."""
 
+    app: Any
+
     @classmethod
     def setUpClass(cls):
         """Set up test fixtures for all tests."""
-        config.logDir = "/tmp/"
-        config.debugSearching = False
+        config.config.debug_file = "/tmp/"
+        config.config.debug_searching = False
 
         # Use the build directory binary, or fall back to PATH
         build_binary = os.path.join(os.path.dirname(__file__), "..", "build", "siters")
@@ -443,7 +445,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         pass
 
                     return None
-                except Exception as e:
+                except Exception:
                     return None
 
             # Helper to find entry field for new session name
@@ -451,7 +453,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 try:
                     # Search by accessible name first (matches atk_object_set_name)
                     try:
-                        result = siters_app.findChild(lambda x: x.name == 'Sessions entry')
+                        result = siters_app.findChild(
+                            lambda x: x.name == "Sessions entry"
+                        )
                         if result:
                             return result
                     except Exception:
@@ -462,14 +466,18 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
                     for role in roles_to_try:
                         try:
-                            result = siters_app.findChild(lambda x: x.roleName == role and x.name != 'Current page')
+                            result = siters_app.findChild(
+                                lambda x: (
+                                    x.roleName == role and x.name != "Current page"
+                                )
+                            )
                             if result:
                                 return result
                         except Exception:
                             pass
 
                     return None
-                except Exception as e:
+                except Exception:
                     return None
 
             # Helper to find buttons in sessions sidebar
@@ -502,7 +510,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         return result
 
                     return None
-                except Exception as e:
+                except Exception:
                     return None
 
             # Helper to get session names from tree view
@@ -529,12 +537,12 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Verify the sidebar actually opened by checking for sidebar-only widgets
             def sidebar_is_open():
                 try:
-                    siters_app.findChild(lambda x: x.name == 'Sessions entry')
+                    siters_app.findChild(lambda x: x.name == "Sessions entry")
                     return True
                 except Exception:
                     pass
                 try:
-                    siters_app.findChild(lambda x: x.name == 'Add session')
+                    siters_app.findChild(lambda x: x.name == "Add session")
                     return True
                 except Exception:
                     pass
@@ -545,7 +553,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 try:
                     result = subprocess.run(
                         ["xdotool", "search", "--name", "Siters"],
-                        capture_output=True, text=True, timeout=2
+                        capture_output=True,
+                        text=True,
+                        timeout=2,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         window_id = result.stdout.strip().split("\n")[0]
@@ -555,15 +565,24 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         if hasattr(sessions_btn, "position"):
                             x, y = sessions_btn.position
                             subprocess.run(
-                                ["xdotool", "mousemove", str(x + 10), str(y + 10), "click", "1"],
-                                timeout=2
+                                [
+                                    "xdotool",
+                                    "mousemove",
+                                    str(x + 10),
+                                    str(y + 10),
+                                    "click",
+                                    "1",
+                                ],
+                                timeout=2,
                             )
                             time.sleep(1)
                 except Exception:
                     pass
 
                 if not sidebar_is_open():
-                    print("WARNING: Could not open sidebar via GUI, will use config injection fallback")
+                    print(
+                        "WARNING: Could not open sidebar via GUI, will use config injection fallback"
+                    )
                     sidebar_opened_via_gui = False
                 else:
                     sidebar_opened_via_gui = True
@@ -700,17 +719,17 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         except Exception:
                             pass
 
-                    # Method 4: Fall back to rawinput keyPress
+                    # Method 4: Fall back to rawinput press_key
                     if not success:
                         try:
-                            from dogtail.rawinput import keyPress
+                            from dogtail.rawinput import pressKey
 
-                            keyPress("ctrl+a")
+                            pressKey("ctrl+a")
                             time.sleep(0.1)
-                            keyPress("Delete")
+                            pressKey("Delete")
                             time.sleep(0.1)
                             for char in "TestSession":
-                                keyPress(char)
+                                pressKey(char)
                                 time.sleep(0.05)
                             time.sleep(0.3)
                             if "TestSession" in (entry.text or ""):
@@ -725,9 +744,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
             # If text wasn't entered via GUI methods, use config injection
             if not text_entered:
-                print(
-                    "WARNING: Using config file injection to create TestSession"
-                )
+                print("WARNING: Using config file injection to create TestSession")
                 import configparser
 
                 config_dir = os.path.expanduser("~/.config/siters")
