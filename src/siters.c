@@ -44,6 +44,7 @@ typedef struct TabDataStruct {
     gboolean initial_scroll_pending; /* flag to indicate we need to scroll to the saved page after initial render */
     RestoreState *pending_restore; /* in-progress idle restore callback */
     double scroll_offset; /* used to restore scroll position in continuous view */
+    gboolean is_helper; /* TRUE if this tab is in the right (helper) notebook */
 } TabData;
 
 typedef enum {
@@ -154,6 +155,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
+static char* make_document_key(const char *uri, gboolean is_helper);
 
 /* Save state on closing app */
 static void cancel_tab_restore(TabData *tab) {
@@ -317,10 +319,20 @@ void save_state(void) {
         
         while (g_hash_table_iter_next(&iter, &key, &value)) {
             document_model_t *doc_model = (document_model_t*)value;
-            const char *uri = (const char*)key;
+            const char *compound_key = (const char*)key;
+            
+            /* Parse compound key "side:uri" — handle both old (plain URI) and new format */
+            const char *colon = strchr(compound_key, ':');
+            const char *side = "left";
+            const char *uri = compound_key;
+            if (colon && (g_str_has_prefix(compound_key, "left:") || g_str_has_prefix(compound_key, "right:"))) {
+                side = compound_key[0] == 'r' ? "right" : "left";
+                uri = colon + 1;
+            }
             
             gchar *section_name = g_strdup_printf("Document_%d", doc_count);
             
+            g_key_file_set_string(key_file, section_name, "side", side);
             g_key_file_set_string(key_file, section_name, "uri", uri);
             g_key_file_set_double(key_file, section_name, "zoom", 
                                  document_model_get_zoom(doc_model));
@@ -543,7 +555,13 @@ void load_state(void) {
                 document_model_set_intra_page_fraction(doc_model,
                     g_key_file_get_double(key_file, section_name, "intra_page_fraction", NULL) ?: 0.0);
                 
-                g_hash_table_insert(document_models, g_strdup(uri), doc_model);
+                /* Read side field (default "left" for backward compatibility) */
+                gchar *side = g_key_file_get_string(key_file, section_name, "side", NULL);
+                gboolean is_helper = (side && strcmp(side, "right") == 0);
+                g_free(side);
+                
+                char *key = make_document_key(uri, is_helper);
+                g_hash_table_insert(document_models, key, doc_model);
                 g_free(uri);
             }
             g_free(section_name);
@@ -621,18 +639,28 @@ static double get_page_height_with_width(TabData *tab, int page_idx, int target_
     return ph * scale;
 }
 
+/* Build a compound key "side:uri" to differentiate left vs right notebook state */
+static char* make_document_key(const char *uri, gboolean is_helper) {
+    const char *side = is_helper ? "right" : "left";
+    return g_strdup_printf("%s:%s", side, uri);
+}
+
 static void update_document_model_from_tab(TabData *tab) {
     if (!tab || !tab->current_file || !document_models) return;
     
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
     
+    char *key = make_document_key(uri, tab->is_helper);
+    
     // Get or create document model
-    document_model_t *doc_model = g_hash_table_lookup(document_models, uri);
+    document_model_t *doc_model = g_hash_table_lookup(document_models, key);
     if (!doc_model) {
         doc_model = document_model_new();
         document_model_set_url(doc_model, uri);
-        g_hash_table_insert(document_models, g_strdup(uri), doc_model);
+        g_hash_table_insert(document_models, key, doc_model);
+    } else {
+        g_free(key);
     }
     
     // Update current state
@@ -685,7 +713,9 @@ static void restore_document_model_to_tab(TabData *tab) {
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    document_model_t *doc_model = g_hash_table_lookup(document_models, uri);
+    char *key = make_document_key(uri, tab->is_helper);
+    document_model_t *doc_model = g_hash_table_lookup(document_models, key);
+    g_free(key);
     if (doc_model) {
         int saved_page = document_model_get_current_page(doc_model);
         double saved_zoom = document_model_get_zoom(doc_model);
@@ -906,7 +936,9 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
         document_model_t *doc_model = NULL;
         if (uri) {
-            doc_model = g_hash_table_lookup(document_models, uri);
+            char *key = make_document_key(uri, tab->is_helper);
+            doc_model = g_hash_table_lookup(document_models, key);
+            g_free(key);
             g_free(uri);
         }
         
@@ -1949,6 +1981,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->last_target_width = -1;
     tab->initial_scroll_pending = FALSE;
     tab->scroll_offset = -1.0;
+    tab->is_helper = (notebook == right_notebook);
     
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
