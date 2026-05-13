@@ -1,7 +1,7 @@
 #include <gtk/gtk.h>
 #include <atk/atk.h>
-#include <glib/gkeyfile.h>
 #include <glib/gstdio.h>
+#include <json-glib/json-glib.h>
 #include <poppler.h>
 #include <math.h>
 #include "siters.h"
@@ -209,370 +209,300 @@ static void update_window_title_for_session(const char *session_name) {
 }
 
 /* State management functions */
+static void json_emit_document(JsonBuilder *builder, const char *uri, const char *side, document_model_t *dm) {
+    json_builder_begin_object(builder);
+    json_builder_set_member_name(builder, "uri");
+    json_builder_add_string_value(builder, uri);
+    json_builder_set_member_name(builder, "side");
+    json_builder_add_string_value(builder, side);
+    json_builder_set_member_name(builder, "zoom");
+    json_builder_add_double_value(builder, document_model_get_zoom(dm));
+    json_builder_set_member_name(builder, "current_page");
+    json_builder_add_int_value(builder, document_model_get_current_page(dm));
+    json_builder_set_member_name(builder, "page_count");
+    json_builder_add_int_value(builder, document_model_get_page_count(dm));
+    json_builder_set_member_name(builder, "visualization_mode");
+    json_builder_add_int_value(builder, document_model_get_visualization_mode(dm));
+    json_builder_set_member_name(builder, "horizontal_scroll");
+    json_builder_add_boolean_value(builder, document_model_get_horizontal_scroll(dm));
+    json_builder_set_member_name(builder, "scroll_offset");
+    json_builder_add_double_value(builder, document_model_get_scroll_offset(dm));
+    json_builder_set_member_name(builder, "intra_page_fraction");
+    json_builder_add_double_value(builder, document_model_get_intra_page_fraction(dm));
+    json_builder_end_object(builder);
+}
+
+static void json_emit_session_docs(JsonBuilder *builder, const GList *uris, const char *side_prefix, GHashTable *models) {
+    json_builder_begin_array(builder);
+    for (const GList *d = uris; d; d = d->next) {
+        const char *uri = (const char *)d->data;
+        const char *side = (strcmp(side_prefix, "right") == 0) ? "right" : "left";
+        char *key = make_document_key(uri, side[0] == 'r');
+        document_model_t *dm = models ? g_hash_table_lookup(models, key) : NULL;
+        if (dm) {
+            json_emit_document(builder, uri, side, dm);
+        }
+        g_free(key);
+    }
+    json_builder_end_array(builder);
+}
+
+static document_model_t* json_parse_document(JsonObject *obj) {
+    const char *uri = json_object_get_string_member_with_default(obj, "uri", NULL);
+    if (!uri || !*uri) return NULL;
+
+    document_model_t *dm = document_model_new();
+    document_model_set_url(dm, uri);
+    document_model_set_zoom(dm, json_object_get_double_member_with_default(obj, "zoom", 1.0));
+    document_model_set_current_page(dm, (int)json_object_get_int_member_with_default(obj, "current_page", 1));
+    document_model_set_page_count(dm, (int)json_object_get_int_member_with_default(obj, "page_count", 0));
+    document_model_set_visualization_mode(dm, (int)json_object_get_int_member_with_default(obj, "visualization_mode", 0));
+    document_model_set_horizontal_scroll(dm, json_object_get_boolean_member_with_default(obj, "horizontal_scroll", FALSE));
+    document_model_set_scroll_offset(dm, json_object_get_double_member_with_default(obj, "scroll_offset", 0.0));
+    document_model_set_intra_page_fraction(dm, json_object_get_double_member_with_default(obj, "intra_page_fraction", 0.0));
+    return dm;
+}
+
 void save_state(void) {
     // Save current session's open tabs before saving state
     if (current_selected_session) {
         save_open_tabs_for_session(current_selected_session);
     }
-    
-    GKeyFile *key_file = g_key_file_new();
-    GError *error = NULL;
-    
-    // Create config directory if it doesn't exist
+
     const gchar *config_dir = g_get_user_config_dir();
     gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
     g_mkdir_with_parents(app_config_dir, 0755);
-    
-    // Save window state
+
+    JsonBuilder *builder = json_builder_new();
+    json_builder_begin_object(builder);
+
+    json_builder_set_member_name(builder, "window");
+    json_builder_begin_object(builder);
     if (window) {
-        g_key_file_set_integer(key_file, "Window", "width", current_width);
-        g_key_file_set_integer(key_file, "Window", "height", current_height);
-        g_key_file_set_integer(key_file, "Window", "x", current_x);
-        g_key_file_set_integer(key_file, "Window", "y", current_y);
-        g_key_file_set_boolean(key_file, "Window", "maximized", current_maximized);
+        json_builder_set_member_name(builder, "width");
+        json_builder_add_int_value(builder, current_width);
+        json_builder_set_member_name(builder, "height");
+        json_builder_add_int_value(builder, current_height);
+        json_builder_set_member_name(builder, "x");
+        json_builder_add_int_value(builder, current_x);
+        json_builder_set_member_name(builder, "y");
+        json_builder_add_int_value(builder, current_y);
+        json_builder_set_member_name(builder, "maximized");
+        json_builder_add_boolean_value(builder, current_maximized);
     }
-    
-    // Save sessions
+    json_builder_end_object(builder);
+
+    json_builder_set_member_name(builder, "sessions");
+    json_builder_begin_object(builder);
     if (sessions_model) {
         const GList *session_names = sessions_model_get_session_names(sessions_model);
         if (session_names) {
-            // Build comma-separated list of session names
-            GString *names_str = g_string_new("");
-            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
-                if (names_str->len > 0) {
-                    g_string_append(names_str, ",");
-                }
-                g_string_append(names_str, (const char*)iter->data);
-            }
-            g_key_file_set_string(key_file, "Sessions", "names", names_str->str);
-            g_string_free(names_str, TRUE);
-            
-            // Save the last open session
+            json_builder_set_member_name(builder, "names");
+            json_builder_begin_array(builder);
+            for (const GList *iter = session_names; iter; iter = iter->next)
+                json_builder_add_string_value(builder, (const char *)iter->data);
+            json_builder_end_array(builder);
+
             const char *last_session = sessions_model_get_last_open_session(sessions_model);
             if (last_session) {
-                g_key_file_set_string(key_file, "Sessions", "last_open_session", last_session);
+                json_builder_set_member_name(builder, "last_open_session");
+                json_builder_add_string_value(builder, last_session);
             }
-            
-            // For each session, save its data (currently placeholder, as session_model not fully integrated)
-            for (const GList *iter = session_names; iter != NULL; iter = iter->next) {
-                const char *session_name = (const char*)iter->data;
-                gchar *section_name = g_strdup_printf("Session_%s", session_name);
-                
-                // Get session model for this session
+
+            json_builder_set_member_name(builder, "data");
+            json_builder_begin_object(builder);
+            for (const GList *iter = session_names; iter; iter = iter->next) {
+                const char *session_name = (const char *)iter->data;
+                json_builder_set_member_name(builder, session_name);
+                json_builder_begin_object(builder);
+
                 session_model_t *session = g_hash_table_lookup(session_models, session_name);
                 if (session) {
-                    // Save document URLs
-                    const GList *docs = session_model_get_document_urls(session);
-                    GString *docs_str = g_string_new("");
-                    for (const GList *doc_iter = docs; doc_iter != NULL; doc_iter = doc_iter->next) {
-                        if (docs_str->len > 0) g_string_append(docs_str, ",");
-                        g_string_append(docs_str, (const char*)doc_iter->data);
-                    }
-                    g_key_file_set_string(key_file, section_name, "documents", docs_str->str);
-                    g_string_free(docs_str, TRUE);
-                    
-                    // Save helper document URLs
-                    const GList *helper_docs = session_model_get_helper_document_urls(session);
-                    GString *helper_docs_str = g_string_new("");
-                    for (const GList *doc_iter = helper_docs; doc_iter != NULL; doc_iter = doc_iter->next) {
-                        if (helper_docs_str->len > 0) g_string_append(helper_docs_str, ",");
-                        g_string_append(helper_docs_str, (const char*)doc_iter->data);
-                    }
-                    g_key_file_set_string(key_file, section_name, "helper_documents", helper_docs_str->str);
-                    g_string_free(helper_docs_str, TRUE);
-                    
-                    // Save other session properties
-                    const char *last_read = session_model_get_last_read_document(session);
-                    g_key_file_set_string(key_file, section_name, "last_read_document", last_read ? last_read : "");
-                    
-                    const char *page_color = session_model_get_page_color(session);
-                    g_key_file_set_string(key_file, section_name, "page_color", page_color ? page_color : "#FFFFFF");
-                    
-                    const char *last_read_help = session_model_get_last_read_help_document(session);
-                    g_key_file_set_string(key_file, section_name, "last_read_help_document", last_read_help ? last_read_help : "");
-                    
-                    const char *helper_page_color = session_model_get_helper_page_color(session);
-                    g_key_file_set_string(key_file, section_name, "helper_page_color", helper_page_color ? helper_page_color : "#FFFFFF");
-                } else {
-                    // Placeholder: save empty document lists
-                    g_key_file_set_string(key_file, section_name, "documents", "");
-                    g_key_file_set_string(key_file, section_name, "helper_documents", "");
-                    g_key_file_set_string(key_file, section_name, "last_read_document", "");
-                    g_key_file_set_string(key_file, section_name, "page_color", "#FFFFFF");
-                    g_key_file_set_string(key_file, section_name, "last_read_help_document", "");
-                    g_key_file_set_string(key_file, section_name, "helper_page_color", "#FFFFFF");
-                }
-                
-                g_free(section_name);
-            }
-        }
-    }
+                    json_builder_set_member_name(builder, "documents");
+                    json_emit_session_docs(builder, session_model_get_document_urls(session), "left", document_models);
 
-    // Save document states
-    if (document_models) {
-        GHashTableIter iter;
-        gpointer key, value;
-        g_hash_table_iter_init(&iter, document_models);
-        
-        int doc_count = 0;
-        GString *doc_uris = g_string_new("");
-        
-        while (g_hash_table_iter_next(&iter, &key, &value)) {
-            document_model_t *doc_model = (document_model_t*)value;
-            const char *compound_key = (const char*)key;
-            
-            /* Parse compound key "side:uri" — handle both old (plain URI) and new format */
-            const char *colon = strchr(compound_key, ':');
-            const char *side = "left";
-            const char *uri = compound_key;
-            if (colon && (g_str_has_prefix(compound_key, "left:") || g_str_has_prefix(compound_key, "right:"))) {
-                side = compound_key[0] == 'r' ? "right" : "left";
-                uri = colon + 1;
+                    json_builder_set_member_name(builder, "helper_documents");
+                    json_emit_session_docs(builder, session_model_get_helper_document_urls(session), "right", document_models);
+
+                    const char *lr = session_model_get_last_read_document(session);
+                    json_builder_set_member_name(builder, "last_read_document");
+                    json_builder_add_string_value(builder, lr ? lr : "");
+
+                    const char *pc = session_model_get_page_color(session);
+                    json_builder_set_member_name(builder, "page_color");
+                    json_builder_add_string_value(builder, pc ? pc : "#FFFFFF");
+
+                    const char *lrh = session_model_get_last_read_help_document(session);
+                    json_builder_set_member_name(builder, "last_read_help_document");
+                    json_builder_add_string_value(builder, lrh ? lrh : "");
+
+                    const char *hpc = session_model_get_helper_page_color(session);
+                    json_builder_set_member_name(builder, "helper_page_color");
+                    json_builder_add_string_value(builder, hpc ? hpc : "#FFFFFF");
+                } else {
+                    json_builder_set_member_name(builder, "documents");
+                    json_builder_begin_array(builder); json_builder_end_array(builder);
+                    json_builder_set_member_name(builder, "helper_documents");
+                    json_builder_begin_array(builder); json_builder_end_array(builder);
+                    json_builder_set_member_name(builder, "last_read_document");
+                    json_builder_add_string_value(builder, "");
+                    json_builder_set_member_name(builder, "page_color");
+                    json_builder_add_string_value(builder, "#FFFFFF");
+                    json_builder_set_member_name(builder, "last_read_help_document");
+                    json_builder_add_string_value(builder, "");
+                    json_builder_set_member_name(builder, "helper_page_color");
+                    json_builder_add_string_value(builder, "#FFFFFF");
+                }
+
+                json_builder_end_object(builder);
             }
-            
-            gchar *section_name = g_strdup_printf("Document_%d", doc_count);
-            
-            g_key_file_set_string(key_file, section_name, "side", side);
-            g_key_file_set_string(key_file, section_name, "uri", uri);
-            g_key_file_set_double(key_file, section_name, "zoom", 
-                                 document_model_get_zoom(doc_model));
-            g_key_file_set_integer(key_file, section_name, "current_page",
-                                  document_model_get_current_page(doc_model));
-            g_key_file_set_integer(key_file, section_name, "page_count",
-                                  document_model_get_page_count(doc_model));
-            g_key_file_set_string(key_file, section_name, "visualization_type",
-                                 document_model_get_visualization_type(doc_model));
-            g_key_file_set_boolean(key_file, section_name, "horizontal_scroll",
-                                  document_model_get_horizontal_scroll(doc_model));
-            g_key_file_set_double(key_file, section_name, "scroll_offset",
-                                  document_model_get_scroll_offset(doc_model));
-            g_key_file_set_double(key_file, section_name, "intra_page_fraction",
-                                  document_model_get_intra_page_fraction(doc_model));
-            
-            if (doc_uris->len > 0) g_string_append(doc_uris, ",");
-            g_string_append(doc_uris, uri);
-            
-            g_free(section_name);
-            doc_count++;
+            json_builder_end_object(builder);
         }
-        
-        g_key_file_set_string(key_file, "Documents", "document_uris", doc_uris->str);
-        g_key_file_set_integer(key_file, "Documents", "count", doc_count);
-        g_string_free(doc_uris, TRUE);
     }
-    
-    // Save to file
-    gchar *config_file = g_build_filename(app_config_dir, "siters.ini", NULL);
-    if (!g_key_file_save_to_file(key_file, config_file, &error)) {
-        g_warning("Failed to save config: %s", error->message);
-        g_error_free(error);
-    }
-    
-    g_key_file_free(key_file);
+    json_builder_end_object(builder);
+
+    json_builder_end_object(builder);
+
+    JsonNode *root = json_builder_get_root(builder);
+    JsonGenerator *gen = json_generator_new();
+    json_generator_set_root(gen, root);
+    json_generator_set_pretty(gen, TRUE);
+
+    gchar *json_str = json_generator_to_data(gen, NULL);
+    gchar *config_file = g_build_filename(app_config_dir, "siters.json", NULL);
+    g_file_set_contents(config_file, json_str, -1, NULL);
+
+    g_free(json_str);
     g_free(config_file);
     g_free(app_config_dir);
+    g_object_unref(gen);
+    json_node_free(root);
+    g_object_unref(builder);
+}
+
+static void load_session_doc_array(JsonArray *arr, session_model_t *session, const char *default_side) {
+    if (!arr) return;
+    guint len = json_array_get_length(arr);
+    for (guint i = 0; i < len; i++) {
+        JsonObject *obj = json_array_get_object_element(arr, i);
+        if (!obj) continue;
+        const char *uri = json_object_get_string_member_with_default(obj, "uri", NULL);
+        if (!uri || !*uri) continue;
+
+        const char *side = json_object_get_string_member_with_default(obj, "side", default_side);
+        gboolean is_helper = (g_strcmp0(side, "right") == 0);
+
+        if (is_helper)
+            session_model_add_helper_document_url(session, uri);
+        else
+            session_model_add_document_url(session, uri);
+
+        document_model_t *dm = json_parse_document(obj);
+        if (dm) {
+            if (!document_models) {
+                document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                       (GDestroyNotify)document_model_free);
+            }
+            char *key = make_document_key(uri, is_helper);
+            g_hash_table_insert(document_models, key, dm);
+        }
+    }
 }
 
 void load_state(void) {
-    GKeyFile *key_file = g_key_file_new();
-    GError *error = NULL;
-    
     const gchar *config_dir = g_get_user_config_dir();
-    gchar *config_file = g_build_filename(config_dir, "siters", "siters.ini", NULL);
-    
-    if (!g_key_file_load_from_file(key_file, config_file, G_KEY_FILE_NONE, &error)) {
-        // File doesn't exist or can't be read, use defaults
-        g_key_file_free(key_file);
+    gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
+    gchar *config_file = g_build_filename(app_config_dir, "siters.json", NULL);
+
+    JsonParser *parser = json_parser_new();
+    GError *error = NULL;
+
+    if (!json_parser_load_from_file(parser, config_file, &error)) {
+        g_clear_error(&error);
+        g_object_unref(parser);
         g_free(config_file);
+        g_free(app_config_dir);
         return;
     }
-    
-    // Load window state
-    gint saved_width = g_key_file_get_integer(key_file, "Window", "width", &error);
-    if (error) { saved_width = 1000; g_error_free(error); error = NULL; }
-    
-    gint saved_height = g_key_file_get_integer(key_file, "Window", "height", &error);
-    if (error) { saved_height = 800; g_error_free(error); error = NULL; }
-    
-    gint saved_x = g_key_file_get_integer(key_file, "Window", "x", &error);
-    if (error) { saved_x = -1; g_error_free(error); error = NULL; }
-    
-    gint saved_y = g_key_file_get_integer(key_file, "Window", "y", &error);
-    if (error) { saved_y = -1; g_error_free(error); error = NULL; }
-    
-    gboolean saved_maximized = g_key_file_get_boolean(key_file, "Window", "maximized", &error);
-    if (error) { saved_maximized = FALSE; g_error_free(error); error = NULL; }
-    
-    // Apply window state if window exists
-    if (window) {
-        gtk_window_set_default_size(GTK_WINDOW(window), saved_width, saved_height);
-        if (saved_x >= 0 && saved_y >= 0) {
-            gtk_window_move(GTK_WINDOW(window), saved_x, saved_y);
-        }
-        if (saved_maximized) {
-            gtk_window_maximize(GTK_WINDOW(window));
-        }
-        
-        // Update current geometry variables
-        current_width = saved_width;
-        current_height = saved_height;
-        current_x = saved_x;
-        current_y = saved_y;
-        current_maximized = saved_maximized;
-    }
-    
-    // Load sessions
-    gchar *names_str = g_key_file_get_string(key_file, "Sessions", "names", &error);
-    if (!error && names_str) {
-        // Initialize sessions_model if not done
-        if (!sessions_model) {
-            sessions_model = sessions_model_new();
-        }
-        
-        // Parse comma-separated names and load session data
-        gchar **names_array = g_strsplit(names_str, ",", -1);
-        for (gchar **name = names_array; *name != NULL; name++) {
-            g_strstrip(*name); // Remove whitespace
-            if (strlen(*name) > 0) {
-                sessions_model_add_session_name(sessions_model, *name);
-                
-                // Load session data for this session
-                gchar *section_name = g_strdup_printf("Session_%s", *name);
-                
-                // Create session model for this session
-                session_model_t *session = session_model_new();
-                session_model_set_session_name(session, *name);
-                
-                // Load documents
-                gchar *docs_str = g_key_file_get_string(key_file, section_name, "documents", NULL);
-                if (docs_str) {
-                    gchar **docs_array = g_strsplit(docs_str, ",", -1);
-                    for (gchar **doc = docs_array; *doc != NULL; doc++) {
-                        g_strstrip(*doc);
-                        if (strlen(*doc) > 0) {
-                            session_model_add_document_url(session, *doc);
-                        }
-                    }
-                    g_strfreev(docs_array);
-                    g_free(docs_str);
-                }
-                
-                // Load helper documents
-                gchar *helper_docs_str = g_key_file_get_string(key_file, section_name, "helper_documents", NULL);
-                if (helper_docs_str) {
-                    gchar **helper_docs_array = g_strsplit(helper_docs_str, ",", -1);
-                    for (gchar **doc = helper_docs_array; *doc != NULL; doc++) {
-                        g_strstrip(*doc);
-                        if (strlen(*doc) > 0) {
-                            session_model_add_helper_document_url(session, *doc);
-                        }
-                    }
-                    g_strfreev(helper_docs_array);
-                    g_free(helper_docs_str);
-                }
-                
-                // Load other properties
-                gchar *last_read = g_key_file_get_string(key_file, section_name, "last_read_document", NULL);
-                if (last_read) {
-                    session_model_set_last_read_document(session, last_read);
-                    g_free(last_read);
-                }
-                
-                gchar *page_color = g_key_file_get_string(key_file, section_name, "page_color", NULL);
-                if (page_color) {
-                    session_model_set_page_color(session, page_color);
-                    g_free(page_color);
-                }
-                
-                gchar *last_read_help = g_key_file_get_string(key_file, section_name, "last_read_help_document", NULL);
-                if (last_read_help) {
-                    session_model_set_last_read_help_document(session, last_read_help);
-                    g_free(last_read_help);
-                }
-                
-                gchar *helper_page_color = g_key_file_get_string(key_file, section_name, "helper_page_color", NULL);
-                if (helper_page_color) {
-                    session_model_set_helper_page_color(session, helper_page_color);
-                    g_free(helper_page_color);
-                }
-                
-                // Store session model
-                g_hash_table_insert(session_models, g_strdup(*name), session);
-                
-                g_free(section_name);
-            }
-        }
-        g_strfreev(names_array);
-        g_free(names_str);
-    }
-    if (error) { g_error_free(error); error = NULL; }
-    
-    // Load last open session
-    gchar *last_session = g_key_file_get_string(key_file, "Sessions", "last_open_session", &error);
-    if (!error && last_session && sessions_model) {
-        sessions_model_set_last_open_session(sessions_model, last_session);
-        g_free(last_session);
-    } else if (sessions_model) {
-        // If no last session was saved, default to "Default"
-        sessions_model_set_last_open_session(sessions_model, "Default");
-    }
-    if (error) { g_error_free(error); }
 
-    // Load document states
-    gint doc_count = g_key_file_get_integer(key_file, "Documents", "count", &error);
-    if (!error && doc_count > 0) {
-        if (!document_models) {
-            document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
-                                                   (GDestroyNotify)document_model_free);
-        }
-        
-        for (int i = 0; i < doc_count; i++) {
-            gchar *section_name = g_strdup_printf("Document_%d", i);
-            
-            gchar *uri = g_key_file_get_string(key_file, section_name, "uri", NULL);
-            if (uri) {
-                document_model_t *doc_model = document_model_new();
-                document_model_set_url(doc_model, uri);
-                document_model_set_zoom(doc_model, 
-                    g_key_file_get_double(key_file, section_name, "zoom", NULL) ?: 1.0);
-                document_model_set_current_page(doc_model,
-                    g_key_file_get_integer(key_file, section_name, "current_page", NULL) ?: 1);
-                document_model_set_page_count(doc_model,
-                    g_key_file_get_integer(key_file, section_name, "page_count", NULL) ?: 0);
-                
-                gchar *vis_type = g_key_file_get_string(key_file, section_name, "visualization_type", NULL);
-                if (vis_type) {
-                    document_model_set_visualization_type(doc_model, vis_type);
-                    g_free(vis_type);
-                } else {
-                    document_model_set_visualization_type(doc_model, "column");
+    JsonNode *root = json_parser_get_root(parser);
+    if (!root || !JSON_NODE_HOLDS_OBJECT(root)) {
+        g_object_unref(parser);
+        g_free(config_file);
+        g_free(app_config_dir);
+        return;
+    }
+
+    JsonObject *root_obj = json_node_get_object(root);
+
+    JsonObject *win = json_object_get_object_member(root_obj, "window");
+    if (win && window) {
+        int w = (int)json_object_get_int_member_with_default(win, "width", 1000);
+        int h = (int)json_object_get_int_member_with_default(win, "height", 800);
+        int x = (int)json_object_get_int_member_with_default(win, "x", -1);
+        int y = (int)json_object_get_int_member_with_default(win, "y", -1);
+        gboolean max = json_object_get_boolean_member_with_default(win, "maximized", FALSE);
+
+        gtk_window_set_default_size(GTK_WINDOW(window), w, h);
+        if (x >= 0 && y >= 0)
+            gtk_window_move(GTK_WINDOW(window), x, y);
+        if (max)
+            gtk_window_maximize(GTK_WINDOW(window));
+
+        current_width = w;
+        current_height = h;
+        current_x = x;
+        current_y = y;
+        current_maximized = max;
+    }
+
+    JsonObject *sessions_obj = json_object_get_object_member(root_obj, "sessions");
+    if (sessions_obj) {
+        if (!sessions_model)
+            sessions_model = sessions_model_new();
+
+        JsonArray *names_arr = json_object_get_array_member(sessions_obj, "names");
+        if (names_arr) {
+            guint nlen = json_array_get_length(names_arr);
+            for (guint i = 0; i < nlen; i++) {
+                const char *name = json_array_get_string_element(names_arr, i);
+                if (!name || !*name) continue;
+                sessions_model_add_session_name(sessions_model, name);
+
+                session_model_t *session = session_model_new();
+                session_model_set_session_name(session, name);
+
+                JsonObject *sdata = json_object_get_object_member(sessions_obj, "data");
+                if (sdata) {
+                    JsonObject *sd = json_object_get_object_member(sdata, name);
+                    if (sd) {
+                        load_session_doc_array(json_object_get_array_member(sd, "documents"), session, "left");
+                        load_session_doc_array(json_object_get_array_member(sd, "helper_documents"), session, "right");
+                        session_model_set_last_read_document(session,
+                            json_object_get_string_member_with_default(sd, "last_read_document", ""));
+                        session_model_set_page_color(session,
+                            json_object_get_string_member_with_default(sd, "page_color", "#FFFFFF"));
+                        session_model_set_last_read_help_document(session,
+                            json_object_get_string_member_with_default(sd, "last_read_help_document", ""));
+                        session_model_set_helper_page_color(session,
+                            json_object_get_string_member_with_default(sd, "helper_page_color", "#FFFFFF"));
+                    }
                 }
-                
-                document_model_set_horizontal_scroll(doc_model,
-                    g_key_file_get_boolean(key_file, section_name, "horizontal_scroll", NULL));
-                document_model_set_scroll_offset(doc_model,
-                    g_key_file_get_double(key_file, section_name, "scroll_offset", NULL));
-                document_model_set_intra_page_fraction(doc_model,
-                    g_key_file_get_double(key_file, section_name, "intra_page_fraction", NULL) ?: 0.0);
-                
-                /* Read side field (default "left" for backward compatibility) */
-                gchar *side = g_key_file_get_string(key_file, section_name, "side", NULL);
-                gboolean is_helper = (side && strcmp(side, "right") == 0);
-                g_free(side);
-                
-                char *key = make_document_key(uri, is_helper);
-                g_hash_table_insert(document_models, key, doc_model);
-                g_free(uri);
+
+                g_hash_table_insert(session_models, g_strdup(name), session);
             }
-            g_free(section_name);
+        }
+
+        const char *last_session = json_object_get_string_member_with_default(sessions_obj, "last_open_session", NULL);
+        if (last_session && *last_session) {
+            sessions_model_set_last_open_session(sessions_model, last_session);
+        } else {
+            sessions_model_set_last_open_session(sessions_model, "Default");
         }
     }
-    if (error) { g_error_free(error); error = NULL; }
-    
-    // Update the sessions treeview with loaded sessions
+
     populate_sessions_treeview();
-    
-    // If the loaded last_open_session is different from current_selected_session, update the UI
+
     if (sessions_model && current_selected_session) {
         const char *loaded_session = sessions_model_get_last_open_session(sessions_model);
         if (loaded_session && strcmp(loaded_session, current_selected_session) != 0) {
@@ -580,16 +510,17 @@ void load_state(void) {
             g_free(current_selected_session);
             current_selected_session = g_strdup(loaded_session);
             restore_open_tabs_for_session(loaded_session);
-            sync_page_widget_from_tab(get_current_left_tab()); 
+            sync_page_widget_from_tab(get_current_left_tab());
             update_window_title_for_session(current_selected_session);
         } else if (loaded_session) {
             restore_open_tabs_for_session(loaded_session);
             sync_page_widget_from_tab(get_current_left_tab());
         }
     }
-    
-    g_key_file_free(key_file);
+
+    g_object_unref(parser);
     g_free(config_file);
+    g_free(app_config_dir);
 }
 
 /* Helper: Calculate offset to top of a given page, using specified target width */
@@ -665,6 +596,7 @@ static void update_document_model_from_tab(TabData *tab) {
     
     // Update current state
     document_model_set_zoom(doc_model, tab->zoom);
+    document_model_set_visualization_mode(doc_model, tab->layout_mode);
     document_model_set_current_page(doc_model, tab->cur_page + 1);  // Store as 1-based
     document_model_set_page_count(doc_model, tab->n_pages);
 
@@ -725,6 +657,7 @@ static void restore_document_model_to_tab(TabData *tab) {
         if (saved_width > 0) {
             tab->target_width = saved_width;
         }
+        tab->layout_mode = document_model_get_visualization_mode(doc_model);
         
         /* Clamp page to valid range */
         if (saved_page < 1) saved_page = 1;
@@ -2148,7 +2081,21 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             restore_document_model_to_tab(tab);
             tab->initial_scroll_pending = FALSE;
         } else {
-            // Already initialized, just sync UI
+            if (tab->current_file && document_models) {
+                char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                if (uri) {
+                    char *key = make_document_key(uri, tab->is_helper);
+                    document_model_t *dm = g_hash_table_lookup(document_models, key);
+                    if (dm) {
+                        tab->layout_mode = document_model_get_visualization_mode(dm);
+                        int w = document_model_get_target_width(dm);
+                        if (w > 0) tab->target_width = w;
+                        build_continuous_view(tab, get_target_width_for_tab(tab));
+                    }
+                    g_free(key);
+                    g_free(uri);
+                }
+            }
         }
     }
 

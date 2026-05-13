@@ -11,7 +11,7 @@ pkg_check_modules(POPPLER REQUIRED poppler-glib)
 pkg_check_modules(CMOCKA REQUIRED cmocka)
 
 # Include directories
-include_directories(include ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
+include_directories(include include/json-glib ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
 # Main application
 add_executable(siters 
@@ -26,6 +26,7 @@ target_link_libraries(siters
     ${GTK_LIBRARIES}
     ${POPPLER_LIBRARIES}
     m
+    /usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0
 )
 
 # Enable testing
@@ -46,6 +47,7 @@ target_link_libraries(test_siters_unit
     ${POPPLER_LIBRARIES}
     ${CMOCKA_LIBRARIES}
     m
+    /usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0
 )
 
 # Add linker flags for function wrapping
@@ -54,6 +56,7 @@ target_link_options(test_siters_unit PRIVATE
     -Wl,--wrap=gtk_window_set_title
     -Wl,--wrap=gtk_window_set_default_size
     -Wl,--wrap=g_signal_connect_data
+    -Wl,--wrap=gtk_window_set_geometry_hints
 )
 
 add_test(NAME unit_tests COMMAND test_siters_unit)

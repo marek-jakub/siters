@@ -2,8 +2,8 @@
 # Usage: make -f Makefile.tests target
 
 CC=gcc
-CFLAGS=-Wall -Wextra -Werror -g -Iinclude `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
-LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm
+CFLAGS=-Wall -Wextra -Werror -g -Iinclude -Iinclude/json-glib `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
+LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm -L/usr/lib/x86_64-linux-gnu -l:libjson-glib-1.0.so.0
 
 # Main application
 SITERS_SRC=src/main.c src/siters.c src/sessions_model.c src/session_model.c src/document_model.c
@@ -31,7 +31,7 @@ build-unit-tests:
 		-Wl,--wrap=gtk_window_new \
 		-Wl,--wrap=gtk_window_set_title \
 		-Wl,--wrap=gtk_window_set_default_size \
-		-Wl,--wrap=g_signal_connect_data
+		-Wl,--wrap=g_signal_connect_data \
 		-Wl,--wrap=gtk_window_set_geometry_hints
 
 run-unit-tests: build-unit-tests

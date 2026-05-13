@@ -745,33 +745,54 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # If text wasn't entered via GUI methods, use config injection
             if not text_entered:
                 print("WARNING: Using config file injection to create TestSession")
-                import configparser
+                import os
+                import json
 
                 config_dir = os.path.expanduser("~/.config/siters")
                 os.makedirs(config_dir, exist_ok=True)
-                config_file = os.path.join(config_dir, "siters.ini")
+                config_file = os.path.join(config_dir, "siters.json")
 
-                config = configparser.ConfigParser()
+                # Read existing config or start fresh
+                config = {}
                 if os.path.exists(config_file):
-                    config.read(config_file)
+                    with open(config_file, "r") as f:
+                        config = json.load(f)
 
-                names = config.get("Sessions", "names", fallback="Default")
+                # Ensure sessions structure exists
+                if "sessions" not in config:
+                    config["sessions"] = {"names": ["Default"], "data": {}}
+                if "data" not in config["sessions"]:
+                    config["sessions"]["data"] = {}
+                if "names" not in config["sessions"]:
+                    config["sessions"]["names"] = ["Default"]
+
+                names = config["sessions"]["names"]
                 if "TestSession" not in names:
-                    names += ",TestSession"
-                    config.set("Sessions", "names", names)
+                    names.append("TestSession")
 
-                section = "Session_TestSession"
-                if not config.has_section(section):
-                    config.add_section(section)
-                    config.set(section, "documents", "")
-                    config.set(section, "helper_documents", "")
-                    config.set(section, "last_read_document", "")
-                    config.set(section, "page_color", "#FFFFFF")
-                    config.set(section, "last_read_help_document", "")
-                    config.set(section, "helper_page_color", "#FFFFFF")
+                if "TestSession" not in config["sessions"]["data"]:
+                    config["sessions"]["data"]["TestSession"] = {
+                        "documents": [],
+                        "helper_documents": [],
+                        "last_read_document": "",
+                        "page_color": "#FFFFFF",
+                        "last_read_help_document": "",
+                        "helper_page_color": "#FFFFFF"
+                    }
+
+                # Also ensure Default exists
+                if "Default" not in config["sessions"]["data"]:
+                    config["sessions"]["data"]["Default"] = {
+                        "documents": [],
+                        "helper_documents": [],
+                        "last_read_document": "",
+                        "page_color": "#FFFFFF",
+                        "last_read_help_document": "",
+                        "helper_page_color": "#FFFFFF"
+                    }
 
                 with open(config_file, "w") as f:
-                    config.write(f)
+                    json.dump(config, f, indent=2)
 
                 # Restart app to reload config
                 if hasattr(self, "app") and self.app:
@@ -889,18 +910,46 @@ class TestSitersSessionManagement(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Error during session management test: {e}")
 
+    def _write_json_config(self, last_open_session, session_names, config_dir):
+        """Write a JSON config file for testing."""
+        config_file = os.path.join(config_dir, "siters.json")
+
+        import json
+        config = {
+            "window": {
+                "width": 1000, "height": 800, "x": 0, "y": 0, "maximized": False
+            },
+            "sessions": {
+                "names": session_names,
+                "last_open_session": last_open_session,
+                "data": {}
+            }
+        }
+        for name in session_names:
+            config["sessions"]["data"][name] = {
+                "documents": [],
+                "helper_documents": [],
+                "last_read_document": "",
+                "page_color": "#FFFFFF",
+                "last_read_help_document": "",
+                "helper_page_color": "#FFFFFF"
+            }
+
+        with open(config_file, "w") as f:
+            json.dump(config, f, indent=2)
+
     def test_app_starts_with_saved_session(self):
         """
         Test that the app starts with the session specified in the saved config file.
-        This verifies that last_open_session from the ini file is properly loaded and used.
+        This verifies that last_open_session from the json file is properly loaded and used.
         """
-        import configparser
         import os
+        import json
 
         # Create a test config file with a specific last_open_session
         config_dir = os.path.expanduser("~/.config/siters")
         os.makedirs(config_dir, exist_ok=True)
-        config_file = os.path.join(config_dir, "siters.ini")
+        config_file = os.path.join(config_dir, "siters.json")
 
         # Backup existing config if it exists
         backup_config = None
@@ -909,14 +958,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 backup_config = f.read()
 
         try:
-            # Create test config with TestSession as last_open_session
-            config = configparser.ConfigParser()
-            config.add_section("Sessions")
-            config.set("Sessions", "names", "Default,TestSession")
-            config.set("Sessions", "last_open_session", "TestSession")
-
-            with open(config_file, "w") as f:
-                config.write(f)
+            self._write_json_config("TestSession", ["Default", "TestSession"], config_dir)
 
             # Restart the app after writing the test config file so it reloads from disk
             try:
@@ -925,37 +967,10 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     time.sleep(0.5)
 
                 self.app = run(self.siters_binary, timeout=5, dumb=True)
-                time.sleep(2)  # Give time for config to load and UI to initialize
+                time.sleep(2)
 
                 siters_app = root.application("siters")
                 time.sleep(2)
-
-                # Find the left notebook (primary notebook)
-                left_notebook = None
-                try:
-                    # Look for notebook widgets
-                    notebooks = siters_app.findChildren(
-                        lambda x: x.roleName == "page tab list"
-                    )
-                    if notebooks:
-                        left_notebook = notebooks[
-                            0
-                        ]  # First notebook should be the left one
-                    else:
-                        # Try alternative search
-                        all_widgets = siters_app.findChildren(lambda x: True)
-                        for widget in all_widgets:
-                            if (
-                                "notebook" in widget.roleName.lower()
-                                or "tab" in widget.roleName.lower()
-                            ):
-                                left_notebook = widget
-                                break
-                except Exception as e:
-                    self.skipTest(f"Could not find left notebook: {e}")
-
-                if not left_notebook:
-                    self.skipTest("Could not find left notebook")
 
                 # Verify window title reflects loaded last_open_session
                 def wait_for_window_title_contains(app, expected_text, timeout=5.0):
