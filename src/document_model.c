@@ -6,7 +6,7 @@ document_model_t* document_model_new() {
     model->zoom = 1.0; // default zoom
     model->page_count = 0;
     model->current_page = 1; // default to first page
-    model->visualization_type = g_strdup("column"); // default
+    model->visualization_mode = 0; // default 0 (0=column, 1=double column, 2=row)
     model->horizontal_scroll = FALSE; // default
     model->scroll_offset = 0.0; // default
     model->intra_page_fraction = 0.0; // default
@@ -19,7 +19,6 @@ void document_model_free(document_model_t* model) {
 
     // Free strings
     g_free(model->url);
-    g_free(model->visualization_type);
 
     g_free(model);
 }
@@ -41,8 +40,8 @@ int document_model_get_current_page(document_model_t* model) {
     return model->current_page;
 }
 
-const char* document_model_get_visualization_type(document_model_t* model) {
-    return model->visualization_type;
+int document_model_get_visualization_mode(document_model_t* model) {
+    return model->visualization_mode;
 }
 
 gboolean document_model_get_horizontal_scroll(document_model_t* model) {
@@ -80,9 +79,8 @@ void document_model_set_current_page(document_model_t* model, int page) {
     model->current_page = page;
 }
 
-void document_model_set_visualization_type(document_model_t* model, const char* type) {
-    g_free(model->visualization_type);
-    model->visualization_type = g_strdup(type);
+void document_model_set_visualization_mode(document_model_t* model, int mode) {
+    model->visualization_mode = mode;
 }
 
 void document_model_set_horizontal_scroll(document_model_t* model, gboolean enabled) {
