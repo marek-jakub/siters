@@ -745,8 +745,8 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # If text wasn't entered via GUI methods, use config injection
             if not text_entered:
                 print("WARNING: Using config file injection to create TestSession")
-                import os
                 import json
+                import os
 
                 config_dir = os.path.expanduser("~/.config/siters")
                 os.makedirs(config_dir, exist_ok=True)
@@ -777,7 +777,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         "last_read_document": "",
                         "page_color": "#FFFFFF",
                         "last_read_help_document": "",
-                        "helper_page_color": "#FFFFFF"
+                        "helper_page_color": "#FFFFFF",
                     }
 
                 # Also ensure Default exists
@@ -788,7 +788,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         "last_read_document": "",
                         "page_color": "#FFFFFF",
                         "last_read_help_document": "",
-                        "helper_page_color": "#FFFFFF"
+                        "helper_page_color": "#FFFFFF",
                     }
 
                 with open(config_file, "w") as f:
@@ -915,15 +915,20 @@ class TestSitersSessionManagement(SitersGUITestCase):
         config_file = os.path.join(config_dir, "siters.json")
 
         import json
+
         config = {
             "window": {
-                "width": 1000, "height": 800, "x": 0, "y": 0, "maximized": False
+                "width": 1000,
+                "height": 800,
+                "x": 0,
+                "y": 0,
+                "maximized": False,
             },
             "sessions": {
                 "names": session_names,
                 "last_open_session": last_open_session,
-                "data": {}
-            }
+                "data": {},
+            },
         }
         for name in session_names:
             config["sessions"]["data"][name] = {
@@ -932,7 +937,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 "last_read_document": "",
                 "page_color": "#FFFFFF",
                 "last_read_help_document": "",
-                "helper_page_color": "#FFFFFF"
+                "helper_page_color": "#FFFFFF",
             }
 
         with open(config_file, "w") as f:
@@ -944,7 +949,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
         This verifies that last_open_session from the json file is properly loaded and used.
         """
         import os
-        import json
 
         # Create a test config file with a specific last_open_session
         config_dir = os.path.expanduser("~/.config/siters")
@@ -958,7 +962,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 backup_config = f.read()
 
         try:
-            self._write_json_config("TestSession", ["Default", "TestSession"], config_dir)
+            self._write_json_config(
+                "TestSession", ["Default", "TestSession"], config_dir
+            )
 
             # Restart the app after writing the test config file so it reloads from disk
             try:
