@@ -9,7 +9,6 @@
 #include "session_model.h"
 #include "document_model.h"
 
-#define MAX_SURFACE_DIM 5000
 
 /* Forward declaration and struct definitions for tab management */
 typedef struct TabDataStruct TabData;
@@ -38,9 +37,9 @@ typedef struct TabDataStruct {
     /* continuous view widgets */
     GtkWidget *scrolled;
     GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
+    GtkWidget *h_scrollbar;   /* manual horizontal scrollbar for row view */
     int layout_mode; /* 0=single-column,1=two-column,2=horizontal */
-    int target_width; /* fixed width used for rendering pages independent of window resize */
-    int last_target_width; /* used to track when we need to rebuild the continuous view */
+    double last_zoom; /* used to track when we need to rebuild the continuous view on zoom change */
     gboolean initial_scroll_pending; /* flag to indicate we need to scroll to the saved page after initial render */
     RestoreState *pending_restore; /* in-progress idle restore callback */
     double scroll_offset; /* used to restore scroll position in continuous view */
@@ -146,7 +145,6 @@ static void on_page_entry_insert_text(GtkEditable *editable,
                                       gint length,
                                       gint *position,
                                       gpointer user_data);
-static int get_target_width_for_tab(TabData *tab);
 static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data);
 
 /* Session tab persistence functions */
@@ -158,9 +156,10 @@ static TabData *create_new_tab(GtkWidget *notebook);
 static void load_file_into_tab(TabData *tab, const char *filename);
 static void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
-static void build_continuous_view(TabData *tab, int target_width);
+static void build_continuous_view(TabData *tab);
 static void scroll_to_page(TabData *tab, int page);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
+static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
@@ -537,18 +536,35 @@ void load_state(void) {
     g_free(app_config_dir);
 }
 
-/* Helper: Calculate offset to top of a given page, using specified target width */
-static double calculate_page_top_offset_with_width(TabData *tab, int page_idx, int target_w) {
+/* Helper: Calculate PPI-based scale for a tab */
+static double get_ppi_scale(TabData *tab) {
+    double eff = tab->zoom > 0 ? tab->zoom : 300.0;
+    return eff / 72.0;
+}
+
+/* Helper: Calculate offset to top of a given page at current PPI zoom */
+static double calculate_page_top_offset_ppi(TabData *tab, int page_idx) {
     if (!tab || !tab->doc || page_idx < 0 || page_idx >= tab->n_pages) {
         return 0.0;
     }
     
     const double spacing = 6.0;
-    if (target_w < 1) target_w = 1;
-    double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
+    double scale = get_ppi_scale(tab);
     
     double y_offset = spacing;
-    if (tab->layout_mode == 1) {
+    if (tab->layout_mode == 2) {
+        for (int i = 0; i < page_idx; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw > 0 && ph > 0) {
+                double page_w = pw * scale;
+                y_offset += page_w + spacing;
+            }
+            g_object_unref(page);
+        }
+    } else if (tab->layout_mode == 1) {
         int row = page_idx / 2;
         for (int r = 0; r < row; r++) {
             double row_h = 0.0;
@@ -560,7 +576,7 @@ static double calculate_page_top_offset_with_width(TabData *tab, int page_idx, i
                 double pw, ph;
                 poppler_page_get_size(pp, &pw, &ph);
                 if (pw > 0 && ph > 0) {
-                    double h = ph * ((double)target_w / pw * zoom);
+                    double h = ph * scale;
                     if (h > row_h) row_h = h;
                 }
                 g_object_unref(pp);
@@ -576,7 +592,6 @@ static double calculate_page_top_offset_with_width(TabData *tab, int page_idx, i
             double pw, ph;
             poppler_page_get_size(page, &pw, &ph);
             if (pw > 0 && ph > 0) {
-                double scale = (double)target_w / pw * zoom;
                 double page_h = ph * scale;
                 y_offset += page_h + spacing;
             }
@@ -586,13 +601,11 @@ static double calculate_page_top_offset_with_width(TabData *tab, int page_idx, i
     return y_offset;
 }
 
-/* Helper: Get the height of a specific page, using specified target width */
-static double get_page_height_with_width(TabData *tab, int page_idx, int target_w) {
+/* Helper: Get the height of a specific page at current PPI zoom */
+static double get_page_height_ppi(TabData *tab, int page_idx) {
     if (!tab || !tab->doc || page_idx < 0 || page_idx >= tab->n_pages) {
         return 0.0;
     }
-    
-    if (target_w < 1) target_w = 1;
     
     PopplerPage *page = poppler_document_get_page(tab->doc, page_idx);
     if (!page) return 0.0;
@@ -603,7 +616,8 @@ static double get_page_height_with_width(TabData *tab, int page_idx, int target_
     
     if (pw <= 0 || ph <= 0) return 0.0;
     
-    double scale = (double)target_w / pw * tab->zoom;
+    double eff_zoom = tab->zoom > 0 ? tab->zoom : 300.0;
+    double scale = eff_zoom / 72.0;
     return ph * scale;
 }
 
@@ -637,52 +651,26 @@ static void update_document_model_from_tab(TabData *tab) {
     document_model_set_current_page(doc_model, tab->cur_page + 1);  // Store as 1-based
     document_model_set_page_count(doc_model, tab->n_pages);
 
-    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
-    document_model_set_scroll_offset(doc_model, gtk_adjustment_get_value(vadj));
-
-    double scroll_y = gtk_adjustment_get_value(vadj);
-    int target_w = get_target_width_for_tab(tab);
     const double spacing = 6.0;
-    
-    double y_top = spacing;
-    double page_h = 0;
-    double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
-    if (tab->layout_mode == 1) {
-        int cur_row = tab->cur_page / 2;
-        for (int r = 0; r < cur_row; r++) {
-            double row_h = 0.0;
-            for (int p = 0; p < 2; p++) {
-                int idx = r * 2 + p;
-                if (idx >= tab->n_pages) break;
-                PopplerPage *pp = poppler_document_get_page(tab->doc, idx);
-                if (!pp) continue;
-                double pw, ph;
-                poppler_page_get_size(pp, &pw, &ph);
-                if (pw > 0 && ph > 0) {
-                    double h = ph * ((double)target_w / pw * zoom);
-                    if (h > row_h) row_h = h;
-                }
-                g_object_unref(pp);
-            }
-            y_top += row_h + spacing;
+    double scale = get_ppi_scale(tab);
+
+    if (tab->layout_mode == 2) {
+        double scroll_x = 0.0;
+        if (tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            scroll_x = gtk_adjustment_get_value(sadj);
         }
-        PopplerPage *cp = poppler_document_get_page(tab->doc, tab->cur_page);
-        if (cp) {
-            double pw, ph;
-            poppler_page_get_size(cp, &pw, &ph);
-            if (pw > 0 && ph > 0)
-                page_h = ph * ((double)target_w / pw * zoom);
-            g_object_unref(cp);
-        }
-    } else {
+        document_model_set_scroll_offset(doc_model, scroll_x);
+        double x_top = spacing;
+        double page_w = 0;
         for (int i = 0; i < tab->cur_page; ++i) {
             PopplerPage *p = poppler_document_get_page(tab->doc, i);
             if (!p) continue;
             double pw, ph;
             poppler_page_get_size(p, &pw, &ph);
-            double scale = (double)target_w / pw * zoom;
-            double pi_h = ph * scale;
-            y_top += pi_h + spacing;
+            if (pw > 0 && ph > 0) {
+                x_top += pw * scale + spacing;
+            }
             g_object_unref(p);
         }
         PopplerPage *cp = poppler_document_get_page(tab->doc, tab->cur_page);
@@ -690,17 +678,74 @@ static void update_document_model_from_tab(TabData *tab) {
             double pw, ph;
             poppler_page_get_size(cp, &pw, &ph);
             if (pw > 0 && ph > 0)
-                page_h = ph * ((double)target_w / pw * zoom);
+                page_w = pw * scale;
             g_object_unref(cp);
         }
+        double intra = scroll_x - x_top;
+        double fraction = page_w > 0 ? intra / page_w : 0.0;
+        if (fraction < 0) fraction = 0;
+        if (fraction > 1) fraction = 1;
+        document_model_set_intra_page_fraction(doc_model, fraction);
+    } else {
+        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+        document_model_set_scroll_offset(doc_model, gtk_adjustment_get_value(vadj));
+
+        double scroll_y = gtk_adjustment_get_value(vadj);
+        double y_top = spacing;
+        double page_h = 0;
+        if (tab->layout_mode == 1) {
+            int cur_row = tab->cur_page / 2;
+            for (int r = 0; r < cur_row; r++) {
+                double row_h = 0.0;
+                for (int p = 0; p < 2; p++) {
+                    int idx = r * 2 + p;
+                    if (idx >= tab->n_pages) break;
+                    PopplerPage *pp = poppler_document_get_page(tab->doc, idx);
+                    if (!pp) continue;
+                    double pw, ph;
+                    poppler_page_get_size(pp, &pw, &ph);
+                    if (pw > 0 && ph > 0) {
+                        double h = ph * scale;
+                        if (h > row_h) row_h = h;
+                    }
+                    g_object_unref(pp);
+                }
+                y_top += row_h + spacing;
+            }
+            PopplerPage *cp = poppler_document_get_page(tab->doc, tab->cur_page);
+            if (cp) {
+                double pw, ph;
+                poppler_page_get_size(cp, &pw, &ph);
+                if (pw > 0 && ph > 0)
+                    page_h = ph * scale;
+                g_object_unref(cp);
+            }
+        } else {
+            for (int i = 0; i < tab->cur_page; ++i) {
+                PopplerPage *p = poppler_document_get_page(tab->doc, i);
+                if (!p) continue;
+                double pw, ph;
+                poppler_page_get_size(p, &pw, &ph);
+                double pi_h = ph * scale;
+                y_top += pi_h + spacing;
+                g_object_unref(p);
+            }
+            PopplerPage *cp = poppler_document_get_page(tab->doc, tab->cur_page);
+            if (cp) {
+                double pw, ph;
+                poppler_page_get_size(cp, &pw, &ph);
+                if (pw > 0 && ph > 0)
+                    page_h = ph * scale;
+                g_object_unref(cp);
+            }
+        }
+
+        double intra = scroll_y - y_top;
+        double fraction = page_h > 0 ? intra / page_h : 0.0;
+        if (fraction < 0) fraction = 0;
+        if (fraction > 1) fraction = 1;
+        document_model_set_intra_page_fraction(doc_model, fraction);
     }
-    
-    double intra = scroll_y - y_top;
-    double fraction = page_h > 0 ? intra / page_h : 0.0;
-    if (fraction < 0) fraction = 0;
-    if (fraction > 1) fraction = 1;
-    document_model_set_target_width(doc_model, target_w);
-    document_model_set_intra_page_fraction(doc_model, fraction);
 
     g_free(uri);
 }
@@ -718,11 +763,6 @@ static void restore_document_model_to_tab(TabData *tab) {
         int saved_page = document_model_get_current_page(doc_model);
         double saved_zoom = document_model_get_zoom(doc_model);
         double saved_fraction = document_model_get_intra_page_fraction(doc_model);
-        int saved_width = document_model_get_target_width(doc_model);
-
-        if (saved_width > 0) {
-            tab->target_width = saved_width;
-        }
         tab->layout_mode = document_model_get_visualization_mode(doc_model);
         tab->zoom = saved_zoom;
         
@@ -738,7 +778,7 @@ static void restore_document_model_to_tab(TabData *tab) {
     } else {
         tab->cur_page = 0;
         /* No saved state, restore to first page top */
-        start_initial_scroll_restore(tab, 0, 1.0, 0.0);
+        start_initial_scroll_restore(tab, 0, 300.0, 0.0);
     }
 
     g_free(uri);
@@ -828,18 +868,32 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
     if (!tab || !tab->doc || tab->n_pages <= 0) return 0;
     
     const double spacing = 6.0;
-    int target_w = get_target_width_for_tab(tab);
-    if (target_w < 1) target_w = 1;
+    double scale = get_ppi_scale(tab);
     double y = spacing;
     int visible_page = tab->n_pages - 1;
     
-    if (tab->layout_mode == 1) {
+    if (tab->layout_mode == 2) {
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
+            double page_w = pw * scale;
+            if (scroll_y >= y && scroll_y < y + page_w) {
+                g_object_unref(page);
+                return i;
+            }
+            y += page_w + spacing;
+            g_object_unref(page);
+        }
+    } else if (tab->layout_mode == 1) {
         for (int i = 0; i < tab->n_pages; i += 2) {
             double row_h = 0.0;
             for (int p = 0; p < 2; p++) {
                 int idx = i + p;
                 if (idx >= tab->n_pages) break;
-                double ph = get_page_height_with_width(tab, idx, target_w);
+                double ph = get_page_height_ppi(tab, idx);
                 if (ph > row_h) row_h = ph;
             }
             if (row_h < 1.0) row_h = 1.0;
@@ -851,7 +905,7 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
         }
     } else {
         for (int i = 0; i < tab->n_pages; ++i) {
-            double page_h = get_page_height_with_width(tab, i, target_w);
+            double page_h = get_page_height_ppi(tab, i);
             if (page_h <= 0) continue;
             if (scroll_y >= y && scroll_y < y + page_h) {
                 return i;
@@ -907,9 +961,9 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         if (restore->target_page < 0) restore->target_page = 0;
         if (restore->target_page >= tab->n_pages) restore->target_page = tab->n_pages - 1;
         
-        /* Clamp zoom */
-        if (restore->target_zoom < 0.1) restore->target_zoom = 0.1;
-        if (restore->target_zoom > 10.0) restore->target_zoom = 10.0;
+        /* Clamp zoom (PPI: 10-500) */
+        if (restore->target_zoom < 10.0) restore->target_zoom = 10.0;
+        if (restore->target_zoom > 500.0) restore->target_zoom = 500.0;
         
         /* Clamp fraction */
         if (restore->target_fraction < 0.0) restore->target_fraction = 0.0;
@@ -919,7 +973,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         tab->zoom = restore->target_zoom;
         
         /* Rebuild layout with new zoom */
-        build_continuous_view(tab, get_target_width_for_tab(tab));
+        build_continuous_view(tab);
         
         /* Move to next stage */
         restore->restore_stage = 1;
@@ -931,7 +985,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
     /* ========== STAGE 1: Wait for Layout to Settle ========== */
     if (restore->restore_stage == 1) {
         /* Check if layout has settled by seeing if page heights are stable */
-        double page_h = get_page_height_with_width(tab, restore->target_page, get_target_width_for_tab(tab));
+        double page_h = get_page_height_ppi(tab, restore->target_page);
         
         if (page_h <= 0) {
             /* Page height not ready yet */
@@ -951,49 +1005,64 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
     
     /* ========== STAGE 2: Calculate Exact Scroll Position ========== */
     if (restore->restore_stage == 2) {
-        /* Get the document model to retrieve saved target_width */
-        char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
-        document_model_t *doc_model = NULL;
-        if (uri) {
-            char *key = make_document_key(uri, tab->is_helper);
-            doc_model = g_hash_table_lookup(document_models, key);
-            g_free(key);
-            g_free(uri);
+        double scale = get_ppi_scale(tab);
+        if (tab->layout_mode == 2) {
+            const double spacing = 6.0;
+            double x_offset = spacing;
+            double page_w = 0;
+            for (int i = 0; i < restore->target_page; ++i) {
+                PopplerPage *p = poppler_document_get_page(tab->doc, i);
+                if (!p) continue;
+                double pw, ph;
+                poppler_page_get_size(p, &pw, &ph);
+                if (pw > 0 && ph > 0)
+                    x_offset += pw * scale + spacing;
+                g_object_unref(p);
+            }
+            PopplerPage *cp = poppler_document_get_page(tab->doc, restore->target_page);
+            if (cp) {
+                double pw, ph;
+                poppler_page_get_size(cp, &pw, &ph);
+                if (pw > 0 && ph > 0)
+                    page_w = pw * scale;
+                g_object_unref(cp);
+            }
+            if (page_w <= 0) page_w = 1.0;
+            double target_scroll = x_offset + (restore->target_fraction * page_w);
+            if (target_scroll < 0) target_scroll = 0;
+            if (tab->h_scrollbar) {
+                GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+                double upper = gtk_adjustment_get_upper(sadj);
+                double page_size = gtk_adjustment_get_page_size(sadj);
+                if (target_scroll > upper - page_size) target_scroll = upper - page_size;
+                if (target_scroll < 0) target_scroll = 0;
+                gtk_adjustment_set_value(sadj, target_scroll);
+            }
+        } else {
+            double page_top = calculate_page_top_offset_ppi(tab, restore->target_page);
+            double page_h = get_page_height_ppi(tab, restore->target_page);
+
+            if (page_h <= 0) {
+                /* Fallback: just scroll to page top */
+                page_h = 1.0;
+            }
+
+            /* Calculate scroll position: page top + (fraction * page height) */
+            double target_scroll = page_top + (restore->target_fraction * page_h);
+
+            /* Clamp to valid range */
+            GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+            double upper = gtk_adjustment_get_upper(vadj);
+            double page_size = gtk_adjustment_get_page_size(vadj);
+
+            if (target_scroll < 0) target_scroll = 0;
+            if (target_scroll > upper - page_size) target_scroll = upper - page_size;
+            if (target_scroll < 0) target_scroll = 0;  /* In case page_size > upper */
+
+            /* Set the scroll position */
+            gtk_adjustment_set_value(vadj, target_scroll);
         }
-        
-        /* Use saved target_width for consistent calculations */
-        int saved_target_w = 800;
-        if (doc_model) {
-            saved_target_w = document_model_get_target_width(doc_model);
-        }
-        if (saved_target_w < 1) {
-            saved_target_w = get_target_width_for_tab(tab);
-        }
-        
-        /* Calculate using the saved width for consistency */
-        double page_top = calculate_page_top_offset_with_width(tab, restore->target_page, saved_target_w);
-        double page_h = get_page_height_with_width(tab, restore->target_page, saved_target_w);
-        
-        if (page_h <= 0) {
-            /* Fallback: just scroll to page top */
-            page_h = 1.0;
-        }
-        
-        /* Calculate scroll position: page top + (fraction * page height) */
-        double target_scroll = page_top + (restore->target_fraction * page_h);
-        
-        /* Clamp to valid range */
-        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
-        double upper = gtk_adjustment_get_upper(vadj);
-        double page_size = gtk_adjustment_get_page_size(vadj);
-        
-        if (target_scroll < 0) target_scroll = 0;
-        if (target_scroll > upper - page_size) target_scroll = upper - page_size;
-        if (target_scroll < 0) target_scroll = 0;  /* In case page_size > upper */
-        
-        /* Set the scroll position */
-        gtk_adjustment_set_value(vadj, target_scroll);
-        
+
         /* Move to verification stage */
         restore->restore_stage = 3;
         restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
@@ -1002,9 +1071,18 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
     
     /* ========== STAGE 3: Verify & Finalize ========== */
     if (restore->restore_stage == 3) {
-        /* Verify by reading back the actual scroll position */
-        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
-        double actual_scroll = gtk_adjustment_get_value(vadj);
+        double actual_scroll;
+        if (tab->layout_mode == 2) {
+            if (tab->h_scrollbar) {
+                GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+                actual_scroll = gtk_adjustment_get_value(sadj);
+            } else {
+                actual_scroll = 0.0;
+            }
+        } else {
+            GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+            actual_scroll = gtk_adjustment_get_value(vadj);
+        }
         
         /* Update cur_page based on actual scroll position */
         tab->cur_page = compute_page_from_scroll(tab, actual_scroll);
@@ -1117,11 +1195,11 @@ static void on_minimize_clicked(GtkButton *button, gpointer user_data) {
 static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     GtkWindow *window = GTK_WINDOW(user_data);
-    if (gtk_window_is_maximized(window)) {
+    if (!window) return;
+    if (gtk_window_is_maximized(window))
         gtk_window_unmaximize(window);
-    } else {
+    else
         gtk_window_maximize(window);
-    }
 }
 
 static void on_close_clicked(GtkButton *button, gpointer user_data) {
@@ -1663,34 +1741,12 @@ static void queue_draw(TabData *tab) {
         gtk_widget_queue_draw(tab->pages_drawing);
 }
 
-static int get_target_width_for_tab(TabData *tab) {
-    int target_w = 800;
-    if (!tab) return target_w;
-
-    if (tab->target_width > 0) {
-        target_w = tab->target_width;
-    } else if (tab->pages_drawing && gtk_widget_get_realized(tab->pages_drawing)) {
-        GtkAllocation alloc;
-        gtk_widget_get_allocation(tab->pages_drawing, &alloc);
-        if (alloc.width > 100)
-            target_w = alloc.width;
-    } else if (tab->scrolled) {
-        GtkAllocation alloc;
-        gtk_widget_get_allocation(tab->scrolled, &alloc);
-        if (alloc.width > 100)
-            target_w = alloc.width - 40;
-    }
-
-    if (target_w < 1) target_w = 1;
-    return target_w;
-}
-
 static void scroll_to_page(TabData *tab, int page) {
     if (!tab || !tab->scrolled || !tab->pages_drawing || !tab->doc) return;
     if (page < 0 || page >= tab->n_pages) return;
 
     const double spacing = 6.0;
-    int target_w = get_target_width_for_tab(tab);
+    double scale = get_ppi_scale(tab);
 
     double y = spacing;
     if (tab->layout_mode == 0) {
@@ -1699,13 +1755,11 @@ static void scroll_to_page(TabData *tab, int page) {
             if (!p) continue;
             double pw, ph;
             poppler_page_get_size(p, &pw, &ph);
-            double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
             double page_h = ph * scale;
             y += page_h + spacing;
             g_object_unref(p);
         }
     } else if (tab->layout_mode == 1) {
-        double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
         int row = page / 2;
         for (int i = 0; i < row; ++i) {
             double row_h = 0.0;
@@ -1714,7 +1768,7 @@ static void scroll_to_page(TabData *tab, int page) {
                 double pw1, ph1;
                 poppler_page_get_size(p1, &pw1, &ph1);
                 if (pw1 > 0 && ph1 > 0)
-                    row_h = ph1 * ((double)target_w / pw1 * zoom);
+                    row_h = ph1 * scale;
                 g_object_unref(p1);
             }
             if (i * 2 + 1 < tab->n_pages) {
@@ -1723,7 +1777,7 @@ static void scroll_to_page(TabData *tab, int page) {
                     double pw2, ph2;
                     poppler_page_get_size(p2, &pw2, &ph2);
                     if (pw2 > 0 && ph2 > 0) {
-                        double h2 = ph2 * ((double)target_w / pw2 * zoom);
+                        double h2 = ph2 * scale;
                         if (h2 > row_h) row_h = h2;
                     }
                     g_object_unref(p2);
@@ -1731,6 +1785,23 @@ static void scroll_to_page(TabData *tab, int page) {
             }
             y += row_h + spacing;
         }
+    } else if (tab->layout_mode == 2) {
+        double x = spacing;
+        for (int i = 0; i < page; ++i) {
+            PopplerPage *p = poppler_document_get_page(tab->doc, i);
+            if (!p) continue;
+            double pw, ph;
+            poppler_page_get_size(p, &pw, &ph);
+            if (pw > 0 && ph > 0) {
+                x += pw * scale + spacing;
+            }
+            g_object_unref(p);
+        }
+        if (tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            gtk_adjustment_set_value(sadj, x);
+        }
+        return;
     }
 
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
@@ -1745,9 +1816,60 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         return;
     }
 
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+
+    if (tab->layout_mode == 2) {
+        if (adj == vadj) return;
+        GtkAdjustment *sadj = tab->h_scrollbar ? gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar)) : NULL;
+        if (adj != sadj) return;
+        double scroll_x = gtk_adjustment_get_value(adj);
+        const double spacing = 6.0;
+        double scale = get_ppi_scale(tab);
+
+        double upper = gtk_adjustment_get_upper(adj);
+        double page_size = gtk_adjustment_get_page_size(adj);
+        if (page_size > 0 && tab->n_pages > 0 && scroll_x >= (upper - page_size - 1.0)) {
+            tab->cur_page = tab->n_pages - 1;
+            if (tab == get_current_left_tab()) {
+                sync_page_widget_from_tab(tab);
+            }
+            update_document_model_from_tab(tab);
+            gtk_widget_queue_draw(tab->pages_drawing);
+            return;
+        }
+
+        double x = spacing;
+        int visible_page = (tab->n_pages > 0) ? (tab->n_pages - 1) : 0;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
+            double page_w = pw * scale;
+            if (x + page_w > scroll_x) {
+                visible_page = i;
+                g_object_unref(page);
+                break;
+            }
+            x += page_w + spacing;
+            g_object_unref(page);
+        }
+
+        tab->cur_page = visible_page;
+        if (tab == get_current_left_tab()) {
+            sync_page_widget_from_tab(tab);
+        }
+        update_document_model_from_tab(tab);
+        gtk_widget_queue_draw(tab->pages_drawing);
+        return;
+    }
+
+    if (adj != vadj) return;
+
     double scroll_y = gtk_adjustment_get_value(adj);
     const double spacing = 6.0;
-    int target_w = get_target_width_for_tab(tab);
+    double scale = get_ppi_scale(tab);
 
     double upper = gtk_adjustment_get_upper(adj);
     double page_size = gtk_adjustment_get_page_size(adj);
@@ -1775,7 +1897,6 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
                 continue;
             }
 
-            double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
             double page_h = ph * scale;
 
             if (y + page_h > scroll_y) {
@@ -1788,7 +1909,6 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
             g_object_unref(page);
         }
     } else if (tab->layout_mode == 1) {
-        double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
         for (int i = 0; i < tab->n_pages; i += 2) {
             double row_h = 0.0;
             PopplerPage *p1 = poppler_document_get_page(tab->doc, i);
@@ -1796,7 +1916,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
                 double pw1, ph1;
                 poppler_page_get_size(p1, &pw1, &ph1);
                 if (pw1 > 0 && ph1 > 0)
-                    row_h = ph1 * ((double)target_w / pw1 * zoom);
+                    row_h = ph1 * scale;
                 g_object_unref(p1);
             }
             if (i + 1 < tab->n_pages) {
@@ -1805,7 +1925,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
                     double pw2, ph2;
                     poppler_page_get_size(p2, &pw2, &ph2);
                     if (pw2 > 0 && ph2 > 0) {
-                        double h2 = ph2 * ((double)target_w / pw2 * zoom);
+                        double h2 = ph2 * scale;
                         if (h2 > row_h) row_h = h2;
                     }
                     g_object_unref(p2);
@@ -1836,16 +1956,50 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
     TabData *tab = user_data;
     if (!tab || !tab->doc) return;
 
-    int target_w = get_target_width_for_tab(tab);
-    if (target_w != tab->last_target_width) {
-        tab->last_target_width = target_w;
-        build_continuous_view(tab, target_w);
+    double zoom = tab->zoom > 0 ? tab->zoom : 300.0;
+    if (zoom != tab->last_zoom) {
+        tab->last_zoom = zoom;
+        build_continuous_view(tab);
+    }
+
+    /* For row view (mode 2), the size_request width is clamped to page_width_px
+       to prevent the window from growing.  GTK's internal handler set the
+       hadjustment upper from the clamped size_request, so we must extend it
+       here to the full total_w BEFORE scroll_to_page runs below. */
+    if (tab->layout_mode == 2 && tab->doc && tab->n_pages > 0 && tab->h_scrollbar) {
+        int vp_w = allocation ? allocation->width : 200;
+        GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+        gtk_adjustment_set_page_size(sadj, vp_w > 0 ? vp_w : 200);
+        gtk_adjustment_set_page_increment(sadj, vp_w * 0.9);
+        double upper = gtk_adjustment_get_upper(sadj);
+        if (upper < 1.0) upper = 1.0;
+        gtk_adjustment_set_upper(sadj, upper);
     }
 
     if (tab->initial_scroll_pending) {
         scroll_to_page(tab, tab->cur_page);
         tab->initial_scroll_pending = FALSE;
     }
+}
+
+static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data) {
+    (void)widget;
+    TabData *tab = user_data;
+    if (!tab || tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
+    GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+    double val = gtk_adjustment_get_value(adj);
+    double step = 40.0;
+    if (event->direction == GDK_SCROLL_SMOOTH) {
+        double dx, dy;
+        gdk_event_get_scroll_deltas((GdkEvent*)event, &dx, &dy);
+        val += dx * step;
+    } else if (event->direction == GDK_SCROLL_RIGHT || event->direction == GDK_SCROLL_DOWN) {
+        val += step;
+    } else if (event->direction == GDK_SCROLL_LEFT || event->direction == GDK_SCROLL_UP) {
+        val -= step;
+    }
+    gtk_adjustment_set_value(adj, val);
+    return TRUE;
 }
 
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
@@ -1863,9 +2017,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     cairo_clip_extents(cr, &clip_x1, &clip_y1, &clip_x2, &clip_y2);
 
     const double spacing = 6.0;
+    double scale = get_ppi_scale(tab);
     if (tab->layout_mode == 0) {
-        int target_w = get_target_width_for_tab(tab);
-        if (target_w < 100) target_w = alloc.width;
         double y = spacing;
         for (int i = 0; i < tab->n_pages; ++i) {
             PopplerPage *page = poppler_document_get_page(tab->doc, i);
@@ -1873,7 +2026,6 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             double pw, ph;
             poppler_page_get_size(page, &pw, &ph);
             if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
-            double scale = (double)target_w / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
             double page_w = pw * scale;
             double page_h = ph * scale;
             double off_x = (alloc.width - page_w) / 2.0;
@@ -1899,38 +2051,34 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
         }
     } else if (tab->layout_mode == 1) {
         int n = tab->n_pages;
-        int target_w = get_target_width_for_tab(tab);
         double y = spacing;
-        double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
         for (int i = 0; i < n; i += 2) {
             double row_h = 0.0;
             double row_w = 0.0;
 
             /* left page */
-            double pw1 = 0, ph1 = 0, page_w1 = 0, page_h1 = 0, scale1 = 1.0;
+            double pw1 = 0, ph1 = 0, page_w1 = 0, page_h1 = 0;
             PopplerPage *p1 = poppler_document_get_page(tab->doc, i);
             if (p1) {
                 poppler_page_get_size(p1, &pw1, &ph1);
                 if (pw1 > 0 && ph1 > 0) {
-                    scale1 = (double)target_w / pw1 * zoom;
-                    page_w1 = pw1 * scale1;
-                    page_h1 = ph1 * scale1;
+                    page_w1 = pw1 * scale;
+                    page_h1 = ph1 * scale;
                 }
             }
             row_w = page_w1;
             row_h = page_h1;
 
             /* right page */
-            double pw2 = 0, ph2 = 0, page_w2 = 0, page_h2 = 0, scale2 = 1.0;
+            double pw2 = 0, ph2 = 0, page_w2 = 0, page_h2 = 0;
             PopplerPage *p2 = NULL;
             if (i + 1 < n) {
                 p2 = poppler_document_get_page(tab->doc, i + 1);
                 if (p2) {
                     poppler_page_get_size(p2, &pw2, &ph2);
                     if (pw2 > 0 && ph2 > 0) {
-                        scale2 = (double)target_w / pw2 * zoom;
-                        page_w2 = pw2 * scale2;
-                        page_h2 = ph2 * scale2;
+                        page_w2 = pw2 * scale;
+                        page_h2 = ph2 * scale;
                     }
                 }
             }
@@ -1956,7 +2104,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_restore(cr);
                     cairo_save(cr);
                     cairo_translate(cr, left_x, off_y1);
-                    cairo_scale(cr, scale1, scale1);
+                    cairo_scale(cr, scale, scale);
                     poppler_page_render(p1, cr);
                     cairo_restore(cr);
                 }
@@ -1973,7 +2121,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_restore(cr);
                     cairo_save(cr);
                     cairo_translate(cr, right_x, off_y2);
-                    cairo_scale(cr, scale2, scale2);
+                    cairo_scale(cr, scale, scale);
                     poppler_page_render(p2, cr);
                     cairo_restore(cr);
                 }
@@ -1983,37 +2131,82 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             if (p2) g_object_unref(p2);
             y += row_h + spacing;
         }
+    } else if (tab->layout_mode == 2) {
+        double scroll_x = 0.0;
+        if (tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            scroll_x = gtk_adjustment_get_value(sadj);
+        }
+        double x = spacing;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *page = poppler_document_get_page(tab->doc, i);
+            if (!page) continue;
+            double pw, ph;
+            poppler_page_get_size(page, &pw, &ph);
+            if (pw <= 0 || ph <= 0) { g_object_unref(page); continue; }
+            double page_w = pw * scale;
+            double page_h = ph * scale;
+            double dev_x = x - scroll_x;
+            double off_y = (alloc.height - page_h) / 2.0;
+            if (dev_x + page_w > 0 && dev_x < alloc.width &&
+                off_y + page_h > 0 && off_y < alloc.height) {
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
+                cairo_rectangle(cr, dev_x, off_y, page_w, page_h);
+                cairo_fill(cr);
+                cairo_restore(cr);
+                cairo_save(cr);
+                cairo_translate(cr, dev_x, off_y);
+                cairo_scale(cr, scale, scale);
+                poppler_page_render(page, cr);
+                cairo_restore(cr);
+            }
+            x += page_w + spacing;
+            g_object_unref(page);
+        }
     }
 
     return FALSE;
 }
 
-static void build_continuous_view(TabData *tab, int target_width) {
+static void build_continuous_view(TabData *tab) {
     if (!tab || !tab->doc || !tab->pages_drawing) return;
     const double spacing = 6.0;
-    if (tab->layout_mode == 0) {
-        /* single-column (top-to-bottom) */
-        if (tab->target_width <= 0) {
-            tab->target_width = target_width;
+    double scale = get_ppi_scale(tab);
+    int page_width_px = 0;
+    if (tab->n_pages > 0) {
+        PopplerPage *p = poppler_document_get_page(tab->doc, 0);
+        if (p) {
+            double pw, ph;
+            poppler_page_get_size(p, &pw, &ph);
+            if (pw > 0)
+                page_width_px = (int)ceil(pw * scale);
+            g_object_unref(p);
         }
+    }
+    if (page_width_px < 1) page_width_px = 800;
+
+    if (tab->layout_mode == 0) {
         double total_h = spacing;
         for (int i = 0; i < tab->n_pages; ++i) {
             PopplerPage *page = poppler_document_get_page(tab->doc, i);
             if (!page) continue;
             double pw, ph;
             poppler_page_get_size(page, &pw, &ph);
-            double scale = (double)target_width / pw * (tab->zoom > 0 ? tab->zoom : 1.0);
             double page_h = ph * scale;
             total_h += page_h + spacing;
             g_object_unref(page);
         }
         if (total_h < 1.0) total_h = 1.0;
-        gtk_widget_set_size_request(tab->pages_drawing, target_width, (int)ceil(total_h));
-        tab->last_target_width = target_width;
+        if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
+        gtk_widget_set_size_request(tab->scrolled, -1, -1);
+        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(total_h));
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     } else if (tab->layout_mode == 1) {
         int n = tab->n_pages;
         double total_h = spacing;
-        double max_row_w = target_width;
+        double max_row_w = 0.0;
         for (int i = 0; i < n; i += 2) {
             double row_h = 0.0;
             double row_w = 0.0;
@@ -2025,8 +2218,6 @@ static void build_continuous_view(TabData *tab, int target_width) {
             }
             double page_w1 = 0, page_h1 = 0;
             if (pw1 > 0 && ph1 > 0) {
-                double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
-                double scale = (double)target_width / pw1 * zoom;
                 page_w1 = pw1 * scale;
                 page_h1 = ph1 * scale;
             }
@@ -2042,8 +2233,6 @@ static void build_continuous_view(TabData *tab, int target_width) {
             }
             double page_w2 = 0, page_h2 = 0;
             if (pw2 > 0 && ph2 > 0) {
-                double zoom = tab->zoom > 0 ? tab->zoom : 1.0;
-                double scale = (double)target_width / pw2 * zoom;
                 page_w2 = pw2 * scale;
                 page_h2 = ph2 * scale;
             }
@@ -2054,9 +2243,41 @@ static void build_continuous_view(TabData *tab, int target_width) {
             total_h += row_h + spacing;
         }
         if (total_h < 1.0) total_h = 1.0;
-        if (max_row_w < 1.0) max_row_w = target_width;
+        if (max_row_w < 1.0) max_row_w = page_width_px;
+        if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
+        gtk_widget_set_size_request(tab->scrolled, -1, -1);
         gtk_widget_set_size_request(tab->pages_drawing, (int)ceil(max_row_w), (int)ceil(total_h));
-        tab->last_target_width = target_width;
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+    } else if (tab->layout_mode == 2) {
+        double total_w = 0.0;
+        double max_h = 0.0;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            PopplerPage *p = poppler_document_get_page(tab->doc, i);
+            if (!p) continue;
+            double pw, ph;
+            poppler_page_get_size(p, &pw, &ph);
+            if (pw > 0 && ph > 0) {
+                double page_w = pw * scale;
+                double page_h = ph * scale;
+                total_w += page_w + spacing;
+                if (page_h > max_h) max_h = page_h;
+            }
+            g_object_unref(p);
+        }
+        if (total_w < 1.0) total_w = 1.0;
+        if (max_h < 1.0) max_h = 1.0;
+        if (tab->h_scrollbar) {
+            gtk_widget_show(tab->h_scrollbar);
+            GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            gtk_adjustment_set_lower(adj, 0.0);
+            gtk_adjustment_set_upper(adj, total_w);
+            gtk_adjustment_set_step_increment(adj, 10.0);
+        }
+        gtk_widget_set_size_request(tab->scrolled, -1, -1);
+        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(max_h));
+        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
+                                       GTK_POLICY_NEVER, GTK_POLICY_NEVER);
     }
     gtk_widget_queue_draw(tab->pages_drawing);
 }
@@ -2179,7 +2400,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
     tab->doc = doc;
     tab->n_pages = poppler_document_get_n_pages(doc);
     tab->cur_page = 0;
-    tab->zoom = 1.0;
+    tab->zoom = 300.0;
     /* track current filename for per-document settings */
     if (tab->current_file)
         g_free(tab->current_file);
@@ -2196,14 +2417,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
     {
         restore_document_model_to_tab(tab);
 
-        int target_w = get_target_width_for_tab(tab);
-        if (tab->scrolled) {
-            GtkAllocation alloc;
-            gtk_widget_get_allocation(tab->scrolled, &alloc);
-            if (alloc.width > 100)
-                target_w = alloc.width - 40;
-        }
-        build_continuous_view(tab, target_w);
+        build_continuous_view(tab);
 
         /* Defer scrolling until widget is allocated */
         tab->initial_scroll_pending = TRUE;
@@ -2217,12 +2431,11 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
 
 static TabData *create_new_tab(GtkWidget *notebook) {
     TabData *tab = g_malloc0(sizeof(TabData));
-    tab->zoom = 1.0;
+    tab->zoom = 300.0;
     tab->layout_mode = 0;    /* single-column by default */
     tab->n_pages = 0;
     tab->cur_page = 0;
-    tab->target_width = 0;
-    tab->last_target_width = -1;
+    tab->last_zoom = 300.0;
     tab->initial_scroll_pending = FALSE;
     tab->scroll_offset = -1.0;
     tab->is_helper = (notebook == right_notebook);
@@ -2241,17 +2454,30 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_vexpand(tab->scrolled, TRUE);
     gtk_widget_set_hexpand(tab->scrolled, TRUE);
-    /* connect scroll adjustment to update page display */
+    /* connect scroll adjustments to update page display */
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
     g_signal_connect(G_OBJECT(vadj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
+    GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    g_signal_connect(G_OBJECT(hadj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
     g_signal_connect(G_OBJECT(tab->scrolled), "size-allocate", G_CALLBACK(on_tab_scrolled_size_allocate), tab);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
+                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     tab->pages_drawing = gtk_drawing_area_new();
     gtk_widget_set_hexpand(tab->pages_drawing, TRUE);
     gtk_widget_set_vexpand(tab->pages_drawing, TRUE);
     g_signal_connect(G_OBJECT(tab->pages_drawing), "draw", G_CALLBACK(on_draw), tab);
     gtk_container_add(GTK_CONTAINER(tab->scrolled), tab->pages_drawing);
     gtk_box_pack_start(GTK_BOX(tab_box), tab->scrolled, TRUE, TRUE, 0);
-    
+
+    tab->h_scrollbar = gtk_scrollbar_new(GTK_ORIENTATION_HORIZONTAL, NULL);
+    gtk_widget_set_no_show_all(tab->h_scrollbar, TRUE);
+    gtk_widget_hide(tab->h_scrollbar);
+    gtk_box_pack_start(GTK_BOX(tab_box), tab->h_scrollbar, FALSE, FALSE, 0);
+    GtkAdjustment *scroll_adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+    g_signal_connect(G_OBJECT(scroll_adj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "scroll-event", G_CALLBACK(on_drawing_scroll), tab);
+    gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK);
+
     gtk_widget_show_all(tab_box);
     
     /* Store tab data in the widget */
@@ -2408,12 +2634,10 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                     document_model_t *dm = g_hash_table_lookup(document_models, key);
                     if (dm) {
                         tab->layout_mode = document_model_get_visualization_mode(dm);
-                        int w = document_model_get_target_width(dm);
-                        if (w > 0) tab->target_width = w;
                         double saved_zoom = document_model_get_zoom(dm);
-                        if (saved_zoom >= 0.1 && saved_zoom <= 10.0)
+                        if (saved_zoom >= 10.0 && saved_zoom <= 500.0)
                             tab->zoom = saved_zoom;
-                        build_continuous_view(tab, get_target_width_for_tab(tab));
+                        build_continuous_view(tab);
                         int saved_page = document_model_get_current_page(dm);
                         if (saved_page < 1) saved_page = 1;
                         if (saved_page > tab->n_pages) saved_page = tab->n_pages;
@@ -2524,11 +2748,14 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
 static void apply_layout_to_tab(TabData *tab, int layout) {
     if (!tab) return;
     tab->layout_mode = layout;
-    int target_w = get_target_width_for_tab(tab);
-    build_continuous_view(tab, target_w);
-    scroll_to_page(tab, tab->cur_page);
+    build_continuous_view(tab);
+    tab->initial_scroll_pending = TRUE;
+    gtk_widget_queue_resize(tab->scrolled);
     update_document_model_from_tab(tab);
     save_state();
+    if (tab == get_current_left_tab() || tab == get_current_right_tab()) {
+        sync_page_widget_from_tab(tab);
+    }
 }
 
 static void on_layout_left_toggled(GtkToggleButton *btn, gpointer user_data) {
