@@ -9,6 +9,7 @@ typedef struct {
     int tab_width;               // Width of tabs for opened PDF files
     char *last_opened_directory; // Path to the last opened directory
     char *theme;                 // Theme: "dark" or "light"
+    char *tabbar_position;       // Tab bar position: "left", "top", "right"
 } sessions_model_t;
 
 // Constructor and destructor
@@ -21,6 +22,7 @@ const char* sessions_model_get_last_open_session(sessions_model_t* model);
 int sessions_model_get_tab_width(sessions_model_t* model);
 const char* sessions_model_get_last_opened_directory(sessions_model_t* model);
 const char* sessions_model_get_theme(sessions_model_t* model);
+const char* sessions_model_get_tabbar_position(sessions_model_t* model);
 
 // Setters
 void sessions_model_set_session_names(sessions_model_t* model, GList* names);
@@ -28,6 +30,7 @@ void sessions_model_set_last_open_session(sessions_model_t* model, const char* s
 void sessions_model_set_tab_width(sessions_model_t* model, int width);
 void sessions_model_set_last_opened_directory(sessions_model_t* model, const char* directory);
 void sessions_model_set_theme(sessions_model_t* model, const char* theme);
+void sessions_model_set_tabbar_position(sessions_model_t* model, const char* position);
 
 // Utility functions
 void sessions_model_add_session_name(sessions_model_t* model, const char* name);

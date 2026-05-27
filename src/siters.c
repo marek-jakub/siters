@@ -34,6 +34,8 @@ typedef struct TabDataStruct {
     /* per-document storage */
     char *current_file;
     GtkWidget *tab_label;  /* reference to the label widget in the tab */
+    GtkWidget *tab_label_box; /* reference to the label container box */
+    GtkWidget *tab_label_close_btn; /* reference to the close button */
     /* continuous view widgets */
     GtkWidget *scrolled;
     GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
@@ -80,6 +82,11 @@ static GtkTreeStore *sessions_tree_store;
 static sessions_model_t *sessions_model;
 static gboolean sessions_tree_syncing = FALSE;
 static gchar *last_tree_selection_key = NULL;
+
+/* Settings sidebar components */
+static GtkWidget *settings_container;
+static GtkWidget *tabbar_combo;
+static GtkWidget *tab_width_spin;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -146,6 +153,10 @@ static void on_page_entry_insert_text(GtkEditable *editable,
                                       gint *position,
                                       gpointer user_data);
 static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data);
+
+/* Settings apply functions */
+static void apply_tabbar_position(const char *pos);
+static void apply_tab_width(int width);
 
 /* Session tab persistence functions */
 static void save_open_tabs_for_session(const char *session_name);
@@ -303,6 +314,13 @@ void save_state(void) {
         json_builder_set_member_name(builder, "maximized");
         json_builder_add_boolean_value(builder, current_maximized);
     }
+    if (sessions_model) {
+        json_builder_set_member_name(builder, "tabbar_position");
+        json_builder_add_string_value(builder, sessions_model_get_tabbar_position(sessions_model));
+        json_builder_set_member_name(builder, "tab_width");
+        json_builder_add_int_value(builder, sessions_model_get_tab_width(sessions_model));
+    }
+
     json_builder_end_object(builder);
 
     json_builder_set_member_name(builder, "sessions");
@@ -469,6 +487,13 @@ void load_state(void) {
         current_maximized = max;
     }
 
+    if (sessions_model && win) {
+        const char *pos = json_object_get_string_member_with_default(win, "tabbar_position", "top");
+        sessions_model_set_tabbar_position(sessions_model, pos);
+        int tw = (int)json_object_get_int_member_with_default(win, "tab_width", 100);
+        sessions_model_set_tab_width(sessions_model, tw);
+    }
+
     JsonObject *sessions_obj = json_object_get_object_member(root_obj, "sessions");
     if (sessions_obj) {
         if (!sessions_model)
@@ -529,6 +554,24 @@ void load_state(void) {
             restore_open_tabs_for_session(loaded_session);
             sync_page_widget_from_tab(get_current_left_tab());
         }
+    }
+
+    if (sessions_model) {
+        apply_tabbar_position(sessions_model_get_tabbar_position(sessions_model));
+        apply_tab_width(sessions_model_get_tab_width(sessions_model));
+        /* Sync settings UI widgets with loaded values */
+        if (tabbar_combo) {
+            const char *pos = sessions_model_get_tabbar_position(sessions_model);
+            if (g_strcmp0(pos, "left") == 0)
+                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 0);
+            else if (g_strcmp0(pos, "right") == 0)
+                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 2);
+            else
+                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+        }
+        if (tab_width_spin)
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin),
+                                       sessions_model_get_tab_width(sessions_model));
     }
 
     g_object_unref(parser);
@@ -1493,6 +1536,7 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
+        gtk_widget_hide(settings_container);
 
         // Show sessions container
         gtk_widget_show_all(sessions_container);
@@ -1519,6 +1563,7 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
+        gtk_widget_hide(settings_container);
 
         // Show sidebar_label with TOC text
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
@@ -1529,6 +1574,98 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_TOC;
     }
+}
+
+static double get_angle_for_position(const char *pos) {
+    if (g_strcmp0(pos, "left") == 0) return 90.0;
+    if (g_strcmp0(pos, "right") == 0) return -90.0;
+    return 0.0;
+}
+
+static void apply_tabbar_position(const char *pos) {
+    GtkPositionType gpos = GTK_POS_TOP;
+    if (g_strcmp0(pos, "left") == 0) gpos = GTK_POS_LEFT;
+    else if (g_strcmp0(pos, "right") == 0) gpos = GTK_POS_RIGHT;
+    if (left_notebook)
+        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(left_notebook), gpos);
+    if (right_notebook)
+        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(right_notebook), gpos);
+
+    gboolean is_side = (g_strcmp0(pos, "left") == 0 || g_strcmp0(pos, "right") == 0);
+    if (left_notebook) {
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(left_notebook), !is_side);
+        gtk_widget_set_size_request(left_notebook, is_side ? -1 : 70, -1);
+    }
+    if (right_notebook)
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(right_notebook), !is_side);
+
+    double angle = get_angle_for_position(pos);
+    GtkOrientation box_orientation = is_side ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL;
+    GtkWidget *notebooks[] = {left_notebook, right_notebook};
+    for (int n = 0; n < 2; n++) {
+        if (!notebooks[n]) continue;
+        int np = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebooks[n]));
+        for (int i = 0; i < np; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(notebooks[n]), i);
+            TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+            if (tab && tab->tab_label)
+                gtk_label_set_angle(GTK_LABEL(tab->tab_label), angle);
+            if (tab && tab->tab_label_box) {
+                gtk_orientable_set_orientation(GTK_ORIENTABLE(tab->tab_label_box), box_orientation);
+                if (g_strcmp0(pos, "left") == 0)
+                    gtk_box_reorder_child(GTK_BOX(tab->tab_label_box), tab->tab_label, 1);
+                else
+                    gtk_box_reorder_child(GTK_BOX(tab->tab_label_box), tab->tab_label, 0);
+            }
+            if (tab && tab->tab_label_close_btn) {
+                gtk_widget_set_has_tooltip(tab->tab_label_close_btn, TRUE);
+                gtk_widget_set_tooltip_text(tab->tab_label_close_btn, "Close tab");
+            }
+        }
+    }
+}
+
+static void apply_tab_width(int width) {
+    /* Truncate all existing tab labels to 'width' characters */
+    GtkWidget *notebooks[] = {left_notebook, right_notebook};
+    for (int n = 0; n < 2; n++) {
+        if (!notebooks[n]) continue;
+        int np = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebooks[n]));
+        for (int i = 0; i < np; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(notebooks[n]), i);
+            TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+            if (!tab || !tab->tab_label || !tab->current_file) continue;
+            char *basename = g_path_get_basename(tab->current_file);
+            const char *label_text = basename;
+            char *truncated = NULL;
+            if (width > 0 && (int)strlen(basename) > width) {
+                truncated = g_strndup(basename, width);
+                label_text = truncated;
+            }
+            gtk_label_set_text(GTK_LABEL(tab->tab_label), label_text);
+            g_free(truncated);
+            g_free(basename);
+        }
+    }
+}
+
+static void on_tabbar_combo_changed(GtkComboBox *combo, gpointer user_data) {
+    (void)user_data;
+    if (!sessions_model) return;
+    const char *pos = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
+    if (!pos) return;
+    sessions_model_set_tabbar_position(sessions_model, pos);
+    apply_tabbar_position(pos);
+    save_state();
+}
+
+static void on_tab_width_spin_changed(GtkSpinButton *spin, gpointer user_data) {
+    (void)user_data;
+    if (!sessions_model) return;
+    int w = (int)gtk_spin_button_get_value(spin);
+    sessions_model_set_tab_width(sessions_model, w);
+    apply_tab_width(w);
+    save_state();
 }
 
 static void on_settings_clicked(GtkButton *button, gpointer user_data) {
@@ -1547,9 +1684,8 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
 
-        // Show sidebar_label with settings text
-        gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
-        gtk_widget_show_all(sidebar_label);
+        // Show settings container
+        gtk_widget_show_all(settings_container);
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -2408,8 +2544,19 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
 
     /* Update the tab's label with filename */
     if (tab->tab_label) {
-        const char *basename = g_path_get_basename(filename);
-        gtk_label_set_text(GTK_LABEL(tab->tab_label), basename);
+        char *basename = g_path_get_basename(filename);
+        const char *label_text = basename;
+        char *truncated = NULL;
+        if (sessions_model) {
+            int max_chars = sessions_model_get_tab_width(sessions_model);
+            if (max_chars > 0 && (int)strlen(basename) > max_chars) {
+                truncated = g_strndup(basename, max_chars);
+                label_text = truncated;
+            }
+        }
+        gtk_label_set_text(GTK_LABEL(tab->tab_label), label_text);
+        g_free(truncated);
+        g_free(basename);
     }
 
     queue_draw(tab);
@@ -2483,13 +2630,37 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     /* Store tab data in the widget */
     g_object_set_data_full(G_OBJECT(tab_box), "tab-data", tab, destroy_tab_data);
 
-    /* Create tab label with close button */
-    GtkWidget *label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+    /* Determine box orientation based on tab position */
+    GtkOrientation box_orientation = GTK_ORIENTATION_HORIZONTAL;
+    if (sessions_model) {
+        const char *pos = sessions_model_get_tabbar_position(sessions_model);
+        if (g_strcmp0(pos, "left") == 0 || g_strcmp0(pos, "right") == 0)
+            box_orientation = GTK_ORIENTATION_VERTICAL;
+    }
+    GtkWidget *label_box = gtk_box_new(box_orientation, 1);
     GtkWidget *label = gtk_label_new("New Document");
-    gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+    if (sessions_model)
+        gtk_label_set_angle(GTK_LABEL(label), get_angle_for_position(sessions_model_get_tabbar_position(sessions_model)));
     tab->tab_label = label;  /* Store reference to label for updates */
-    GtkWidget *close_btn = gtk_button_new_with_label("×");
-    gtk_widget_set_size_request(close_btn, 30, -1);
+    tab->tab_label_box = label_box;  /* Store reference to container for orientation changes */
+    GtkWidget *close_img = gtk_image_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_MENU);
+    gtk_image_set_pixel_size(GTK_IMAGE(close_img), 8);
+    GtkWidget *close_btn = gtk_button_new();
+    gtk_button_set_image(GTK_BUTTON(close_btn), close_img);
+    gtk_widget_set_size_request(close_btn, 10, 10);
+    tab->tab_label_close_btn = close_btn;
+    gtk_widget_set_has_tooltip(close_btn, TRUE);
+    gtk_widget_set_tooltip_text(close_btn, "Close tab");
+    if (sessions_model && g_strcmp0(sessions_model_get_tabbar_position(sessions_model), "left") == 0) {
+        gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+    } else if (sessions_model && g_strcmp0(sessions_model_get_tabbar_position(sessions_model), "right") == 0) {
+        gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
+    } else {
+        gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
+        gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
+    }
     /* allocate CloseInfo linking the notebook and this page so close removes correct page */
     typedef struct {
         GtkNotebook *notebook;
@@ -2499,7 +2670,6 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     ci->notebook = GTK_NOTEBOOK(notebook);
     ci->page = tab_box;
     g_signal_connect(close_btn, "clicked", G_CALLBACK(on_tab_close_clicked), ci);
-    gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
     gtk_widget_show_all(label_box);
 
     /* Add tab to notebook */
@@ -2992,6 +3162,59 @@ GtkWidget* create_main_window(void) {
 
     gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
     gtk_widget_hide(sessions_container);
+
+    /* Settings container */
+    settings_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(settings_container), 5);
+    g_object_ref(settings_container);
+
+    GtkWidget *settings_title = gtk_label_new("Reader Preferences");
+    gtk_widget_set_halign(settings_title, GTK_ALIGN_START);
+    PangoAttrList *sattr = pango_attr_list_new();
+    pango_attr_list_insert(sattr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    pango_attr_list_insert(sattr, pango_attr_scale_new(PANGO_SCALE_LARGE));
+    gtk_label_set_attributes(GTK_LABEL(settings_title), sattr);
+    pango_attr_list_unref(sattr);
+    gtk_box_pack_start(GTK_BOX(settings_container), settings_title, FALSE, FALSE, 0);
+
+    /* Tab bar position */
+    GtkWidget *tabbar_label = gtk_label_new("Tab bar position:");
+    gtk_widget_set_halign(tabbar_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(settings_container), tabbar_label, FALSE, FALSE, 0);
+
+    tabbar_combo = gtk_combo_box_text_new();
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "left", "Left");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "top", "Top");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "right", "Right");
+    if (sessions_model) {
+        const char *cur = sessions_model_get_tabbar_position(sessions_model);
+        if (g_strcmp0(cur, "left") == 0)
+            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 0);
+        else if (g_strcmp0(cur, "right") == 0)
+            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 2);
+        else
+            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+    } else {
+        gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+    }
+    gtk_box_pack_start(GTK_BOX(settings_container), tabbar_combo, FALSE, FALSE, 0);
+    g_signal_connect(G_OBJECT(tabbar_combo), "changed", G_CALLBACK(on_tabbar_combo_changed), NULL);
+
+    /* Tab text width */
+    GtkWidget *tab_width_label = gtk_label_new("Tab text width:");
+    gtk_widget_set_halign(tab_width_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(settings_container), tab_width_label, FALSE, FALSE, 0);
+
+    tab_width_spin = gtk_spin_button_new_with_range(5, 50, 1);
+    if (sessions_model)
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), sessions_model_get_tab_width(sessions_model));
+    else
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), 50);
+    gtk_box_pack_start(GTK_BOX(settings_container), tab_width_spin, FALSE, FALSE, 0);
+    g_signal_connect(G_OBJECT(tab_width_spin), "value-changed", G_CALLBACK(on_tab_width_spin_changed), NULL);
+
+    gtk_box_pack_start(GTK_BOX(sidebar), settings_container, TRUE, TRUE, 0);
+    gtk_widget_hide(settings_container);
 
     /* Content area on the right*/
     content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);

@@ -13,6 +13,7 @@ sessions_model_t* sessions_model_new() {
     model->tab_width = 100; // default
     model->last_opened_directory = NULL;
     model->theme = g_strdup("light"); // default
+    model->tabbar_position = g_strdup("top"); // default
     return model;
 }
 
@@ -26,6 +27,7 @@ void sessions_model_free(sessions_model_t* model) {
     g_free(model->last_open_session);
     g_free(model->last_opened_directory);
     g_free(model->theme);
+    g_free(model->tabbar_position);
 
     g_free(model);
 }
@@ -94,4 +96,13 @@ void sessions_model_remove_session_name(sessions_model_t* model, const char* nam
         g_free(found->data);
         model->session_names = g_list_delete_link(model->session_names, found);
     }
+}
+
+const char* sessions_model_get_tabbar_position(sessions_model_t* model) {
+    return model->tabbar_position;
+}
+
+void sessions_model_set_tabbar_position(sessions_model_t* model, const char* position) {
+    g_free(model->tabbar_position);
+    model->tabbar_position = g_strdup(position);
 }
