@@ -201,14 +201,14 @@ static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
 
 static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event, gpointer user_data) {
     (void)user_data;
-    
+
     // Update current geometry
     current_width = event->width;
     current_height = event->height;
     current_x = event->x;
     current_y = event->y;
     current_maximized = gtk_window_is_maximized(GTK_WINDOW(widget));
-    
+
     return FALSE; // Allow further processing
 }
 
@@ -547,10 +547,10 @@ static double calculate_page_top_offset_ppi(TabData *tab, int page_idx) {
     if (!tab || !tab->doc || page_idx < 0 || page_idx >= tab->n_pages) {
         return 0.0;
     }
-    
+
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
-    
+
     double y_offset = spacing;
     if (tab->layout_mode == 2) {
         for (int i = 0; i < page_idx; ++i) {
@@ -588,7 +588,7 @@ static double calculate_page_top_offset_ppi(TabData *tab, int page_idx) {
         for (int i = 0; i < page_idx; ++i) {
             PopplerPage *page = poppler_document_get_page(tab->doc, i);
             if (!page) continue;
-            
+
             double pw, ph;
             poppler_page_get_size(page, &pw, &ph);
             if (pw > 0 && ph > 0) {
@@ -606,16 +606,16 @@ static double get_page_height_ppi(TabData *tab, int page_idx) {
     if (!tab || !tab->doc || page_idx < 0 || page_idx >= tab->n_pages) {
         return 0.0;
     }
-    
+
     PopplerPage *page = poppler_document_get_page(tab->doc, page_idx);
     if (!page) return 0.0;
-    
+
     double pw, ph;
     poppler_page_get_size(page, &pw, &ph);
     g_object_unref(page);
-    
+
     if (pw <= 0 || ph <= 0) return 0.0;
-    
+
     double eff_zoom = tab->zoom > 0 ? tab->zoom : 300.0;
     double scale = eff_zoom / 72.0;
     return ph * scale;
@@ -629,12 +629,12 @@ static char* make_document_key(const char *uri, gboolean is_helper) {
 
 static void update_document_model_from_tab(TabData *tab) {
     if (!tab || !tab->current_file || !document_models) return;
-    
+
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
-    
+
     char *key = make_document_key(uri, tab->is_helper);
-    
+
     // Get or create document model
     document_model_t *doc_model = g_hash_table_lookup(document_models, key);
     if (!doc_model) {
@@ -644,7 +644,7 @@ static void update_document_model_from_tab(TabData *tab) {
     } else {
         g_free(key);
     }
-    
+
     // Update current state
     document_model_set_zoom(doc_model, tab->zoom);
     document_model_set_visualization_mode(doc_model, tab->layout_mode);
@@ -765,14 +765,14 @@ static void restore_document_model_to_tab(TabData *tab) {
         double saved_fraction = document_model_get_intra_page_fraction(doc_model);
         tab->layout_mode = document_model_get_visualization_mode(doc_model);
         tab->zoom = saved_zoom;
-        
+
         /* Clamp page to valid range */
         if (saved_page < 1) saved_page = 1;
         if (saved_page > tab->n_pages) saved_page = tab->n_pages;
-        
+
         /* Set cur_page immediately so it's available even if the async restore runs later */
         tab->cur_page = saved_page - 1;
-        
+
         /* Initiate the robust, layout-aware scroll restore */
         start_initial_scroll_restore(tab, saved_page - 1, saved_zoom, saved_fraction);
     } else {
@@ -798,7 +798,7 @@ static void switch_to_session(const char *session_name) {
 
     current_selected_session = g_strdup(session_name);
     restore_open_tabs_for_session(session_name);
-    sync_page_widget_from_tab(get_current_left_tab()); 
+    sync_page_widget_from_tab(get_current_left_tab());
     update_window_title_for_session(current_selected_session);
 
     if (sessions_model) {
@@ -866,12 +866,12 @@ void populate_sessions_treeview(void) {
 /* Helper: Determine current page from scroll position */
 static int compute_page_from_scroll(TabData *tab, double scroll_y) {
     if (!tab || !tab->doc || tab->n_pages <= 0) return 0;
-    
+
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
     double y = spacing;
     int visible_page = tab->n_pages - 1;
-    
+
     if (tab->layout_mode == 2) {
         for (int i = 0; i < tab->n_pages; ++i) {
             PopplerPage *page = poppler_document_get_page(tab->doc, i);
@@ -913,7 +913,7 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
             y += page_h + spacing;
         }
     }
-    
+
     return visible_page;
 }
 
@@ -932,14 +932,14 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         g_free(restore);
         return FALSE;
     }
-    
+
     if (!restore->tab->doc) {
         g_free(restore);
         return FALSE;
     }
-    
+
     TabData *tab = restore->tab;
-    
+
     /* ========== STAGE 0: Initialize & Apply Zoom ========== */
     if (restore->restore_stage == 0) {
         /* Validate basic state */
@@ -948,7 +948,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
             return FALSE;
         }
-        
+
         GtkAllocation alloc;
         gtk_widget_get_allocation(tab->scrolled, &alloc);
         if (alloc.width < 1 || alloc.height < 1) {
@@ -956,37 +956,37 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
             return FALSE;
         }
-        
+
         /* Clamp page to valid range */
         if (restore->target_page < 0) restore->target_page = 0;
         if (restore->target_page >= tab->n_pages) restore->target_page = tab->n_pages - 1;
-        
+
         /* Clamp zoom (PPI: 10-500) */
         if (restore->target_zoom < 10.0) restore->target_zoom = 10.0;
         if (restore->target_zoom > 500.0) restore->target_zoom = 500.0;
-        
+
         /* Clamp fraction */
         if (restore->target_fraction < 0.0) restore->target_fraction = 0.0;
         if (restore->target_fraction > 1.0) restore->target_fraction = 1.0;
-        
+
         /* Apply zoom */
         tab->zoom = restore->target_zoom;
-        
+
         /* Rebuild layout with new zoom */
         build_continuous_view(tab);
-        
+
         /* Move to next stage */
         restore->restore_stage = 1;
         restore->settle_attempts = 0;
         restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
         return FALSE;
     }
-    
+
     /* ========== STAGE 1: Wait for Layout to Settle ========== */
     if (restore->restore_stage == 1) {
         /* Check if layout has settled by seeing if page heights are stable */
         double page_h = get_page_height_ppi(tab, restore->target_page);
-        
+
         if (page_h <= 0) {
             /* Page height not ready yet */
             restore->settle_attempts++;
@@ -996,13 +996,13 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             }
             /* Timeout, proceed anyway */
         }
-        
+
         /* Move to measurement stage */
         restore->restore_stage = 2;
         restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
         return FALSE;
     }
-    
+
     /* ========== STAGE 2: Calculate Exact Scroll Position ========== */
     if (restore->restore_stage == 2) {
         double scale = get_ppi_scale(tab);
@@ -1068,7 +1068,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
         return FALSE;
     }
-    
+
     /* ========== STAGE 3: Verify & Finalize ========== */
     if (restore->restore_stage == 3) {
         double actual_scroll;
@@ -1083,18 +1083,18 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
             actual_scroll = gtk_adjustment_get_value(vadj);
         }
-        
+
         /* Update cur_page based on actual scroll position */
         tab->cur_page = compute_page_from_scroll(tab, actual_scroll);
-        
+
         /* Update UI */
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);
         }
-        
+
         /* Update document model */
         update_document_model_from_tab(tab);
-        
+
         /* Mark restore as complete */
         tab->initial_scroll_pending = FALSE;
         tab->pending_restore = NULL;
@@ -1102,7 +1102,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         g_free(restore);
         return FALSE;
     }
-    
+
     if (restore->tab) {
         restore->tab->pending_restore = NULL;
     }
@@ -1111,10 +1111,10 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
 }
 
 /* Called to initiate the robust restore process */
-static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, 
+static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom,
                                          double target_fraction) {
     if (!tab || target_page < 0 || target_zoom < 0.1) return;
-    
+
     RestoreState *restore = g_malloc(sizeof(RestoreState));
     restore->tab = tab;
     restore->restore_stage = 0;
@@ -1123,10 +1123,10 @@ static void start_initial_scroll_restore(TabData *tab, int target_page, double t
     restore->target_zoom = target_zoom;
     restore->target_fraction = target_fraction;
     restore->source_id = 0;
-    
+
     tab->initial_scroll_pending = TRUE;
     tab->pending_restore = restore;
-    
+
     /* Start the multi-stage restore process */
     restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
 }
@@ -1212,7 +1212,7 @@ static void on_close_clicked(GtkButton *button, gpointer user_data) {
 static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
-    
+
     const char *session_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
     if (session_name && strlen(session_name) > 0) {
         // Check if session name already exists
@@ -1231,7 +1231,7 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
                 return;
             }
         }
-        
+
         // Add to model
         sessions_model_add_session_name(sessions_model, session_name);
 
@@ -1241,10 +1241,10 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
             session_model_set_session_name(session, session_name);
             g_hash_table_insert(session_models, g_strdup(session_name), session);
         }
-        
+
         // Update tree view
         populate_sessions_treeview();
-        
+
         // Clear entry
         gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
 
@@ -1256,15 +1256,15 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
 static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
-    
+
     GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
     GtkTreeIter iter;
     GtkTreeModel *model;
-    
+
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
         gchar *session_name;
         gtk_tree_model_get(model, &iter, 0, &session_name, -1);
-        
+
         // Prevent removing the "Default" session
         if (strcmp(session_name, "Default") == 0) {
             // Show a message dialog that Default session cannot be removed
@@ -1278,10 +1278,10 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
             g_free(session_name);
             return;
         }
-        
+
         // Remove from model
         sessions_model_remove_session_name(sessions_model, session_name);
-        
+
         // Update tree view
         populate_sessions_treeview();
 
@@ -1299,7 +1299,7 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
 
             update_window_title_for_session(current_selected_session);
         }
-        
+
         g_free(session_name);
 
         // Save state to persist the removed session
@@ -1310,17 +1310,17 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
 static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
-    
+
     GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
     GtkTreeIter iter;
     GtkTreeModel *model;
-    
+
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
         const char *new_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
         if (new_name && strlen(new_name) > 0) {
             gchar *old_name;
             gtk_tree_model_get(model, &iter, 0, &old_name, -1);
-            
+
             // Prevent renaming the "Default" session
             if (strcmp(old_name, "Default") == 0) {
                 GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
@@ -1333,11 +1333,11 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                 g_free(old_name);
                 return;
             }
-            
+
             // Check if new name already exists (excluding the current session)
             const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
             for (const GList *iter_check = existing_sessions; iter_check != NULL; iter_check = iter_check->next) {
-                if (strcmp((const char*)iter_check->data, old_name) != 0 && 
+                if (strcmp((const char*)iter_check->data, old_name) != 0 &&
                     strcmp((const char*)iter_check->data, new_name) == 0) {
                     // Show error dialog
                     GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
@@ -1352,11 +1352,11 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                     return;
                 }
             }
-            
+
             // Update in model
             sessions_model_remove_session_name(sessions_model, old_name);
             sessions_model_add_session_name(sessions_model, new_name);
-            
+
             // Update tree view
             populate_sessions_treeview();
 
@@ -1369,10 +1369,10 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                 }
                 update_window_title_for_session(current_selected_session);
             }
-            
+
             // Clear entry
             gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
-            
+
             g_free(old_name);
         }
     }
@@ -1489,14 +1489,14 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
-        
+
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
-        
+
         // Show sessions container
         gtk_widget_show_all(sessions_container);
-        
+
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_show(sidebar);
@@ -1515,15 +1515,15 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
-        
+
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
-        
+
         // Show sidebar_label with TOC text
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
         gtk_widget_show_all(sidebar_label);
-        
+
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_show(sidebar);
@@ -1542,15 +1542,15 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         if (gtk_widget_get_parent(sidebar) != NULL) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
         }
-        
+
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
-        
+
         // Show sidebar_label with settings text
         gtk_label_set_text(GTK_LABEL(sidebar_label), "Settings\n\n• Display options\n• Keyboard shortcuts\n• Preferences\n\nConfigure application settings.");
         gtk_widget_show_all(sidebar_label);
-        
+
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_show(sidebar);
@@ -1560,10 +1560,10 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
 
 static void save_open_tabs_for_session(const char *session_name) {
     if (!session_name || !session_models) return;
-    
+
     session_model_t *session = g_hash_table_lookup(session_models, session_name);
     if (!session) return;
-    
+
     // Replace current saved document URLs with the currently open tabs.
     if (session->document_urls) {
         g_list_free_full(session->document_urls, g_free);
@@ -1573,7 +1573,7 @@ static void save_open_tabs_for_session(const char *session_name) {
         g_list_free_full(session->helper_document_urls, g_free);
         session->helper_document_urls = NULL;
     }
-    
+
     // Save open tabs from left notebook
     if (left_notebook) {
         int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
@@ -1592,7 +1592,7 @@ static void save_open_tabs_for_session(const char *session_name) {
             }
         }
     }
-    
+
     // Save open tabs from right notebook
     if (right_notebook) {
         int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
@@ -1681,7 +1681,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
         if (!filename && uri && g_path_is_absolute(uri)) {
             filename = g_strdup(uri);
         }
-    
+
         if (filename) {
             TabData *tab = create_new_tab(left_notebook);
             if (tab) {
@@ -2439,17 +2439,17 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->initial_scroll_pending = FALSE;
     tab->scroll_offset = -1.0;
     tab->is_helper = (notebook == right_notebook);
-    
+
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
         return NULL;
     }
 
     gdk_rgba_parse(&tab->page_color, "white");
-    
+
     /* Create container for tab content */
     GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    
+
     /* Create scrolled window and a single drawing area used for both single and continuous views */
     tab->scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_widget_set_vexpand(tab->scrolled, TRUE);
@@ -2479,10 +2479,10 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK);
 
     gtk_widget_show_all(tab_box);
-    
+
     /* Store tab data in the widget */
     g_object_set_data_full(G_OBJECT(tab_box), "tab-data", tab, destroy_tab_data);
-    
+
     /* Create tab label with close button */
     GtkWidget *label_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
     GtkWidget *label = gtk_label_new("New Document");
@@ -2501,11 +2501,11 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     g_signal_connect(close_btn, "clicked", G_CALLBACK(on_tab_close_clicked), ci);
     gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
     gtk_widget_show_all(label_box);
-    
+
     /* Add tab to notebook */
     int page_num = gtk_notebook_append_page(GTK_NOTEBOOK(notebook), tab_box, label_box);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), page_num);
-    
+
     return tab;
 }
 
@@ -2859,13 +2859,13 @@ GtkWidget* create_main_window(void) {
         sessions_model = sessions_model_new();
         // Initialize session models hash table
         session_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)session_model_free);
-        
+
         // Initialize document models hash table
         if (!document_models) {
             document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                    (GDestroyNotify)document_model_free);
         }
-        
+
         // Always ensure "Default" session exists
         const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
         gboolean has_default = FALSE;
@@ -2922,7 +2922,7 @@ GtkWidget* create_main_window(void) {
     sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
     gtk_container_set_border_width(GTK_CONTAINER(sessions_container), 5);
     g_object_ref(sessions_container);  /* Keep a reference */
-    
+
     // Title
     sessions_title = gtk_label_new("Sessions");
     gtk_widget_set_halign(sessions_title, GTK_ALIGN_START);
@@ -2934,35 +2934,35 @@ GtkWidget* create_main_window(void) {
     gtk_label_set_attributes(GTK_LABEL(sessions_title), attr_list);
     pango_attr_list_unref(attr_list);
     gtk_box_pack_start(GTK_BOX(sessions_container), sessions_title, FALSE, FALSE, 0);
-    
+
     // Entry field
     sessions_entry = gtk_entry_new();
     gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
     gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
     atk_object_set_name(gtk_widget_get_accessible(sessions_entry), "Sessions entry");
-    
+
     // Buttons box
     GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
     gtk_box_pack_start(GTK_BOX(sessions_container), buttons_box, FALSE, FALSE, 0);
-    
+
     sessions_add_btn = gtk_button_new_with_label("Add");
     gtk_widget_set_tooltip_text(sessions_add_btn, "Add new session");
     atk_object_set_name(gtk_widget_get_accessible(sessions_add_btn), "Add session");
     g_signal_connect(sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(buttons_box), sessions_add_btn, TRUE, TRUE, 0);
-    
+
     sessions_remove_btn = gtk_button_new_with_label("Remove");
     gtk_widget_set_tooltip_text(sessions_remove_btn, "Remove selected session");
     atk_object_set_name(gtk_widget_get_accessible(sessions_remove_btn), "Remove session");
     g_signal_connect(sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(buttons_box), sessions_remove_btn, TRUE, TRUE, 0);
-    
+
     sessions_update_btn = gtk_button_new_with_label("Update");
     gtk_widget_set_tooltip_text(sessions_update_btn, "Update selected session name");
     atk_object_set_name(gtk_widget_get_accessible(sessions_update_btn), "Update session");
     g_signal_connect(sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
-    
+
     // Tree view
     sessions_tree_store = gtk_tree_store_new(
     SESSION_COL_COUNT,
@@ -2974,19 +2974,19 @@ GtkWidget* create_main_window(void) {
 
     sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_tree_store));
     g_object_unref(sessions_tree_store);
-    
+
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session / File", renderer, "text", SESSION_COL_LABEL, NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
 
     g_signal_connect(sessions_tree_view, "cursor-changed", G_CALLBACK(on_sessions_treeview_cursor_changed), NULL);
-    
+
     // Scrolled window for tree view
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
     gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
-    
+
     // Populate tree view with existing sessions
     populate_sessions_treeview();
 
@@ -3221,7 +3221,8 @@ GtkWidget* create_main_window(void) {
 
     /* Left notebook (primary) */
     left_notebook = gtk_notebook_new();
-    gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, FALSE);
+    gtk_widget_set_size_request(left_notebook, 70, -1);
+    gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, TRUE);
     atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
     g_signal_connect(left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
 
@@ -3239,7 +3240,9 @@ GtkWidget* create_main_window(void) {
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, FALSE);
+    gtk_widget_set_size_request(right_pane, 70, -1);
+    gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, TRUE);
+    gtk_paned_set_position(GTK_PANED(paned), 500);
 
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
