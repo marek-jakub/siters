@@ -2202,7 +2202,7 @@ static void build_continuous_view(TabData *tab) {
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
         gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(total_h));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     } else if (tab->layout_mode == 1) {
         int n = tab->n_pages;
         double total_h = spacing;
@@ -2248,7 +2248,7 @@ static void build_continuous_view(TabData *tab) {
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
         gtk_widget_set_size_request(tab->pages_drawing, (int)ceil(max_row_w), (int)ceil(total_h));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     } else if (tab->layout_mode == 2) {
         double total_w = 0.0;
         double max_h = 0.0;
@@ -2277,7 +2277,7 @@ static void build_continuous_view(TabData *tab) {
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
         gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(max_h));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_NEVER, GTK_POLICY_NEVER);
+                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     }
     gtk_widget_queue_draw(tab->pages_drawing);
 }
@@ -2461,7 +2461,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     g_signal_connect(G_OBJECT(hadj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
     g_signal_connect(G_OBJECT(tab->scrolled), "size-allocate", G_CALLBACK(on_tab_scrolled_size_allocate), tab);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                   GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
+                                   GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     tab->pages_drawing = gtk_drawing_area_new();
     gtk_widget_set_hexpand(tab->pages_drawing, TRUE);
     gtk_widget_set_vexpand(tab->pages_drawing, TRUE);
@@ -2744,6 +2744,43 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
 }
 
 /* =============== Layout button management =============== */
+
+static void apply_zoom_to_tab(TabData *tab, int direction) {
+    if (!tab) return;
+    double new_zoom = tab->zoom + (direction > 0 ? 2.0 : -2.0);
+    if (new_zoom < 10.0) new_zoom = 10.0;
+    if (new_zoom > 500.0) new_zoom = 500.0;
+    tab->zoom = new_zoom;
+    tab->last_zoom = new_zoom;
+    build_continuous_view(tab);
+    gtk_widget_queue_resize(tab->scrolled);
+    update_document_model_from_tab(tab);
+    save_state();
+}
+
+static void on_zoom_in_left(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    apply_zoom_to_tab(get_current_left_tab(), 1);
+}
+
+static void on_zoom_out_left(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    apply_zoom_to_tab(get_current_left_tab(), -1);
+}
+
+static void on_zoom_in_right(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    apply_zoom_to_tab(get_current_right_tab(), 1);
+}
+
+static void on_zoom_out_right(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    apply_zoom_to_tab(get_current_right_tab(), -1);
+}
 
 static void apply_layout_to_tab(TabData *tab, int layout) {
     if (!tab) return;
@@ -3067,6 +3104,7 @@ GtkWidget* create_main_window(void) {
     gtk_widget_set_tooltip_text(zoom_in_btn, "Zoom in");
     atk_object_set_name(gtk_widget_get_accessible(zoom_in_btn), "Zoom in");
     gtk_box_pack_start(GTK_BOX(toolbar), zoom_in_btn, FALSE, FALSE, 1);
+    g_signal_connect(G_OBJECT(zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_left), NULL);
 
     /* Zoom out button*/
     GtkWidget *zoom_out_icon = gtk_image_new_from_file("./data/icons/zoom-out.png");
@@ -3075,6 +3113,7 @@ GtkWidget* create_main_window(void) {
     gtk_widget_set_tooltip_text(zoom_out_btn, "Zoom out");
     atk_object_set_name(gtk_widget_get_accessible(zoom_out_btn), "Zoom out");
     gtk_box_pack_start(GTK_BOX(toolbar), zoom_out_btn, FALSE, FALSE, 1);
+    g_signal_connect(G_OBJECT(zoom_out_btn), "clicked", G_CALLBACK(on_zoom_out_left), NULL);
 
     /* Separator */
     GtkWidget *separator_d = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -3264,6 +3303,7 @@ GtkWidget* create_main_window(void) {
     gtk_widget_set_tooltip_text(right_zoom_in_btn, "Zoom in");
     atk_object_set_name(gtk_widget_get_accessible(right_zoom_in_btn), "Zoom in");
     gtk_box_pack_start(GTK_BOX(right_toolbar), right_zoom_in_btn, FALSE, FALSE, 1);
+    g_signal_connect(G_OBJECT(right_zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_right), NULL);
 
     /* Right toolbar - Zoom out */
     GtkWidget *right_zoom_out_icon = gtk_image_new_from_file("./data/icons/zoom-out.png");
@@ -3272,6 +3312,7 @@ GtkWidget* create_main_window(void) {
     gtk_widget_set_tooltip_text(right_zoom_out_btn, "Zoom out");
     atk_object_set_name(gtk_widget_get_accessible(right_zoom_out_btn), "Zoom out");
     gtk_box_pack_start(GTK_BOX(right_toolbar), right_zoom_out_btn, FALSE, FALSE, 1);
+    g_signal_connect(G_OBJECT(right_zoom_out_btn), "clicked", G_CALLBACK(on_zoom_out_right), NULL);
 
     /* Right toolbar separator */
     GtkWidget *right_sep_c = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
