@@ -87,6 +87,8 @@ static gchar *last_tree_selection_key = NULL;
 static GtkWidget *settings_container;
 static GtkWidget *tabbar_combo;
 static GtkWidget *tab_width_spin;
+static GtkWidget *left_color_btn;
+static GtkWidget *right_color_btn;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -175,6 +177,10 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
 static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
+static session_model_t *get_current_session_model(void);
+static void apply_page_color_to_notebook(GtkWidget *notebook, const char *color_str);
+static void on_left_color_set(GtkColorButton *btn, gpointer user_data);
+static void on_right_color_set(GtkColorButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -572,6 +578,34 @@ void load_state(void) {
         if (tab_width_spin)
             gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin),
                                        sessions_model_get_tab_width(sessions_model));
+
+        /* Sync color buttons with current session's saved colors */
+        session_model_t *cur = get_current_session_model();
+        if (cur) {
+            const char *pc = session_model_get_page_color(cur);
+            const char *hpc = session_model_get_helper_page_color(cur);
+            if (left_color_btn) {
+                g_signal_handlers_block_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+                if (pc) {
+                    GdkRGBA c;
+                    if (gdk_rgba_parse(&c, pc))
+                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(left_color_btn), &c);
+                }
+                g_signal_handlers_unblock_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+            }
+            if (right_color_btn) {
+                g_signal_handlers_block_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+                if (hpc) {
+                    GdkRGBA c;
+                    if (gdk_rgba_parse(&c, hpc))
+                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(right_color_btn), &c);
+                }
+                g_signal_handlers_unblock_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+            }
+            /* Re-apply colors to all tabs */
+            apply_page_color_to_notebook(left_notebook, pc ? pc : "#FFFFFF");
+            apply_page_color_to_notebook(right_notebook, hpc ? hpc : "#FFFFFF");
+        }
     }
 
     g_object_unref(parser);
@@ -581,7 +615,7 @@ void load_state(void) {
 
 /* Helper: Calculate PPI-based scale for a tab */
 static double get_ppi_scale(TabData *tab) {
-    double eff = tab->zoom > 0 ? tab->zoom : 300.0;
+    double eff = tab->zoom > 0 ? tab->zoom : 96.0;
     return eff / 72.0;
 }
 
@@ -659,7 +693,7 @@ static double get_page_height_ppi(TabData *tab, int page_idx) {
 
     if (pw <= 0 || ph <= 0) return 0.0;
 
-    double eff_zoom = tab->zoom > 0 ? tab->zoom : 300.0;
+    double eff_zoom = tab->zoom > 0 ? tab->zoom : 96.0;
     double scale = eff_zoom / 72.0;
     return ph * scale;
 }
@@ -821,7 +855,7 @@ static void restore_document_model_to_tab(TabData *tab) {
     } else {
         tab->cur_page = 0;
         /* No saved state, restore to first page top */
-        start_initial_scroll_restore(tab, 0, 300.0, 0.0);
+        start_initial_scroll_restore(tab, 0, 96.0, 0.0);
     }
 
     g_free(uri);
@@ -846,6 +880,34 @@ static void switch_to_session(const char *session_name) {
 
     if (sessions_model) {
         sessions_model_set_last_open_session(sessions_model, session_name);
+    }
+
+    /* Sync color buttons to switched session's colors */
+    session_model_t *session = get_current_session_model();
+    if (session) {
+        const char *pc = session_model_get_page_color(session);
+        const char *hpc = session_model_get_helper_page_color(session);
+
+        if (left_color_btn) {
+            g_signal_handlers_block_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+            if (pc) {
+                GdkRGBA c;
+                if (gdk_rgba_parse(&c, pc))
+                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(left_color_btn), &c);
+            }
+            g_signal_handlers_unblock_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+            apply_page_color_to_notebook(left_notebook, pc ? pc : "#FFFFFF");
+        }
+        if (right_color_btn) {
+            g_signal_handlers_block_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+            if (hpc) {
+                GdkRGBA c;
+                if (gdk_rgba_parse(&c, hpc))
+                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(right_color_btn), &c);
+            }
+            g_signal_handlers_unblock_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+            apply_page_color_to_notebook(right_notebook, hpc ? hpc : "#FFFFFF");
+        }
     }
 }
 
@@ -1668,6 +1730,52 @@ static void on_tab_width_spin_changed(GtkSpinButton *spin, gpointer user_data) {
     save_state();
 }
 
+static session_model_t *get_current_session_model(void) {
+    if (!current_selected_session || !session_models) return NULL;
+    return g_hash_table_lookup(session_models, current_selected_session);
+}
+
+static void apply_page_color_to_notebook(GtkWidget *notebook, const char *color_str) {
+    if (!notebook) return;
+    GdkRGBA color;
+    if (!gdk_rgba_parse(&color, color_str)) return;
+    int np = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebook));
+    for (int i = 0; i < np; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(notebook), i);
+        TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+        if (tab) {
+            tab->page_color = color;
+            queue_draw(tab);
+        }
+    }
+}
+
+static void on_left_color_set(GtkColorButton *btn, gpointer user_data) {
+    (void)user_data;
+    session_model_t *session = get_current_session_model();
+    if (!session) return;
+    GdkRGBA color;
+    gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &color);
+    char *str = gdk_rgba_to_string(&color);
+    session_model_set_page_color(session, str);
+    apply_page_color_to_notebook(left_notebook, str);
+    g_free(str);
+    save_state();
+}
+
+static void on_right_color_set(GtkColorButton *btn, gpointer user_data) {
+    (void)user_data;
+    session_model_t *session = get_current_session_model();
+    if (!session) return;
+    GdkRGBA color;
+    gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &color);
+    char *str = gdk_rgba_to_string(&color);
+    session_model_set_helper_page_color(session, str);
+    apply_page_color_to_notebook(right_notebook, str);
+    g_free(str);
+    save_state();
+}
+
 static void on_settings_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
@@ -2092,7 +2200,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
     TabData *tab = user_data;
     if (!tab || !tab->doc) return;
 
-    double zoom = tab->zoom > 0 ? tab->zoom : 300.0;
+    double zoom = tab->zoom > 0 ? tab->zoom : 96.0;
     if (zoom != tab->last_zoom) {
         tab->last_zoom = zoom;
         build_continuous_view(tab);
@@ -2536,7 +2644,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
     tab->doc = doc;
     tab->n_pages = poppler_document_get_n_pages(doc);
     tab->cur_page = 0;
-    tab->zoom = 300.0;
+    tab->zoom = 96.0;
     /* track current filename for per-document settings */
     if (tab->current_file)
         g_free(tab->current_file);
@@ -2578,11 +2686,11 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
 
 static TabData *create_new_tab(GtkWidget *notebook) {
     TabData *tab = g_malloc0(sizeof(TabData));
-    tab->zoom = 300.0;
+    tab->zoom = 96.0;
     tab->layout_mode = 0;    /* single-column by default */
     tab->n_pages = 0;
     tab->cur_page = 0;
-    tab->last_zoom = 300.0;
+    tab->last_zoom = 96.0;
     tab->initial_scroll_pending = FALSE;
     tab->scroll_offset = -1.0;
     tab->is_helper = (notebook == right_notebook);
@@ -2593,6 +2701,14 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     }
 
     gdk_rgba_parse(&tab->page_color, "white");
+    /* Override with session's stored color if available */
+    session_model_t *cur_session = get_current_session_model();
+    if (cur_session) {
+        const char *c = tab->is_helper
+            ? session_model_get_helper_page_color(cur_session)
+            : session_model_get_page_color(cur_session);
+        if (c && *c) gdk_rgba_parse(&tab->page_color, c);
+    }
 
     /* Create container for tab content */
     GtkWidget *tab_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -3212,6 +3328,31 @@ GtkWidget* create_main_window(void) {
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), 50);
     gtk_box_pack_start(GTK_BOX(settings_container), tab_width_spin, FALSE, FALSE, 0);
     g_signal_connect(G_OBJECT(tab_width_spin), "value-changed", G_CALLBACK(on_tab_width_spin_changed), NULL);
+
+    /* Page colors */
+    GtkWidget *color_title = gtk_label_new("Page Colors");
+    gtk_widget_set_halign(color_title, GTK_ALIGN_START);
+    PangoAttrList *cat = pango_attr_list_new();
+    pango_attr_list_insert(cat, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    gtk_label_set_attributes(GTK_LABEL(color_title), cat);
+    pango_attr_list_unref(cat);
+    gtk_box_pack_start(GTK_BOX(settings_container), color_title, FALSE, FALSE, 0);
+
+    GtkWidget *left_color_label = gtk_label_new("Left notebook:");
+    gtk_widget_set_halign(left_color_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(settings_container), left_color_label, FALSE, FALSE, 0);
+
+    left_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_box_pack_start(GTK_BOX(settings_container), left_color_btn, FALSE, FALSE, 0);
+    g_signal_connect(left_color_btn, "color-set", G_CALLBACK(on_left_color_set), NULL);
+
+    GtkWidget *right_color_label = gtk_label_new("Right notebook:");
+    gtk_widget_set_halign(right_color_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(settings_container), right_color_label, FALSE, FALSE, 0);
+
+    right_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_box_pack_start(GTK_BOX(settings_container), right_color_btn, FALSE, FALSE, 0);
+    g_signal_connect(right_color_btn, "color-set", G_CALLBACK(on_right_color_set), NULL);
 
     gtk_box_pack_start(GTK_BOX(sidebar), settings_container, TRUE, TRUE, 0);
     gtk_widget_hide(settings_container);
