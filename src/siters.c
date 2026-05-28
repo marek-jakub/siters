@@ -185,7 +185,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
-static char* make_document_key(const char *uri, gboolean is_helper);
+static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 
 /* Save state on closing app */
 static void cancel_tab_restore(TabData *tab) {
@@ -262,12 +262,12 @@ static void json_emit_document(JsonBuilder *builder, const char *uri, const char
     json_builder_end_object(builder);
 }
 
-static void json_emit_session_docs(JsonBuilder *builder, const GList *uris, const char *side_prefix, GHashTable *models) {
+static void json_emit_session_docs(JsonBuilder *builder, const GList *uris, const char *side_prefix, GHashTable *models, const char *session_name) {
     json_builder_begin_array(builder);
     for (const GList *d = uris; d; d = d->next) {
         const char *uri = (const char *)d->data;
         const char *side = (strcmp(side_prefix, "right") == 0) ? "right" : "left";
-        char *key = make_document_key(uri, side[0] == 'r');
+        char *key = make_document_key(session_name, uri, side[0] == 'r');
         document_model_t *dm = models ? g_hash_table_lookup(models, key) : NULL;
         if (dm) {
             json_emit_document(builder, uri, side, dm);
@@ -356,10 +356,10 @@ void save_state(void) {
                 session_model_t *session = g_hash_table_lookup(session_models, session_name);
                 if (session) {
                     json_builder_set_member_name(builder, "documents");
-                    json_emit_session_docs(builder, session_model_get_document_urls(session), "left", document_models);
+                    json_emit_session_docs(builder, session_model_get_document_urls(session), "left", document_models, session_name);
 
                     json_builder_set_member_name(builder, "helper_documents");
-                    json_emit_session_docs(builder, session_model_get_helper_document_urls(session), "right", document_models);
+                    json_emit_session_docs(builder, session_model_get_helper_document_urls(session), "right", document_models, session_name);
 
                     const char *lr = session_model_get_last_read_document(session);
                     json_builder_set_member_name(builder, "last_read_document");
@@ -417,7 +417,7 @@ void save_state(void) {
     g_object_unref(builder);
 }
 
-static void load_session_doc_array(JsonArray *arr, session_model_t *session, const char *default_side) {
+static void load_session_doc_array(JsonArray *arr, session_model_t *session, const char *default_side, const char *session_name) {
     if (!arr) return;
     guint len = json_array_get_length(arr);
     for (guint i = 0; i < len; i++) {
@@ -440,7 +440,7 @@ static void load_session_doc_array(JsonArray *arr, session_model_t *session, con
                 document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                        (GDestroyNotify)document_model_free);
             }
-            char *key = make_document_key(uri, is_helper);
+            char *key = make_document_key(session_name, uri, is_helper);
             g_hash_table_insert(document_models, key, dm);
         }
     }
@@ -520,8 +520,8 @@ void load_state(void) {
                 if (sdata) {
                     JsonObject *sd = json_object_get_object_member(sdata, name);
                     if (sd) {
-                        load_session_doc_array(json_object_get_array_member(sd, "documents"), session, "left");
-                        load_session_doc_array(json_object_get_array_member(sd, "helper_documents"), session, "right");
+                        load_session_doc_array(json_object_get_array_member(sd, "documents"), session, "left", name);
+                        load_session_doc_array(json_object_get_array_member(sd, "helper_documents"), session, "right", name);
                         session_model_set_last_read_document(session,
                             json_object_get_string_member_with_default(sd, "last_read_document", ""));
                         session_model_set_page_color(session,
@@ -699,9 +699,9 @@ static double get_page_height_ppi(TabData *tab, int page_idx) {
 }
 
 /* Build a compound key "side:uri" to differentiate left vs right notebook state */
-static char* make_document_key(const char *uri, gboolean is_helper) {
+static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper) {
     const char *side = is_helper ? "right" : "left";
-    return g_strdup_printf("%s:%s", side, uri);
+    return g_strdup_printf("%s:%s:%s", session_name ? session_name : "Unknown", side, uri);
 }
 
 static void update_document_model_from_tab(TabData *tab) {
@@ -710,7 +710,7 @@ static void update_document_model_from_tab(TabData *tab) {
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    char *key = make_document_key(uri, tab->is_helper);
+    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
 
     // Get or create document model
     document_model_t *doc_model = g_hash_table_lookup(document_models, key);
@@ -833,7 +833,7 @@ static void restore_document_model_to_tab(TabData *tab) {
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    char *key = make_document_key(uri, tab->is_helper);
+    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
     document_model_t *doc_model = g_hash_table_lookup(document_models, key);
     g_free(key);
     if (doc_model) {
@@ -1386,6 +1386,28 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
 
         // Remove from model
         sessions_model_remove_session_name(sessions_model, session_name);
+
+        // Remove stale document models for this session
+        if (session_models && document_models) {
+            session_model_t *sm = g_hash_table_lookup(session_models, session_name);
+            if (sm) {
+                const GList *iter;
+                for (iter = session_model_get_document_urls(sm); iter; iter = iter->next) {
+                    char *key = make_document_key(session_name, (const char *)iter->data, FALSE);
+                    g_hash_table_remove(document_models, key);
+                    g_free(key);
+                }
+                for (iter = session_model_get_helper_document_urls(sm); iter; iter = iter->next) {
+                    char *key = make_document_key(session_name, (const char *)iter->data, TRUE);
+                    g_hash_table_remove(document_models, key);
+                    g_free(key);
+                }
+            }
+        }
+
+        // Remove from session_models hash table so stale data doesn't persist
+        if (session_models)
+            g_hash_table_remove(session_models, session_name);
 
         // Update tree view
         populate_sessions_treeview();
@@ -2916,7 +2938,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             if (tab->current_file && document_models) {
                 char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
                 if (uri) {
-                    char *key = make_document_key(uri, tab->is_helper);
+    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
                     document_model_t *dm = g_hash_table_lookup(document_models, key);
                     if (dm) {
                         tab->layout_mode = document_model_get_visualization_mode(dm);
@@ -2990,6 +3012,12 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
                     } else if (is_right) {
                         session_model_remove_helper_document_url(session, closed_uri);
                     }
+                }
+                // Remove document model so reopened file starts fresh (zoom, page, view, etc.)
+                if (closed_uri && document_models) {
+                    char *key = make_document_key(current_selected_session, closed_uri, tab->is_helper);
+                    g_hash_table_remove(document_models, key);
+                    g_free(key);
                 }
             }
             /* The tab will be freed when its page widget is destroyed. */
