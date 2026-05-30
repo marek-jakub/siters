@@ -19,7 +19,21 @@ int main(int argc, char *argv[]) {
     /* Remove GTK scrolled window overshoot/undershoot indicators (dashed lines at edges) */
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css_provider,
-        "scrolledwindow overshoot, scrolledwindow undershoot { background: none; }", -1, NULL);
+        "scrolledwindow overshoot, scrolledwindow undershoot { background: none; }\n"
+        "#page-nav-overlay {\n"
+        "    background: rgba(0, 0, 0, 0.6);\n"
+        "    border-radius: 8px;\n"
+        "    padding: 6px 10px;\n"
+        "}\n"
+        "#page-nav-overlay label {\n"
+        "    color: white;\n"
+        "}\n"
+        "#page-nav-overlay entry {\n"
+        "    background: rgba(255, 255, 255, 0.9);\n"
+        "    border: none;\n"
+        "    border-radius: 4px;\n"
+        "    color: black;\n"
+        "}\n", -1, NULL);
     gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
         GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css_provider);
