@@ -3462,11 +3462,7 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page down");
     gtk_box_pack_start(GTK_BOX(middle_box), page_down_btn, FALSE, FALSE, 1);
 
-    /* Page number jump: [spin] / total */
-    GtkWidget *page_nav_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_widget_set_halign(page_nav_box, GTK_ALIGN_CENTER);
-    gtk_widget_set_hexpand(page_nav_box, FALSE);
-
+    /* Page navigation (entry + label) — placed in floating overlay later */
     page_entry = gtk_entry_new();
     gtk_widget_set_size_request(page_entry, 42, -1);
     gtk_entry_set_max_length(GTK_ENTRY(page_entry), 4);
@@ -3477,11 +3473,8 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(page_entry), "Current page");
 
     page_total_label = gtk_label_new("/ 0");
-    gtk_box_pack_start(GTK_BOX(page_nav_box), page_entry, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(page_nav_box), page_total_label, FALSE, FALSE, 0);
     gtk_label_set_width_chars(GTK_LABEL(page_total_label), 4);
-    gtk_label_set_xalign(GTK_LABEL(page_total_label), 0.5f);
-    gtk_box_pack_start(GTK_BOX(middle_box), page_nav_box, FALSE, FALSE, 1);
+    gtk_label_set_xalign(GTK_LABEL(page_total_label), 0.0f);
 
     /* Allow only digits to be entered */
     g_signal_connect(page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
@@ -3613,7 +3606,22 @@ GtkWidget* create_main_window(void) {
     /* MAIN WINDOW PANED */
     /* Create a horizontal paned splitter containing two notebooks */
     paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_box_pack_start(GTK_BOX(content_vbox), paned, TRUE, TRUE, 0);
+
+    /* Wrap paned in an overlay for floating page navigation widget */
+    GtkWidget *overlay = gtk_overlay_new();
+    gtk_box_pack_start(GTK_BOX(content_vbox), overlay, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(overlay), paned);
+
+    /* Floating page navigation overlay (lower-left corner) */
+    GtkWidget *page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(page_nav_overlay, "page-nav-overlay");
+    gtk_widget_set_halign(page_nav_overlay, GTK_ALIGN_START);
+    gtk_widget_set_valign(page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_margin_start(page_nav_overlay, 8);
+    gtk_widget_set_margin_bottom(page_nav_overlay, 8);
+    gtk_box_pack_start(GTK_BOX(page_nav_overlay), page_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(page_nav_overlay), page_total_label, FALSE, FALSE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), page_nav_overlay);
 
     /* Left notebook (primary) */
     left_notebook = gtk_notebook_new();
