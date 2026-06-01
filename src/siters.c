@@ -134,6 +134,10 @@ static TabData *get_current_left_tab(void);
 static TabData *get_current_right_tab(void);
 static void sync_page_widget_from_tab(TabData *tab);
 static void on_page_entry_activate(GtkEntry *entry, gpointer user_data);
+static void on_page_up_left(GtkButton *btn, gpointer user_data);
+static void on_page_down_left(GtkButton *btn, gpointer user_data);
+static void on_page_up_right(GtkButton *btn, gpointer user_data);
+static void on_page_down_right(GtkButton *btn, gpointer user_data);
 
 static void cancel_tab_restore(TabData *tab);
 static void destroy_tab_data(gpointer data);
@@ -3096,6 +3100,42 @@ static void on_zoom_out_right(GtkButton *btn, gpointer user_data) {
     apply_zoom_to_tab(get_current_right_tab(), -1);
 }
 
+static void on_page_up_left(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    TabData *tab = get_current_left_tab();
+    if (!tab || tab->n_pages <= 0 || tab->cur_page <= 0) return;
+    tab->cur_page--;
+    scroll_to_page(tab, tab->cur_page);
+}
+
+static void on_page_down_left(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    TabData *tab = get_current_left_tab();
+    if (!tab || tab->n_pages <= 0 || tab->cur_page >= tab->n_pages - 1) return;
+    tab->cur_page++;
+    scroll_to_page(tab, tab->cur_page);
+}
+
+static void on_page_up_right(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    TabData *tab = get_current_right_tab();
+    if (!tab || tab->n_pages <= 0 || tab->cur_page <= 0) return;
+    tab->cur_page--;
+    scroll_to_page(tab, tab->cur_page);
+}
+
+static void on_page_down_right(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    TabData *tab = get_current_right_tab();
+    if (!tab || tab->n_pages <= 0 || tab->cur_page >= tab->n_pages - 1) return;
+    tab->cur_page++;
+    scroll_to_page(tab, tab->cur_page);
+}
+
 static void apply_layout_to_tab(TabData *tab, int layout) {
     if (!tab) return;
     tab->layout_mode = layout;
@@ -3451,7 +3491,8 @@ GtkWidget* create_main_window(void) {
     GtkWidget *page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_up_btn), page_up_icon);
     gtk_widget_set_tooltip_text(page_up_btn, "Page up");
-    atk_object_set_name(gtk_widget_get_accessible(page_up_btn), "Page up");
+    atk_object_set_name(gtk_widget_get_accessible(page_up_btn), "Page backward");
+    g_signal_connect(page_up_btn, "clicked", G_CALLBACK(on_page_up_left), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), page_up_btn, FALSE, FALSE, 1);
 
     /* Page down button*/
@@ -3459,7 +3500,8 @@ GtkWidget* create_main_window(void) {
     GtkWidget *page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_down_btn), page_down_icon);
     gtk_widget_set_tooltip_text(page_down_btn, "Page down");
-    atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page down");
+    atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page forward");
+    g_signal_connect(page_down_btn, "clicked", G_CALLBACK(on_page_down_left), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), page_down_btn, FALSE, FALSE, 1);
 
     /* Page navigation (entry + label) — placed in floating overlay later */
@@ -3692,7 +3734,8 @@ GtkWidget* create_main_window(void) {
     GtkWidget *right_page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_up_btn), right_page_up_icon);
     gtk_widget_set_tooltip_text(right_page_up_btn, "Page up");
-    atk_object_set_name(gtk_widget_get_accessible(right_page_up_btn), "Page up");
+    atk_object_set_name(gtk_widget_get_accessible(right_page_up_btn), "Page backward");
+    g_signal_connect(right_page_up_btn, "clicked", G_CALLBACK(on_page_up_right), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_up_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page down */
@@ -3700,7 +3743,8 @@ GtkWidget* create_main_window(void) {
     GtkWidget *right_page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_down_btn), right_page_down_icon);
     gtk_widget_set_tooltip_text(right_page_down_btn, "Page down");
-    atk_object_set_name(gtk_widget_get_accessible(right_page_down_btn), "Page down");
+    atk_object_set_name(gtk_widget_get_accessible(right_page_down_btn), "Page forward");
+    g_signal_connect(right_page_down_btn, "clicked", G_CALLBACK(on_page_down_right), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_down_btn, FALSE, FALSE, 1);
 
     /* Right toolbar separator */
