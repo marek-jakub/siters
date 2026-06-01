@@ -180,6 +180,8 @@ static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpoi
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
+static void on_close_file_clicked(GtkButton *btn, gpointer user_data);
+static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data);
 static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
 static session_model_t *get_current_session_model(void);
 static void apply_page_color_to_notebook(GtkWidget *notebook, const char *color_str);
@@ -2883,6 +2885,90 @@ static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data) {
     open_file_in_notebook(right_notebook, TRUE);
 }
 
+static void close_tab_in_notebook(GtkNotebook *notebook) {
+    if (!notebook) return;
+    int page_idx = gtk_notebook_get_current_page(notebook);
+    if (page_idx < 0) return;
+
+    GtkWidget *page = gtk_notebook_get_nth_page(notebook, page_idx);
+    if (!page) return;
+
+    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+    if (!tab) {
+        gtk_notebook_remove_page(notebook, page_idx);
+        return;
+    }
+
+    gboolean is_left = (notebook == GTK_NOTEBOOK(left_notebook));
+    gboolean is_right = (notebook == GTK_NOTEBOOK(right_notebook));
+
+    char *closed_uri = NULL;
+    session_model_t *session = NULL;
+    if (current_selected_session && session_models) {
+        session = g_hash_table_lookup(session_models, current_selected_session);
+    }
+
+    if (tab->current_file && session) {
+        closed_uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+        if (closed_uri) {
+            if (is_left) {
+                session_model_remove_document_url(session, closed_uri);
+            } else if (is_right) {
+                session_model_remove_helper_document_url(session, closed_uri);
+            }
+        }
+        if (closed_uri && document_models) {
+            char *key = make_document_key(current_selected_session, closed_uri, tab->is_helper);
+            g_hash_table_remove(document_models, key);
+            g_free(key);
+        }
+    }
+
+    gtk_notebook_remove_page(notebook, page_idx);
+
+    if (session) {
+        gboolean closed_was_last_read = FALSE;
+        if (closed_uri) {
+            if (is_left) {
+                const char *last = session_model_get_last_read_document(session);
+                closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
+            } else if (is_right) {
+                const char *last = session_model_get_last_read_help_document(session);
+                closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
+            }
+        }
+        if (closed_was_last_read) {
+            int cur = gtk_notebook_get_current_page(notebook);
+            if (cur >= 0) {
+                GtkWidget *new_page = gtk_notebook_get_nth_page(notebook, cur);
+                if (new_page) {
+                    update_last_read_for_notebook(notebook, new_page, (guint)cur);
+                }
+            } else {
+                if (is_left) {
+                    session_model_set_last_read_document(session, "");
+                } else if (is_right) {
+                    session_model_set_last_read_help_document(session, "");
+                }
+            }
+        }
+    }
+
+    if (closed_uri) g_free(closed_uri);
+}
+
+static void on_close_file_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    close_tab_in_notebook(GTK_NOTEBOOK(left_notebook));
+}
+
+static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    close_tab_in_notebook(GTK_NOTEBOOK(right_notebook));
+}
+
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri) {
     if (!notebook || !target_uri || !*target_uri) return -1;
     int n_pages = gtk_notebook_get_n_pages(notebook);
@@ -3480,6 +3566,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(close_file_btn), close_file_icon);
     gtk_widget_set_tooltip_text(close_file_btn, "Close file");
     atk_object_set_name(gtk_widget_get_accessible(close_file_btn), "Close file");
+    g_signal_connect(close_file_btn, "clicked", G_CALLBACK(on_close_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), close_file_btn, FALSE, FALSE, 1);
 
     /* Separator */
@@ -3723,6 +3810,7 @@ GtkWidget* create_main_window(void) {
     gtk_button_set_image(GTK_BUTTON(right_close_file_btn), right_close_file_icon);
     gtk_widget_set_tooltip_text(right_close_file_btn, "Close file");
     atk_object_set_name(gtk_widget_get_accessible(right_close_file_btn), "Close file");
+    g_signal_connect(right_close_file_btn, "clicked", G_CALLBACK(on_close_helper_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_close_file_btn, FALSE, FALSE, 1);
 
     /* Right toolbar separator */
