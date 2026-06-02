@@ -120,6 +120,7 @@ static gboolean is_restoring_session_tabs = FALSE;
 /* Page jump widget */
 static GtkWidget *page_entry = NULL;
 static GtkWidget *page_total_label = NULL;
+static GtkWidget *page_nav_overlay = NULL;
 static gboolean page_spin_syncing = FALSE;
 
 /* Layout radio buttons (left and right toolbars) */
@@ -1844,6 +1845,15 @@ static void apply_tabbar_position(const char *pos) {
     }
     if (right_notebook)
         gtk_notebook_set_show_border(GTK_NOTEBOOK(right_notebook), !is_side);
+
+    /* Adjust page nav overlay so it doesn't sit over a left-side tab bar */
+    if (page_nav_overlay) {
+        if (g_strcmp0(pos, "left") == 0) {
+            gtk_widget_set_margin_start(page_nav_overlay, 60);
+        } else {
+            gtk_widget_set_margin_start(page_nav_overlay, 16);
+        }
+    }
 
     double angle = get_angle_for_position(pos);
     GtkOrientation box_orientation = is_side ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL;
@@ -3914,7 +3924,7 @@ GtkWidget* create_main_window(void) {
     gtk_container_add(GTK_CONTAINER(overlay), paned);
 
     /* Floating page navigation overlay (lower-left corner) */
-    GtkWidget *page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
     gtk_widget_set_name(page_nav_overlay, "page-nav-overlay");
     gtk_widget_set_halign(page_nav_overlay, GTK_ALIGN_START);
     gtk_widget_set_valign(page_nav_overlay, GTK_ALIGN_END);
