@@ -3926,6 +3926,7 @@ GtkWidget* create_main_window(void) {
 
     /* Left notebook (primary) */
     left_notebook = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(left_notebook), TRUE);
     gtk_widget_set_size_request(left_notebook, 70, -1);
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, TRUE);
     atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
@@ -3951,6 +3952,7 @@ GtkWidget* create_main_window(void) {
 
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(right_notebook), TRUE);
     gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
     g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
 
