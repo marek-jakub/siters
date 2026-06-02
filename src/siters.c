@@ -927,6 +927,30 @@ void populate_sessions_treeview(void) {
     sessions_tree_syncing = TRUE;
     reset_sessions_tree_selection_guard();
 
+    /* Save expanded session rows before clearing */
+    GPtrArray *expanded = g_ptr_array_new_with_free_func(g_free);
+    GtkTreeIter iter;
+    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+        do {
+            char *name = NULL;
+            gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                               SESSION_COL_SESSION_NAME, &name, -1);
+            if (name) {
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                if (path) {
+                    if (gtk_tree_view_row_expanded(GTK_TREE_VIEW(sessions_tree_view), path)) {
+                        g_ptr_array_add(expanded, name);
+                    } else {
+                        g_free(name);
+                    }
+                    gtk_tree_path_free(path);
+                } else {
+                    g_free(name);
+                }
+            }
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+    }
+
     gtk_tree_store_clear(sessions_tree_store);
 
     const GList *session_names = sessions_model_get_session_names(sessions_model);
@@ -970,6 +994,30 @@ void populate_sessions_treeview(void) {
             g_free(filename);
         }
     }
+
+    /* Restore expanded session rows */
+    for (guint i = 0; i < expanded->len; i++) {
+        const char *name = g_ptr_array_index(expanded, i);
+        GtkTreeIter row;
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &row)) {
+            do {
+                char *row_name = NULL;
+                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &row,
+                                   SESSION_COL_SESSION_NAME, &row_name, -1);
+                if (row_name && strcmp(row_name, name) == 0) {
+                    GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &row);
+                    if (path) {
+                        gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                        gtk_tree_path_free(path);
+                    }
+                    g_free(row_name);
+                    break;
+                }
+                g_free(row_name);
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &row));
+        }
+    }
+    g_ptr_array_unref(expanded);
 
     sessions_tree_syncing = FALSE;
 }
@@ -2955,6 +3003,10 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
     }
 
     if (closed_uri) g_free(closed_uri);
+
+    if (is_left) {
+        populate_sessions_treeview();
+    }
 }
 
 static void on_close_file_clicked(GtkButton *btn, gpointer user_data) {
@@ -3145,6 +3197,10 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
 
     if (closed_uri) g_free(closed_uri);
     g_free(ci);
+
+    if (is_left) {
+        populate_sessions_treeview();
+    }
 }
 
 /* =============== Layout button management =============== */
