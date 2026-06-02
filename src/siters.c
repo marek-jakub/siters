@@ -1683,6 +1683,62 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_SESSIONS;
+
+        /* Auto-select current session and document in the tree */
+        if (sessions_tree_store && current_selected_session) {
+            reset_sessions_tree_selection_guard();
+            sessions_tree_syncing = TRUE;
+            GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+            GtkTreeIter iter;
+            if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+                do {
+                    gchar *name = NULL;
+                    gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                                       SESSION_COL_SESSION_NAME, &name, -1);
+                    if (!name) continue;
+                    if (g_strcmp0(name, current_selected_session) != 0) {
+                        g_free(name);
+                        continue;
+                    }
+                    /* Found matching session row — select and expand it */
+                    GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                    if (path) {
+                        gtk_tree_selection_select_path(sel, path);
+                        gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                        gtk_tree_path_free(path);
+                    }
+                    /* Try to select the currently focused document */
+                    TabData *tab = get_current_left_tab();
+                    if (tab && tab->current_file) {
+                        char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                        if (uri) {
+                            GtkTreeIter child;
+                            if (gtk_tree_model_iter_children(GTK_TREE_MODEL(sessions_tree_store), &child, &iter)) {
+                                do {
+                                    gchar *doc_uri = NULL;
+                                    gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &child,
+                                                       SESSION_COL_DOC_URI, &doc_uri, -1);
+                                    if (doc_uri && g_strcmp0(doc_uri, uri) == 0) {
+                                        GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &child);
+                                        if (cp) {
+                                            gtk_tree_selection_select_path(sel, cp);
+                                            gtk_tree_path_free(cp);
+                                        }
+                                        g_free(doc_uri);
+                                        break;
+                                    }
+                                    g_free(doc_uri);
+                                } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &child));
+                            }
+                            g_free(uri);
+                        }
+                    }
+                    g_free(name);
+                    break;
+                } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+            }
+            sessions_tree_syncing = FALSE;
+        }
     }
 }
 
