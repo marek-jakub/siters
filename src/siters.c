@@ -126,6 +126,12 @@ static GtkWidget *page_total_label = NULL;
 static GtkWidget *page_nav_overlay = NULL;
 static gboolean page_spin_syncing = FALSE;
 
+/* Right notebook page jump widget */
+static GtkWidget *right_page_entry = NULL;
+static GtkWidget *right_page_total_label = NULL;
+static GtkWidget *right_page_nav_overlay = NULL;
+static gboolean right_page_spin_syncing = FALSE;
+
 /* Layout radio buttons (left and right toolbars) */
 static GtkWidget *left_column_btn = NULL;
 static GtkWidget *left_double_column_btn = NULL;
@@ -137,7 +143,9 @@ static GtkWidget *right_row_btn = NULL;
 static TabData *get_current_left_tab(void);
 static TabData *get_current_right_tab(void);
 static void sync_page_widget_from_tab(TabData *tab);
+static void sync_right_page_widget_from_tab(TabData *tab);
 static void on_page_entry_activate(GtkEntry *entry, gpointer user_data);
+static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data);
 static void on_page_up_left(GtkButton *btn, gpointer user_data);
 static void on_page_down_left(GtkButton *btn, gpointer user_data);
 static void on_page_up_right(GtkButton *btn, gpointer user_data);
@@ -1311,14 +1319,28 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);
         }
+        if (tab == get_current_right_tab()) {
+            sync_right_page_widget_from_tab(tab);
+        }
 
-        /* Update document model */
-        update_document_model_from_tab(tab);
+        /* Done - return FALSE to remove this idle callback */
+        restore->tab->pending_restore = NULL;
+        g_free(restore);
 
-        /* Mark restore as complete */
-        tab->initial_scroll_pending = FALSE;
-        tab->pending_restore = NULL;
-        restore->source_id = 0;
+        return FALSE;
+    }
+
+    /* ========== STAGE 4: Finalize ========== */
+    if (restore->restore_stage == 4) {
+        /* Update UI */
+        if (tab == get_current_left_tab()) {
+            sync_page_widget_from_tab(tab);
+        }
+        if (tab == get_current_right_tab()) {
+            sync_right_page_widget_from_tab(tab);
+        }
+
+        restore->tab->pending_restore = NULL;
         g_free(restore);
         return FALSE;
     }
@@ -1334,6 +1356,8 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom,
                                          double target_fraction) {
     if (!tab || target_page < 0 || target_zoom < 0.1) return;
+
+    cancel_tab_restore(tab);
 
     RestoreState *restore = g_malloc(sizeof(RestoreState));
     restore->tab = tab;
@@ -1629,6 +1653,7 @@ static void set_right_notebook_session(const gchar *session_name) {
     while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) > 0) {
         gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), 0);
     }
+    gtk_widget_hide(right_page_nav_overlay);
 
     // Get the session model
     session_model_t *session = g_hash_table_lookup(session_models, session_name);
@@ -1860,6 +1885,14 @@ static void apply_tabbar_position(const char *pos) {
             gtk_widget_set_margin_start(page_nav_overlay, 60);
         } else {
             gtk_widget_set_margin_start(page_nav_overlay, 16);
+        }
+    }
+    /* Adjust right page nav overlay for right-side tab bar */
+    if (right_page_nav_overlay) {
+        if (g_strcmp0(pos, "right") == 0) {
+            gtk_widget_set_margin_end(right_page_nav_overlay, 60);
+        } else {
+            gtk_widget_set_margin_end(right_page_nav_overlay, 8);
         }
     }
 
@@ -2279,6 +2312,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
             if (tab == get_current_left_tab()) {
                 sync_page_widget_from_tab(tab);
             }
+            if (tab == get_current_right_tab()) {
+                sync_right_page_widget_from_tab(tab);
+            }
             update_document_model_from_tab(tab);
             gtk_widget_queue_draw(tab->pages_drawing);
             return;
@@ -2306,6 +2342,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);
         }
+        if (tab == get_current_right_tab()) {
+            sync_right_page_widget_from_tab(tab);
+        }
         update_document_model_from_tab(tab);
         gtk_widget_queue_draw(tab->pages_drawing);
         return;
@@ -2323,6 +2362,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         tab->cur_page = tab->n_pages - 1;
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);
+        }
+        if (tab == get_current_right_tab()) {
+            sync_right_page_widget_from_tab(tab);
         }
         update_document_model_from_tab(tab);
         return;
@@ -2391,6 +2433,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
 
     if (tab == get_current_left_tab()) {
         sync_page_widget_from_tab(tab);
+    }
+    if (tab == get_current_right_tab()) {
+        sync_right_page_widget_from_tab(tab);
     }
 
     update_document_model_from_tab(tab);
@@ -2821,6 +2866,66 @@ static void on_page_entry_activate(GtkEntry *entry, gpointer user_data) {
     update_document_model_from_tab(tab);
 }
 
+static void sync_right_page_widget_from_tab(TabData *tab) {
+    if (!right_page_entry || !right_page_total_label) return;
+
+    int total = 0;
+    int current = 0;
+
+    if (tab && tab->n_pages > 0) {
+        total = tab->n_pages;
+        current = tab->cur_page + 1;
+        if (current < 1) current = 1;
+        if (current > total) current = total;
+    }
+
+    right_page_spin_syncing = TRUE;
+    if (total == 0) {
+        gtk_entry_set_text(GTK_ENTRY(right_page_entry), "");
+    } else {
+        gchar *cur_txt = g_strdup_printf("%d", current);
+        gtk_entry_set_text(GTK_ENTRY(right_page_entry), cur_txt);
+        g_free(cur_txt);
+    }
+    right_page_spin_syncing = FALSE;
+
+    gchar *txt = g_strdup_printf("/ %d", total);
+    gtk_label_set_text(GTK_LABEL(right_page_total_label), txt);
+    g_free(txt);
+
+    /* Show/hide right nav based on whether there are pages */
+    if (right_page_nav_overlay) {
+        if (total > 0)
+            gtk_widget_show(right_page_nav_overlay);
+        else
+            gtk_widget_hide(right_page_nav_overlay);
+    }
+}
+
+static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
+    (void)user_data;
+    if (right_page_spin_syncing) return;
+
+    TabData *tab = get_current_right_tab();
+    if (!tab || tab->n_pages <= 0) return;
+
+    const char *raw = gtk_entry_get_text(GTK_ENTRY(entry));
+    char *endptr = NULL;
+    long requested_ui = strtol(raw, &endptr, 10);
+    if (endptr == raw || *endptr != '\0') {
+        sync_right_page_widget_from_tab(tab);
+        return;
+    }
+
+    if (requested_ui < 1 || requested_ui > tab->n_pages) return;
+
+    int target_zero_based = requested_ui - 1;
+    tab->cur_page = target_zero_based;
+    scroll_to_page(tab, target_zero_based);
+
+    update_document_model_from_tab(tab);
+}
+
 static void load_file_into_tab(TabData *tab, const char *filename) {
     if (!tab || !filename) return;
     GError *error = NULL;
@@ -2882,6 +2987,9 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
         /* Ensure page counter shows real total immediately after load. */
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);
+        }
+        if (tab == get_current_right_tab()) {
+            sync_right_page_widget_from_tab(tab);
         }
     }
 }
@@ -3251,8 +3359,9 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     }
 
     sync_right_layout_buttons(tab);
-    /* keep widget tied to primary (left) document */
+    /* keep left widget tied to primary (left) document */
     sync_page_widget_from_tab(get_current_left_tab());
+    sync_right_page_widget_from_tab(tab);
 }
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
@@ -4155,11 +4264,45 @@ GtkWidget* create_main_window(void) {
     gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, TRUE);
     gtk_paned_set_position(GTK_PANED(paned), 500);
 
+    /* Right notebook wrapper with overlay for floating page nav */
+    GtkWidget *right_nb_overlay = gtk_overlay_new();
+    gtk_box_pack_start(GTK_BOX(right_pane), right_nb_overlay, TRUE, TRUE, 0);
+
     /* Right notebook (secondary) */
     right_notebook = gtk_notebook_new();
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(right_notebook), TRUE);
-    gtk_box_pack_start(GTK_BOX(right_pane), right_notebook, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(right_nb_overlay), right_notebook);
     g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
+
+    /* Right page navigation entry + label */
+    right_page_entry = gtk_entry_new();
+    gtk_widget_set_size_request(right_page_entry, 42, -1);
+    gtk_entry_set_max_length(GTK_ENTRY(right_page_entry), 4);
+    gtk_entry_set_width_chars(GTK_ENTRY(right_page_entry), 2);
+    gtk_entry_set_max_width_chars(GTK_ENTRY(right_page_entry), 3);
+    gtk_entry_set_input_purpose(GTK_ENTRY(right_page_entry), GTK_INPUT_PURPOSE_DIGITS);
+    gtk_widget_set_tooltip_text(right_page_entry, "Current page (press Enter to jump)");
+    atk_object_set_name(gtk_widget_get_accessible(right_page_entry), "Current page");
+
+    right_page_total_label = gtk_label_new("/ 0");
+    gtk_label_set_width_chars(GTK_LABEL(right_page_total_label), 4);
+    gtk_label_set_xalign(GTK_LABEL(right_page_total_label), 0.0f);
+
+    g_signal_connect(right_page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
+    g_signal_connect(right_page_entry, "activate", G_CALLBACK(on_right_page_entry_activate), NULL);
+
+    /* Floating page navigation overlay (lower-right corner of right notebook) */
+    right_page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(right_page_nav_overlay, "right-page-nav-overlay");
+    gtk_widget_set_halign(right_page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_valign(right_page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(right_page_nav_overlay, 8);
+    gtk_widget_set_margin_bottom(right_page_nav_overlay, 8);
+    gtk_box_pack_start(GTK_BOX(right_page_nav_overlay), right_page_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(right_page_nav_overlay), right_page_total_label, FALSE, FALSE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(right_nb_overlay), right_page_nav_overlay);
+    /* Initially hidden until there are documents */
+    gtk_widget_hide(right_page_nav_overlay);
 
     // Note: restore_open_tabs_for_session already handles both notebooks
     current_selected_session = g_strdup(initial_session);
