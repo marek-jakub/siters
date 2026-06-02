@@ -1019,6 +1019,58 @@ void populate_sessions_treeview(void) {
     }
     g_ptr_array_unref(expanded);
 
+    /* Auto-select current session + document when sidebar is visible */
+    if (current_sidebar_mode == SIDEBAR_SESSIONS && current_selected_session) {
+        reset_sessions_tree_selection_guard();
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+        GtkTreeIter iter;
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+            do {
+                gchar *name = NULL;
+                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                                   SESSION_COL_SESSION_NAME, &name, -1);
+                if (!name) continue;
+                if (g_strcmp0(name, current_selected_session) != 0) {
+                    g_free(name);
+                    continue;
+                }
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                if (path) {
+                    gtk_tree_selection_select_path(sel, path);
+                    gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                    gtk_tree_path_free(path);
+                }
+                TabData *tab = get_current_left_tab();
+                if (tab && tab->current_file) {
+                    char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
+                    if (uri) {
+                        GtkTreeIter child;
+                        if (gtk_tree_model_iter_children(GTK_TREE_MODEL(sessions_tree_store), &child, &iter)) {
+                            do {
+                                gchar *doc_uri = NULL;
+                                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &child,
+                                                   SESSION_COL_DOC_URI, &doc_uri, -1);
+                                if (doc_uri && g_strcmp0(doc_uri, uri) == 0) {
+                                    GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &child);
+                                    if (cp) {
+                                        gtk_tree_selection_select_path(sel, cp);
+                                        gtk_tree_path_free(cp);
+                                    }
+                                    g_free(doc_uri);
+                                    break;
+                                }
+                                g_free(doc_uri);
+                            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &child));
+                        }
+                        g_free(uri);
+                    }
+                }
+                g_free(name);
+                break;
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+        }
+    }
+
     sessions_tree_syncing = FALSE;
 }
 
@@ -2939,39 +2991,47 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     GtkFileFilter *filter = gtk_file_filter_new();
     gtk_file_filter_add_pattern(filter, "*.pdf");
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
+    gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
 
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
-    char *fname = gtk_file_chooser_get_filename(GTK_FILE_CHOOSER(dialog));
-    if (fname) {
-        char *uri = g_filename_to_uri(fname, NULL, NULL);
-        int existing_idx = -1;
-        if (uri) {
-            existing_idx = find_matching_tab_index(GTK_NOTEBOOK(notebook), uri);
-        }
-        if (existing_idx >= 0) {
-            /* Already open in this notebook: focus existing tab */
-            gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), existing_idx);
-        } else {
-            /* Not open yet: create tab and load */
-            TabData *tab = create_new_tab(notebook);
-            if (tab) {
-                load_file_into_tab(tab, fname);
-                /* Add to session model only for newly opened docs */
-                if (current_selected_session) {
-                    session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
-                    if (session && uri) {
-                        if (is_helper) {
-                            session_model_add_helper_document_url(session, uri);
-                        } else {
-                            session_model_add_document_url(session, uri);
-                            populate_sessions_treeview();
+        GSList *filenames = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dialog));
+        gboolean changed = FALSE;
+        for (GSList *f = filenames; f; f = f->next) {
+            char *fname = (char *)f->data;
+            if (!fname) continue;
+            char *uri = g_filename_to_uri(fname, NULL, NULL);
+            int existing_idx = -1;
+            if (uri) {
+                existing_idx = find_matching_tab_index(GTK_NOTEBOOK(notebook), uri);
+            }
+            if (existing_idx >= 0) {
+                /* Already open in this notebook: focus existing tab */
+                gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), existing_idx);
+            } else {
+                /* Not open yet: create tab and load */
+                TabData *tab = create_new_tab(notebook);
+                if (tab) {
+                    load_file_into_tab(tab, fname);
+                    /* Add to session model only for newly opened docs */
+                    if (current_selected_session) {
+                        session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+                        if (session && uri) {
+                            if (is_helper) {
+                                session_model_add_helper_document_url(session, uri);
+                            } else {
+                                session_model_add_document_url(session, uri);
+                                changed = TRUE;
+                            }
                         }
                     }
                 }
             }
+            if (uri) g_free(uri);
+            g_free(fname);
         }
-        if (uri) g_free(uri);
-        g_free(fname);
+        g_slist_free(filenames);
+        if (changed) {
+            populate_sessions_treeview();
         }
     }
     gtk_widget_destroy(dialog);
