@@ -2908,7 +2908,7 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
                             session_model_add_helper_document_url(session, uri);
                         } else {
                             session_model_add_document_url(session, uri);
-                            /* TODO: Implement adding to tree view */
+                            populate_sessions_treeview();
                         }
                     }
                 }
