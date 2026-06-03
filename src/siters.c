@@ -1436,14 +1436,29 @@ static void on_minimize_clicked(GtkButton *button, gpointer user_data) {
     gtk_window_iconify(window);
 }
 
+static guint maximize_pending_id = 0;
+
+static gboolean defer_maximize_toggle(gpointer user_data) {
+    GtkWindow *window = GTK_WINDOW(user_data);
+    maximize_pending_id = 0;
+    if (window) {
+        if (gtk_window_is_maximized(window))
+            gtk_window_unmaximize(window);
+        else
+            gtk_window_maximize(window);
+        if (left_notebook) gtk_widget_queue_resize(left_notebook);
+        if (right_notebook) gtk_widget_queue_resize(right_notebook);
+    }
+    g_object_unref(window);
+    return FALSE;
+}
+
 static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     GtkWindow *window = GTK_WINDOW(user_data);
-    if (!window) return;
-    if (gtk_window_is_maximized(window))
-        gtk_window_unmaximize(window);
-    else
-        gtk_window_maximize(window);
+    if (!window || maximize_pending_id) return;
+    g_object_ref(window);
+    maximize_pending_id = g_idle_add(defer_maximize_toggle, window);
 }
 
 static void on_close_clicked(GtkButton *button, gpointer user_data) {
@@ -1874,10 +1889,12 @@ static void apply_tabbar_position(const char *pos) {
     gboolean is_side = (g_strcmp0(pos, "left") == 0 || g_strcmp0(pos, "right") == 0);
     if (left_notebook) {
         gtk_notebook_set_show_border(GTK_NOTEBOOK(left_notebook), !is_side);
-        gtk_widget_set_size_request(left_notebook, is_side ? -1 : 70, -1);
+        gtk_widget_set_size_request(left_notebook, is_side ? -1 : 70, is_side ? 200 : -1);
     }
-    if (right_notebook)
+    if (right_notebook) {
         gtk_notebook_set_show_border(GTK_NOTEBOOK(right_notebook), !is_side);
+        gtk_widget_set_size_request(right_notebook, -1, is_side ? 200 : -1);
+    }
 
     /* Adjust page nav overlay so it doesn't sit over a left-side tab bar */
     if (page_nav_overlay) {
@@ -2530,16 +2547,34 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, off_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                cairo_save(cr);
-                cairo_translate(cr, off_x, off_y);
-                cairo_scale(cr, scale, scale);
-                poppler_page_render(page, cr);
-                cairo_restore(cr);
+                /* render page to intermediate image surface to isolate from window */
+                double dsx, dsy;
+                cairo_font_options_t *fo = cairo_font_options_create();
+                cairo_get_font_options(cr, fo);
+                cairo_surface_get_device_scale(cairo_get_target(cr), &dsx, &dsy);
+                int iw = (int)(pw * scale * dsx + 0.5);
+                int ih = (int)(ph * scale * dsy + 0.5);
+                if (iw > 0 && ih > 0) {
+                    cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+                    cairo_surface_set_device_scale(pimg, dsx, dsy);
+                    cairo_t *picr = cairo_create(pimg);
+                    cairo_set_font_options(picr, fo);
+                    cairo_set_antialias(picr, cairo_get_antialias(cr));
+                    cairo_scale(picr, scale, scale);
+                    poppler_page_render_for_printing(page, picr);
+                    cairo_destroy(picr);
+                    cairo_set_source_surface(cr, pimg, off_x, off_y);
+                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                    cairo_paint(cr);
+                    cairo_surface_destroy(pimg);
+                }
+                cairo_font_options_destroy(fo);
             }
 
             y += page_h + spacing;
             g_object_unref(page);
         }
+
     } else if (tab->layout_mode == 1) {
         int n = tab->n_pages;
         double y = spacing;
@@ -2584,6 +2619,12 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             double left_x = row_x;
             double right_x = left_x + page_w1 + spacing;
 
+            double dsx2, dsy2;
+            cairo_font_options_t *fo2 = cairo_font_options_create();
+            cairo_get_font_options(cr, fo2);
+            cairo_surface_get_device_scale(cairo_get_target(cr), &dsx2, &dsy2);
+            cairo_antialias_t aa2 = cairo_get_antialias(cr);
+
             /* draw left page */
             if (p1 && page_h1 > 0) {
                 double off_y1 = y;
@@ -2593,11 +2634,23 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_rectangle(cr, left_x, off_y1, page_w1, page_h1);
                     cairo_fill(cr);
                     cairo_restore(cr);
-                    cairo_save(cr);
-                    cairo_translate(cr, left_x, off_y1);
-                    cairo_scale(cr, scale, scale);
-                    poppler_page_render(p1, cr);
-                    cairo_restore(cr);
+                    /* render page to intermediate image surface */
+                    int iw1 = (int)(pw1 * scale * dsx2 + 0.5);
+                    int ih1 = (int)(ph1 * scale * dsy2 + 0.5);
+                    if (iw1 > 0 && ih1 > 0) {
+                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw1, ih1);
+                        cairo_surface_set_device_scale(pimg, dsx2, dsy2);
+                        cairo_t *picr = cairo_create(pimg);
+                        cairo_set_font_options(picr, fo2);
+                        cairo_set_antialias(picr, aa2);
+                        cairo_scale(picr, scale, scale);
+                        poppler_page_render_for_printing(p1, picr);
+                        cairo_destroy(picr);
+                        cairo_set_source_surface(cr, pimg, left_x, off_y1);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                        cairo_surface_destroy(pimg);
+                    }
                 }
             }
 
@@ -2610,13 +2663,27 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_rectangle(cr, right_x, off_y2, page_w2, page_h2);
                     cairo_fill(cr);
                     cairo_restore(cr);
-                    cairo_save(cr);
-                    cairo_translate(cr, right_x, off_y2);
-                    cairo_scale(cr, scale, scale);
-                    poppler_page_render(p2, cr);
-                    cairo_restore(cr);
+                    /* render page to intermediate image surface */
+                    int iw2 = (int)(pw2 * scale * dsx2 + 0.5);
+                    int ih2 = (int)(ph2 * scale * dsy2 + 0.5);
+                    if (iw2 > 0 && ih2 > 0) {
+                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw2, ih2);
+                        cairo_surface_set_device_scale(pimg, dsx2, dsy2);
+                        cairo_t *picr = cairo_create(pimg);
+                        cairo_set_font_options(picr, fo2);
+                        cairo_set_antialias(picr, aa2);
+                        cairo_scale(picr, scale, scale);
+                        poppler_page_render_for_printing(p2, picr);
+                        cairo_destroy(picr);
+                        cairo_set_source_surface(cr, pimg, right_x, off_y2);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                        cairo_surface_destroy(pimg);
+                    }
                 }
             }
+
+            cairo_font_options_destroy(fo2);
 
             if (p1) g_object_unref(p1);
             if (p2) g_object_unref(p2);
@@ -2646,11 +2713,28 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, dev_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                cairo_save(cr);
-                cairo_translate(cr, dev_x, off_y);
-                cairo_scale(cr, scale, scale);
-                poppler_page_render(page, cr);
-                cairo_restore(cr);
+                /* render page to intermediate image surface */
+                double dsxh, dsyh;
+                cairo_font_options_t *foh = cairo_font_options_create();
+                cairo_get_font_options(cr, foh);
+                cairo_surface_get_device_scale(cairo_get_target(cr), &dsxh, &dsyh);
+                int iwh = (int)(pw * scale * dsxh + 0.5);
+                int ihh = (int)(ph * scale * dsyh + 0.5);
+                if (iwh > 0 && ihh > 0) {
+                    cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iwh, ihh);
+                    cairo_surface_set_device_scale(pimg, dsxh, dsyh);
+                    cairo_t *picr = cairo_create(pimg);
+                    cairo_set_font_options(picr, foh);
+                    cairo_set_antialias(picr, cairo_get_antialias(cr));
+                    cairo_scale(picr, scale, scale);
+                    poppler_page_render_for_printing(page, picr);
+                    cairo_destroy(picr);
+                    cairo_set_source_surface(cr, pimg, dev_x, off_y);
+                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                    cairo_paint(cr);
+                    cairo_surface_destroy(pimg);
+                }
+                cairo_font_options_destroy(foh);
             }
             x += page_w + spacing;
             g_object_unref(page);

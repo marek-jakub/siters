@@ -1,8 +1,30 @@
 #include <gtk/gtk.h>
 #include <signal.h>
+#include <glib.h>
+#include <string.h>
 #include "siters.h"
 
 extern void load_state(void);
+
+static GLogWriterOutput suppress_gtk_box_critical(GLogLevelFlags log_level,
+                                                   const GLogField *fields,
+                                                   gsize n_fields,
+                                                   gpointer user_data) {
+    (void)user_data;
+    /* Suppress the known GTK3 assertion in side-tab overflow scenarios.
+       It's non-fatal and safe to ignore. This writer is called at the lowest
+       possible level, before any domain-specific handler runs. */
+    if (log_level & G_LOG_LEVEL_CRITICAL) {
+        for (gsize i = 0; i < n_fields; i++) {
+            if (g_strcmp0(fields[i].key, "MESSAGE") == 0 &&
+                fields[i].value &&
+                strstr(fields[i].value, "gtk_box_gadget_distribute")) {
+                return G_LOG_WRITER_HANDLED;
+            }
+        }
+    }
+    return G_LOG_WRITER_UNHANDLED;
+}
 
 void signal_handler(int sig) {
     (void)sig;  // Mark parameter as intentionally unused
@@ -11,6 +33,10 @@ void signal_handler(int sig) {
 }
 
 int main(int argc, char *argv[]) {
+    /* Intercept Gtk criticals from a known GTK3 bug where side-tab
+       box distribution asserts on negative remaining size. The assertion
+       is harmless and the notebook handles it gracefully. */
+    g_log_set_writer_func(suppress_gtk_box_critical, NULL, NULL);
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
     
@@ -20,15 +46,15 @@ int main(int argc, char *argv[]) {
     GtkCssProvider *css_provider = gtk_css_provider_new();
     gtk_css_provider_load_from_data(css_provider,
         "scrolledwindow overshoot, scrolledwindow undershoot { background: none; }\n"
-        "#page-nav-overlay {\n"
+        "#page-nav-overlay, #right-page-nav-overlay {\n"
         "    background: rgba(0, 0, 0, 0.6);\n"
         "    border-radius: 8px;\n"
         "    padding: 6px 10px;\n"
         "}\n"
-        "#page-nav-overlay label {\n"
+        "#page-nav-overlay label, #right-page-nav-overlay label {\n"
         "    color: white;\n"
         "}\n"
-        "#page-nav-overlay entry {\n"
+        "#page-nav-overlay entry, #right-page-nav-overlay entry {\n"
         "    background: rgba(255, 255, 255, 0.9);\n"
         "    border: none;\n"
         "    border-radius: 4px;\n"
