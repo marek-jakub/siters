@@ -101,6 +101,24 @@ xvfb-run -a python3 tests/test_siters_gui.py
 - **Tests skip**: When accessibility is not available (non-GUI environment, headless server)
 - Both outcomes are acceptable and expected depending on environment
 
+## Configuration Isolation
+
+The config file lives at `~/.config/siters/siters.json` by default.
+When developing or running the GUI tests, **set `SITERS_CONFIG_DIR`** to
+a different directory so the dev build never touches your real config:
+
+```bash
+# Build and run with isolated config
+cmake -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build
+SITERS_CONFIG_DIR=/tmp/siters-dev ./build/siters
+```
+
+The GUI tests (`test_siters_gui.py`) already do this automatically –
+`SitersGUITestCase.setUpClass` creates a temp directory and sets
+`SITERS_CONFIG_DIR` before any test method runs, then `tearDownClass`
+cleans it up.
+
 ## Using CMake
 
 Instead of Makefile, you can use CMake:

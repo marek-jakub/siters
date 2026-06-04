@@ -17,8 +17,10 @@ Installation:
 
 import logging
 import os
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import unittest
 from typing import Any
@@ -56,6 +58,19 @@ class SitersGUITestCase(unittest.TestCase):
             cls.siters_binary = os.path.abspath(build_binary)
         else:
             cls.siters_binary = "siters"
+
+        # Isolate config files to a temp directory so tests never touch ~/.config/siters
+        cls.temp_config_dir = tempfile.mkdtemp(prefix="siters_test_")
+        os.environ["SITERS_CONFIG_DIR"] = cls.temp_config_dir
+
+    @classmethod
+    def tearDownClass(cls):
+        """Clean up test fixtures."""
+        if "SITERS_CONFIG_DIR" in os.environ:
+            del os.environ["SITERS_CONFIG_DIR"]
+        if hasattr(cls, "temp_config_dir") and cls.temp_config_dir:
+            shutil.rmtree(cls.temp_config_dir, ignore_errors=True)
+            cls.temp_config_dir = None
 
     def setUp(self):
         """Start the Siters application before each test."""
@@ -748,7 +763,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 import json
                 import os
 
-                config_dir = os.path.expanduser("~/.config/siters")
+                config_dir = os.path.join(os.environ["SITERS_CONFIG_DIR"], "siters")
                 os.makedirs(config_dir, exist_ok=True)
                 config_file = os.path.join(config_dir, "siters.json")
 
@@ -950,79 +965,72 @@ class TestSitersSessionManagement(SitersGUITestCase):
         """
         import os
 
-        # Create a test config file with a specific last_open_session
-        config_dir = os.path.expanduser("~/.config/siters")
+        config_dir = os.path.join(os.environ["SITERS_CONFIG_DIR"], "siters")
         os.makedirs(config_dir, exist_ok=True)
         config_file = os.path.join(config_dir, "siters.json")
 
-        # Backup existing config if it exists
-        backup_config = None
+        # Remove any leftover config from a previous test in this class
         if os.path.exists(config_file):
-            with open(config_file, "r") as f:
-                backup_config = f.read()
+            os.remove(config_file)
 
+        self._write_json_config(
+            "TestSession", ["Default", "TestSession"], config_dir
+        )
+
+        # Restart the app after writing the test config file so it reloads from disk
         try:
-            self._write_json_config(
-                "TestSession", ["Default", "TestSession"], config_dir
+            if hasattr(self, "app") and self.app:
+                self.app.kill()
+                time.sleep(0.5)
+
+            self.app = run(self.siters_binary, timeout=5, dumb=True)
+            time.sleep(2)
+
+            siters_app = root.application("siters")
+            time.sleep(2)
+
+            # Verify window title reflects loaded last_open_session
+            def wait_for_window_title_contains(app, expected_text, timeout=5.0):
+                end = time.time() + timeout
+                while time.time() < end:
+                    try:
+                        win = app.findChild(
+                            lambda x: (
+                                x.roleName in ["frame", "window"]
+                                and x.name
+                                and "Siters" in x.name
+                            )
+                        )
+                        title = win.name or ""
+                        if expected_text in title:
+                            return title
+                    except Exception:
+                        pass
+                    time.sleep(0.1)
+                return None
+
+            title = wait_for_window_title_contains(
+                siters_app, "TestSession", timeout=5.0
+            )
+            self.assertIsNotNone(
+                title,
+                "Window title did not include last_open_session 'TestSession' after startup",
             )
 
-            # Restart the app after writing the test config file so it reloads from disk
-            try:
-                if hasattr(self, "app") and self.app:
-                    self.app.kill()
-                    time.sleep(0.5)
+            # Optional stricter check if format is fixed:
+            # self.assertEqual(title, "Siters - TestSession")
+            print(f"SUCCESS: Window title after startup: {title}")
 
-                self.app = run(self.siters_binary, timeout=5, dumb=True)
-                time.sleep(2)
-
-                siters_app = root.application("siters")
-                time.sleep(2)
-
-                # Verify window title reflects loaded last_open_session
-                def wait_for_window_title_contains(app, expected_text, timeout=5.0):
-                    end = time.time() + timeout
-                    while time.time() < end:
-                        try:
-                            win = app.findChild(
-                                lambda x: (
-                                    x.roleName in ["frame", "window"]
-                                    and x.name
-                                    and "Siters" in x.name
-                                )
-                            )
-                            title = win.name or ""
-                            if expected_text in title:
-                                return title
-                        except Exception:
-                            pass
-                        time.sleep(0.1)
-                    return None
-
-                title = wait_for_window_title_contains(
-                    siters_app, "TestSession", timeout=5.0
-                )
-                self.assertIsNotNone(
-                    title,
-                    "Window title did not include last_open_session 'TestSession' after startup",
-                )
-
-                # Optional stricter check if format is fixed:
-                # self.assertEqual(title, "Siters - TestSession")
-                print(f"SUCCESS: Window title after startup: {title}")
-
-            except TimeoutError:
-                self.skipTest(
-                    "AT-SPI search timed out - GUI elements may not be accessible"
-                )
-            except Exception as e:
-                self.skipTest(f"Error during saved session test: {e}")
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - GUI elements may not be accessible"
+            )
+        except Exception as e:
+            self.skipTest(f"Error during saved session test: {e}")
 
         finally:
-            # Clean up: restore original config or remove test config
-            if backup_config is not None:
-                with open(config_file, "w") as f:
-                    f.write(backup_config)
-            elif os.path.exists(config_file):
+            # Clean up test config file (temp dir will be removed in tearDownClass)
+            if os.path.exists(config_file):
                 os.remove(config_file)
 
 
