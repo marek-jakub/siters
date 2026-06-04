@@ -9,6 +9,11 @@
 #include "session_model.h"
 #include "document_model.h"
 
+/* DATADIR is normally defined by -DDATADIR=... at build time.
+   This fallback lets clang-based tools parse the file without flags. */
+#ifndef DATADIR
+#define DATADIR "."
+#endif
 
 /* Forward declaration and struct definitions for tab management */
 typedef struct TabDataStruct TabData;
@@ -584,10 +589,14 @@ void load_state(void) {
             g_free(current_selected_session);
             current_selected_session = g_strdup(loaded_session);
             restore_open_tabs_for_session(loaded_session);
+            sync_left_layout_buttons(get_current_left_tab());
+            sync_right_layout_buttons(get_current_right_tab());
             sync_page_widget_from_tab(get_current_left_tab());
             update_window_title_for_session(current_selected_session);
         } else if (loaded_session) {
             restore_open_tabs_for_session(loaded_session);
+            sync_left_layout_buttons(get_current_left_tab());
+            sync_right_layout_buttons(get_current_right_tab());
             sync_page_widget_from_tab(get_current_left_tab());
         }
     }
@@ -3149,11 +3158,13 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
         /* Defer scrolling until widget is allocated */
         tab->initial_scroll_pending = TRUE;
 
-        /* Ensure page counter shows real total immediately after load. */
+        /* Ensure page counter and layout buttons show real values immediately after load. */
         if (tab == get_current_left_tab()) {
+            sync_left_layout_buttons(tab);
             sync_page_widget_from_tab(tab);
         }
         if (tab == get_current_right_tab()) {
+            sync_right_layout_buttons(tab);
             sync_right_page_widget_from_tab(tab);
         }
     }
