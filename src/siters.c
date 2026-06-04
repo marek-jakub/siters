@@ -47,6 +47,7 @@ typedef struct TabDataStruct {
     double scroll_offset; /* used to restore scroll position in continuous view */
     gboolean is_helper; /* TRUE if this tab is in the right (helper) notebook */
     guint zoom_scroll_source_id; /* pending zoom-scroll idle callback source id */
+    guint h_scrollbar_timer_id;  /* auto-hide timer for horizontal scrollbar */
     int zoom_scroll_target_page; /* target page for post-zoom scroll restore */
     double zoom_scroll_fraction; /* fractional offset within target page */
 } TabData;
@@ -224,6 +225,10 @@ static void destroy_tab_data(gpointer data) {
     if (tab->zoom_scroll_source_id) {
         g_source_remove(tab->zoom_scroll_source_id);
         tab->zoom_scroll_source_id = 0;
+    }
+    if (tab->h_scrollbar_timer_id) {
+        g_source_remove(tab->h_scrollbar_timer_id);
+        tab->h_scrollbar_timer_id = 0;
     }
     if (tab->doc) {
         g_object_unref(tab->doc);
@@ -2492,10 +2497,85 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
     }
 }
 
+static gboolean auto_hide_h_scrollbar(gpointer data) {
+    TabData *tab = data;
+    tab->h_scrollbar_timer_id = 0;
+    if (tab->h_scrollbar)
+        gtk_widget_hide(tab->h_scrollbar);
+    return G_SOURCE_REMOVE;
+}
+
+static void cancel_h_scrollbar_timer(TabData *tab) {
+    if (tab->h_scrollbar_timer_id) {
+        g_source_remove(tab->h_scrollbar_timer_id);
+        tab->h_scrollbar_timer_id = 0;
+    }
+}
+
+static void show_h_scrollbar_temporarily(TabData *tab) {
+    if (!tab->h_scrollbar) return;
+    cancel_h_scrollbar_timer(tab);
+    gtk_widget_show(tab->h_scrollbar);
+    tab->h_scrollbar_timer_id = g_timeout_add(2000, auto_hide_h_scrollbar, tab);
+}
+
+static void show_h_scrollbar(TabData *tab) {
+    if (!tab->h_scrollbar) return;
+    cancel_h_scrollbar_timer(tab);
+    gtk_widget_show(tab->h_scrollbar);
+}
+
+static gboolean on_h_scrollbar_enter(GtkWidget *w, GdkEvent *e, gpointer user_data) {
+    (void)w; (void)e;
+    TabData *tab = user_data;
+    if (!tab->h_scrollbar) return FALSE;
+    cancel_h_scrollbar_timer(tab);
+    return FALSE;
+}
+
+static gboolean on_h_scrollbar_leave(GtkWidget *w, GdkEvent *e, gpointer user_data) {
+    (void)w; (void)e;
+    TabData *tab = user_data;
+    if (!tab->h_scrollbar) return FALSE;
+    cancel_h_scrollbar_timer(tab);
+    tab->h_scrollbar_timer_id = g_timeout_add(500, auto_hide_h_scrollbar, tab);
+    return FALSE;
+}
+
+static gboolean on_drawing_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data) {
+    TabData *tab = user_data;
+    if (!tab || tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(widget, &alloc);
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    double scroll_y = gtk_adjustment_get_value(vadj);
+    double page_size = gtk_adjustment_get_page_size(vadj);
+    double visible_bottom = scroll_y + page_size;
+    if (visible_bottom > alloc.height) visible_bottom = alloc.height;
+    int bottom_zone = 30;
+    if (event->y >= visible_bottom - bottom_zone) {
+        show_h_scrollbar(tab);
+    } else if (gtk_widget_get_visible(tab->h_scrollbar) && !tab->h_scrollbar_timer_id) {
+        tab->h_scrollbar_timer_id = g_timeout_add(500, auto_hide_h_scrollbar, tab);
+    }
+    return FALSE;
+}
+
+static gboolean on_drawing_leave(GtkWidget *widget, GdkEventCrossing *event, gpointer user_data) {
+    (void)widget; (void)event;
+    TabData *tab = user_data;
+    if (!tab || tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
+    if (gtk_widget_get_visible(tab->h_scrollbar) && !tab->h_scrollbar_timer_id) {
+        tab->h_scrollbar_timer_id = g_timeout_add(500, auto_hide_h_scrollbar, tab);
+    }
+    return FALSE;
+}
+
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data) {
     (void)widget;
     TabData *tab = user_data;
     if (!tab || tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
+    show_h_scrollbar_temporarily(tab);
     GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
     double val = gtk_adjustment_get_value(adj);
     double step = 40.0;
@@ -2845,7 +2925,6 @@ static void build_continuous_view(TabData *tab) {
         if (total_w < 1.0) total_w = 1.0;
         if (max_h < 1.0) max_h = 1.0;
         if (tab->h_scrollbar) {
-            gtk_widget_show(tab->h_scrollbar);
             GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
             gtk_adjustment_set_lower(adj, 0.0);
             gtk_adjustment_set_upper(adj, total_w);
@@ -3136,7 +3215,12 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     GtkAdjustment *scroll_adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
     g_signal_connect(G_OBJECT(scroll_adj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
     g_signal_connect(G_OBJECT(tab->pages_drawing), "scroll-event", G_CALLBACK(on_drawing_scroll), tab);
-    gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "motion-notify-event", G_CALLBACK(on_drawing_motion_notify), tab);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "leave-notify-event", G_CALLBACK(on_drawing_leave), tab);
+    gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK);
+    g_signal_connect(G_OBJECT(tab->h_scrollbar), "enter-notify-event", G_CALLBACK(on_h_scrollbar_enter), tab);
+    g_signal_connect(G_OBJECT(tab->h_scrollbar), "leave-notify-event", G_CALLBACK(on_h_scrollbar_leave), tab);
+    gtk_widget_add_events(tab->h_scrollbar, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
 
     gtk_widget_show_all(tab_box);
 
