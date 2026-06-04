@@ -13,9 +13,12 @@ pkg_check_modules(CMOCKA REQUIRED cmocka)
 # Include directories
 include_directories(include include/json-glib ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
-# Data directory for installed location
+# Data directory — default to source root for development, override with -DDATADIR=... for install
 include(GNUInstallDirs)
-add_definitions(-DDATADIR="${CMAKE_INSTALL_FULL_DATADIR}/siters")
+if(NOT DEFINED DATADIR)
+  set(DATADIR "${CMAKE_SOURCE_DIR}")
+endif()
+add_definitions(-DDATADIR="${DATADIR}")
 
 # Main application
 add_executable(siters 

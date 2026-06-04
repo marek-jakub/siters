@@ -39,7 +39,7 @@ int main(int argc, char *argv[]) {
     g_log_set_writer_func(suppress_gtk_box_critical, NULL, NULL);
     signal(SIGTERM, signal_handler);
     signal(SIGINT, signal_handler);
-    
+
     gtk_init(&argc, &argv);
 
     /* Remove GTK scrolled window overshoot/undershoot indicators (dashed lines at edges) */
@@ -50,6 +50,10 @@ int main(int argc, char *argv[]) {
         "    background: rgba(0, 0, 0, 0.6);\n"
         "    border-radius: 8px;\n"
         "    padding: 6px 10px;\n"
+        "}\n"
+        "notebook > header.left tab,\n"
+        "notebook > header.right tab {\n"
+        "    padding: 2px 2px;\n"
         "}\n"
         "#page-nav-overlay label, #right-page-nav-overlay label {\n"
         "    color: white;\n"
@@ -65,7 +69,7 @@ int main(int argc, char *argv[]) {
     g_object_unref(css_provider);
 
     GtkWidget *window = create_main_window();
-    
+
     // Load saved state and apply to window
     load_state();
 

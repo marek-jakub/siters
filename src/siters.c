@@ -3913,7 +3913,7 @@ GtkWidget* create_main_window(void) {
     /* Left sidebar: main toolbar */
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "Toolbar");
-    gtk_widget_set_size_request(toolbar, 48, -1);
+    gtk_widget_set_size_request(toolbar, 36, -1);
     gtk_box_pack_start(GTK_BOX(main_hbox), toolbar, FALSE, FALSE, 0);
 
     /* Sidebar for sessions, toc, settings */
@@ -4212,6 +4212,7 @@ GtkWidget* create_main_window(void) {
     /* Column view button*/
     GtkWidget *column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
     left_column_btn = gtk_radio_button_new(NULL);
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_column_btn), column_view_icon);
     gtk_widget_set_tooltip_text(left_column_btn, "Page column");
     atk_object_set_name(gtk_widget_get_accessible(left_column_btn), "Page column");
@@ -4222,6 +4223,7 @@ GtkWidget* create_main_window(void) {
     /* Double column view button*/
     GtkWidget *double_column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
     left_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_double_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_double_column_btn), double_column_view_icon);
     gtk_widget_set_tooltip_text(left_double_column_btn, "Page double column");
     atk_object_set_name(gtk_widget_get_accessible(left_double_column_btn), "Page double column");
@@ -4232,6 +4234,7 @@ GtkWidget* create_main_window(void) {
     /* Row view button*/
     GtkWidget *row_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
     left_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_row_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_row_btn), row_view_icon);
     gtk_widget_set_tooltip_text(left_row_btn, "Page row");
     atk_object_set_name(gtk_widget_get_accessible(left_row_btn), "Page row");
@@ -4346,7 +4349,7 @@ GtkWidget* create_main_window(void) {
 
     /* Right pane: container with notebook and toolbar */
     right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_size_request(right_pane, 70, -1);
+    gtk_widget_set_size_request(right_pane, 36, -1);
     gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, TRUE);
     gtk_paned_set_position(GTK_PANED(paned), 500);
 
@@ -4472,6 +4475,7 @@ GtkWidget* create_main_window(void) {
     /* Right toolbar - Page column */
     GtkWidget *right_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
     right_column_btn = gtk_radio_button_new(NULL);
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_column_btn), right_column_icon);
     gtk_widget_set_tooltip_text(right_column_btn, "Page column");
     atk_object_set_name(gtk_widget_get_accessible(right_column_btn), "Page column");
@@ -4482,6 +4486,7 @@ GtkWidget* create_main_window(void) {
     /* Right toolbar - Page double column */
     GtkWidget *right_double_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
     right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_double_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_double_column_btn), right_double_column_icon);
     gtk_widget_set_tooltip_text(right_double_column_btn, "Page double column");
     atk_object_set_name(gtk_widget_get_accessible(right_double_column_btn), "Page double column");
@@ -4492,6 +4497,7 @@ GtkWidget* create_main_window(void) {
     /* Right toolbar - Page row */
     GtkWidget *right_row_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
     right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_row_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_row_btn), right_row_icon);
     gtk_widget_set_tooltip_text(right_row_btn, "Page row");
     atk_object_set_name(gtk_widget_get_accessible(right_row_btn), "Page row");
