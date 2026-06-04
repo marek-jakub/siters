@@ -2,7 +2,8 @@
 # Usage: make -f Makefile.tests target
 
 CC=gcc
-CFLAGS=-Wall -Wextra -Werror -g -Iinclude -Iinclude/json-glib `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
+DATADIR ?= $(shell pwd)
+CFLAGS=-Wall -Wextra -Werror -g -DDATADIR=\"$(DATADIR)\" -Iinclude -Iinclude/json-glib `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
 LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm -L/usr/lib/x86_64-linux-gnu -l:libjson-glib-1.0.so.0
 
 # Main application

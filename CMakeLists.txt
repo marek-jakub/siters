@@ -13,6 +13,10 @@ pkg_check_modules(CMOCKA REQUIRED cmocka)
 # Include directories
 include_directories(include include/json-glib ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
+# Data directory for installed location
+include(GNUInstallDirs)
+add_definitions(-DDATADIR="${CMAKE_INSTALL_FULL_DATADIR}/siters")
+
 # Main application
 add_executable(siters 
     src/main.c
@@ -62,4 +66,7 @@ target_link_options(test_siters_unit PRIVATE
 add_test(NAME unit_tests COMMAND test_siters_unit)
 
 # Installation
-install(TARGETS siters DESTINATION bin)
+install(TARGETS siters RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/siters/data
+        PATTERN "test_pdfs" EXCLUDE)
+install(FILES data/icons/siters48x48.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps RENAME siters.png)

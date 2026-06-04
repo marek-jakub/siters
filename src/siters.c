@@ -322,7 +322,8 @@ void save_state(void) {
         save_open_tabs_for_session(current_selected_session);
     }
 
-    const gchar *config_dir = g_get_user_config_dir();
+    const gchar *cfg_override = g_getenv("SITERS_CONFIG_DIR");
+    const gchar *config_dir = cfg_override ? cfg_override : g_get_user_config_dir();
     gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
     g_mkdir_with_parents(app_config_dir, 0755);
 
@@ -470,7 +471,8 @@ static void load_session_doc_array(JsonArray *arr, session_model_t *session, con
 }
 
 void load_state(void) {
-    const gchar *config_dir = g_get_user_config_dir();
+    const gchar *cfg_override = g_getenv("SITERS_CONFIG_DIR");
+    const gchar *config_dir = cfg_override ? cfg_override : g_get_user_config_dir();
     gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
     gchar *config_file = g_build_filename(app_config_dir, "siters.json", NULL);
 
@@ -1378,9 +1380,9 @@ static void start_initial_scroll_restore(TabData *tab, int target_page, double t
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
     if (gtk_toggle_button_get_active(button)) {
-        gtk_image_set_from_file(image, "./data/icons/horiz-scroll-on.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/horiz-scroll-on.png");
     } else {
-        gtk_image_set_from_file(image, "./data/icons/horiz-scroll-off.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/horiz-scroll-off.png");
     }
 }
 
@@ -1388,10 +1390,10 @@ static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkImage *image = GTK_IMAGE(user_data);
     gboolean active = gtk_toggle_button_get_active(button);
     if (active) {
-        gtk_image_set_from_file(image, "./data/icons/title-bar-on.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/title-bar-on.png");
         gtk_window_set_decorated(GTK_WINDOW(window), TRUE);
     } else {
-        gtk_image_set_from_file(image, "./data/icons/title-bar-off.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/title-bar-off.png");
         // If window is maximized, need to unmaximize, remove decoration, then re-maximize
         // to ensure it fills the screen properly
         gboolean was_maximized = gtk_window_is_maximized(GTK_WINDOW(window));
@@ -1412,7 +1414,7 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
     gboolean active = gtk_toggle_button_get_active(button);
 
     if (active) {
-        gtk_image_set_from_file(image, "./data/icons/sidebar-helper-on.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/sidebar-helper-on.png");
         if (right_pane) {
             gtk_widget_show_all(GTK_WIDGET(right_pane));
             set_right_notebook_session(current_selected_session ? current_selected_session : "Default");
@@ -1423,7 +1425,7 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
         if (current_selected_session) {
             save_open_tabs_for_session(current_selected_session);
         }
-        gtk_image_set_from_file(image, "./data/icons/sidebar-helper-off.png");
+        gtk_image_set_from_file(image, DATADIR "/data/icons/sidebar-helper-off.png");
         if (right_pane) {
             gtk_widget_hide(GTK_WIDGET(right_pane));
         }
@@ -4087,7 +4089,7 @@ GtkWidget* create_main_window(void) {
 
     /* Buttons*/
     /* Sessions button */
-    GtkWidget *sessions_icon = gtk_image_new_from_file("./data/icons/sessions.png");
+    GtkWidget *sessions_icon = gtk_image_new_from_file(DATADIR "/data/icons/sessions.png");
     GtkWidget *sessions_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(sessions_btn), sessions_icon);
     gtk_widget_set_tooltip_text(sessions_btn, "Sessions");
@@ -4096,7 +4098,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), sessions_btn, FALSE, FALSE, 1);
 
     /* Table of contents button */
-    GtkWidget *toc_icon = gtk_image_new_from_file("./data/icons/toc.png");
+    GtkWidget *toc_icon = gtk_image_new_from_file(DATADIR "/data/icons/toc.png");
     GtkWidget *toc_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(toc_btn), toc_icon);
     gtk_widget_set_tooltip_text(toc_btn, "Table of contents");
@@ -4105,7 +4107,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), toc_btn, FALSE, FALSE, 1);
 
     /* Settings button */
-    GtkWidget *settings_icon = gtk_image_new_from_file("./data/icons/settings.png");
+    GtkWidget *settings_icon = gtk_image_new_from_file(DATADIR "/data/icons/settings.png");
     GtkWidget *settings_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(settings_btn), settings_icon);
     gtk_widget_set_tooltip_text(settings_btn, "Settings");
@@ -4122,7 +4124,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), middle_box, TRUE, FALSE, 0);
 
     /* Open file button */
-    GtkWidget *open_file_icon = gtk_image_new_from_file("./data/icons/file-plus.png");
+    GtkWidget *open_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-plus.png");
     GtkWidget *open_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(open_file_btn), open_file_icon);
     gtk_widget_set_tooltip_text(open_file_btn, "Open file");
@@ -4131,7 +4133,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), open_file_btn, FALSE, FALSE, 1);
 
     /* Close file button*/
-    GtkWidget *close_file_icon = gtk_image_new_from_file("./data/icons/file-minus.png");
+    GtkWidget *close_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-minus.png");
     GtkWidget *close_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(close_file_btn), close_file_icon);
     gtk_widget_set_tooltip_text(close_file_btn, "Close file");
@@ -4144,7 +4146,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_b, FALSE, FALSE, 5);
 
     /* Page up button*/
-    GtkWidget *page_up_icon = gtk_image_new_from_file("./data/icons/page-up.png");
+    GtkWidget *page_up_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-up.png");
     GtkWidget *page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_up_btn), page_up_icon);
     gtk_widget_set_tooltip_text(page_up_btn, "Page up");
@@ -4153,7 +4155,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), page_up_btn, FALSE, FALSE, 1);
 
     /* Page down button*/
-    GtkWidget *page_down_icon = gtk_image_new_from_file("./data/icons/page-down.png");
+    GtkWidget *page_down_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-down.png");
     GtkWidget *page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_down_btn), page_down_icon);
     gtk_widget_set_tooltip_text(page_down_btn, "Page down");
@@ -4186,7 +4188,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_c, FALSE, FALSE, 5);
 
     /* Zoom in button*/
-    GtkWidget *zoom_in_icon = gtk_image_new_from_file("./data/icons/zoom-in.png");
+    GtkWidget *zoom_in_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-in.png");
     GtkWidget *zoom_in_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(zoom_in_btn), zoom_in_icon);
     gtk_widget_set_tooltip_text(zoom_in_btn, "Zoom in");
@@ -4195,7 +4197,7 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(G_OBJECT(zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_left), NULL);
 
     /* Zoom out button*/
-    GtkWidget *zoom_out_icon = gtk_image_new_from_file("./data/icons/zoom-out.png");
+    GtkWidget *zoom_out_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-out.png");
     GtkWidget *zoom_out_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(zoom_out_btn), zoom_out_icon);
     gtk_widget_set_tooltip_text(zoom_out_btn, "Zoom out");
@@ -4208,7 +4210,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_d, FALSE, FALSE, 5);
 
     /* Column view button*/
-    GtkWidget *column_view_icon = gtk_image_new_from_file("./data/icons/column.png");
+    GtkWidget *column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
     left_column_btn = gtk_radio_button_new(NULL);
     gtk_button_set_image(GTK_BUTTON(left_column_btn), column_view_icon);
     gtk_widget_set_tooltip_text(left_column_btn, "Page column");
@@ -4218,7 +4220,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_column_btn, FALSE, FALSE, 1);
 
     /* Double column view button*/
-    GtkWidget *double_column_view_icon = gtk_image_new_from_file("./data/icons/double-column.png");
+    GtkWidget *double_column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
     left_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
     gtk_button_set_image(GTK_BUTTON(left_double_column_btn), double_column_view_icon);
     gtk_widget_set_tooltip_text(left_double_column_btn, "Page double column");
@@ -4228,7 +4230,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_double_column_btn, FALSE, FALSE, 1);
 
     /* Row view button*/
-    GtkWidget *row_view_icon = gtk_image_new_from_file("./data/icons/row.png");
+    GtkWidget *row_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
     left_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
     gtk_button_set_image(GTK_BUTTON(left_row_btn), row_view_icon);
     gtk_widget_set_tooltip_text(left_row_btn, "Page row");
@@ -4238,7 +4240,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_row_btn, FALSE, FALSE, 1);
 
     /* Horizontal scroll toggle button*/
-    GtkWidget *horiz_scroll_toggle_icon = gtk_image_new_from_file("./data/icons/horiz-scroll-off.png");
+    GtkWidget *horiz_scroll_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/horiz-scroll-off.png");
     GtkWidget *horiz_scroll_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(horiz_scroll_toggle_btn), horiz_scroll_toggle_icon);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(horiz_scroll_toggle_btn), FALSE);
@@ -4252,7 +4254,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_e, FALSE, FALSE, 5);
 
     /* Title bar toggle button*/
-    GtkWidget *title_bar_toggle_icon = gtk_image_new_from_file("./data/icons/title-bar-on.png");
+    GtkWidget *title_bar_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/title-bar-on.png");
     GtkWidget *title_bar_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(title_bar_toggle_btn), title_bar_toggle_icon);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(title_bar_toggle_btn), TRUE);
@@ -4262,7 +4264,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), title_bar_toggle_btn, FALSE, FALSE, 1);
 
     /* Helpers toggle button*/
-    GtkWidget *helper_toggle_icon = gtk_image_new_from_file("./data/icons/sidebar-helper-off.png");
+    GtkWidget *helper_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/sidebar-helper-off.png");
     GtkWidget *helper_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(helper_toggle_btn), helper_toggle_icon);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(helper_toggle_btn), FALSE);
@@ -4276,7 +4278,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), separator_f, FALSE, FALSE, 5);
 
     /* Close button*/
-    GtkWidget *close_icon = gtk_image_new_from_file("./data/icons/plug.png");
+    GtkWidget *close_icon = gtk_image_new_from_file(DATADIR "/data/icons/plug.png");
     GtkWidget *close_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(close_btn), close_icon);
     gtk_widget_set_tooltip_text(close_btn, "Close");
@@ -4285,7 +4287,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_end(GTK_BOX(toolbar), close_btn, FALSE, FALSE, 1);
 
     /* Maximize button*/
-    GtkWidget *maximize_icon = gtk_image_new_from_file("./data/icons/maximize-2.png");
+    GtkWidget *maximize_icon = gtk_image_new_from_file(DATADIR "/data/icons/maximize-2.png");
     GtkWidget *maximize_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(maximize_btn), maximize_icon);
     gtk_widget_set_tooltip_text(maximize_btn, "Maximize");
@@ -4294,7 +4296,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_end(GTK_BOX(toolbar), maximize_btn, FALSE, FALSE, 1);
 
     /* Minimize button*/
-    GtkWidget *minimize_icon = gtk_image_new_from_file("./data/icons/minimize-2.png");
+    GtkWidget *minimize_icon = gtk_image_new_from_file(DATADIR "/data/icons/minimize-2.png");
     GtkWidget *minimize_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(minimize_btn), minimize_icon);
     gtk_widget_set_tooltip_text(minimize_btn, "Minimize");
@@ -4402,7 +4404,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_toolbar), right_middle_box, TRUE, FALSE, 0);
 
     /* Right toolbar buttons - Open file */
-    GtkWidget *right_open_file_icon = gtk_image_new_from_file("./data/icons/file-plus.png");
+    GtkWidget *right_open_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-plus.png");
     GtkWidget *right_open_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_open_file_btn), right_open_file_icon);
     gtk_widget_set_tooltip_text(right_open_file_btn, "Open file");
@@ -4411,7 +4413,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_open_file_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Close file */
-    GtkWidget *right_close_file_icon = gtk_image_new_from_file("./data/icons/file-minus.png");
+    GtkWidget *right_close_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-minus.png");
     GtkWidget *right_close_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_close_file_btn), right_close_file_icon);
     gtk_widget_set_tooltip_text(right_close_file_btn, "Close file");
@@ -4424,7 +4426,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_a, FALSE, FALSE, 5);
 
     /* Right toolbar - Page up */
-    GtkWidget *right_page_up_icon = gtk_image_new_from_file("./data/icons/page-up.png");
+    GtkWidget *right_page_up_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-up.png");
     GtkWidget *right_page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_up_btn), right_page_up_icon);
     gtk_widget_set_tooltip_text(right_page_up_btn, "Page up");
@@ -4433,7 +4435,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_up_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page down */
-    GtkWidget *right_page_down_icon = gtk_image_new_from_file("./data/icons/page-down.png");
+    GtkWidget *right_page_down_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-down.png");
     GtkWidget *right_page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_down_btn), right_page_down_icon);
     gtk_widget_set_tooltip_text(right_page_down_btn, "Page down");
@@ -4446,7 +4448,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_b, FALSE, FALSE, 5);
 
     /* Right toolbar - Zoom in */
-    GtkWidget *right_zoom_in_icon = gtk_image_new_from_file("./data/icons/zoom-in.png");
+    GtkWidget *right_zoom_in_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-in.png");
     GtkWidget *right_zoom_in_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_zoom_in_btn), right_zoom_in_icon);
     gtk_widget_set_tooltip_text(right_zoom_in_btn, "Zoom in");
@@ -4455,7 +4457,7 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(G_OBJECT(right_zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_right), NULL);
 
     /* Right toolbar - Zoom out */
-    GtkWidget *right_zoom_out_icon = gtk_image_new_from_file("./data/icons/zoom-out.png");
+    GtkWidget *right_zoom_out_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-out.png");
     GtkWidget *right_zoom_out_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_zoom_out_btn), right_zoom_out_icon);
     gtk_widget_set_tooltip_text(right_zoom_out_btn, "Zoom out");
@@ -4468,7 +4470,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_c, FALSE, FALSE, 5);
 
     /* Right toolbar - Page column */
-    GtkWidget *right_column_icon = gtk_image_new_from_file("./data/icons/column.png");
+    GtkWidget *right_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
     right_column_btn = gtk_radio_button_new(NULL);
     gtk_button_set_image(GTK_BUTTON(right_column_btn), right_column_icon);
     gtk_widget_set_tooltip_text(right_column_btn, "Page column");
@@ -4478,7 +4480,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page double column */
-    GtkWidget *right_double_column_icon = gtk_image_new_from_file("./data/icons/double-column.png");
+    GtkWidget *right_double_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
     right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
     gtk_button_set_image(GTK_BUTTON(right_double_column_btn), right_double_column_icon);
     gtk_widget_set_tooltip_text(right_double_column_btn, "Page double column");
@@ -4488,7 +4490,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_double_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page row */
-    GtkWidget *right_row_icon = gtk_image_new_from_file("./data/icons/row.png");
+    GtkWidget *right_row_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
     right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
     gtk_button_set_image(GTK_BUTTON(right_row_btn), right_row_icon);
     gtk_widget_set_tooltip_text(right_row_btn, "Page row");
@@ -4502,7 +4504,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_d, FALSE, FALSE, 5);
 
     /* Right toolbar - Horizontal scroll toggle */
-    GtkWidget *right_horiz_scroll_icon = gtk_image_new_from_file("./data/icons/horiz-scroll-off.png");
+    GtkWidget *right_horiz_scroll_icon = gtk_image_new_from_file(DATADIR "/data/icons/horiz-scroll-off.png");
     GtkWidget *right_horiz_scroll_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(right_horiz_scroll_btn), right_horiz_scroll_icon);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_horiz_scroll_btn), FALSE);
