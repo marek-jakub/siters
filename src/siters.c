@@ -1659,17 +1659,83 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                 }
             }
 
-            // Update in model
+            // Migrate the session model in the hash table to the new key
+            session_model_t *session_model = g_hash_table_lookup(session_models, old_name);
+            if (session_model) {
+                session_model_set_session_name(session_model, new_name);
+                g_hash_table_steal(session_models, old_name);
+                g_hash_table_insert(session_models, g_strdup(new_name), session_model);
+
+                // Re-key all document_models entries that embed the old session name
+                if (document_models) {
+                    GList *keys = g_hash_table_get_keys(document_models);
+                    GList *to_rekey = NULL;
+                    int old_len = strlen(old_name);
+                    for (GList *k = keys; k; k = k->next) {
+                        char *key = (char *)k->data;
+                        if (strncmp(key, old_name, old_len) == 0 && key[old_len] == ':') {
+                            to_rekey = g_list_prepend(to_rekey, key);
+                        }
+                    }
+                    g_list_free(keys);
+                    for (GList *k = to_rekey; k; k = k->next) {
+                        char *old_key = (char *)k->data;
+                        document_model_t *doc = g_hash_table_lookup(document_models, old_key);
+                        if (doc) {
+                            char *new_key = g_strdup_printf("%s%s", new_name, old_key + old_len);
+                            g_hash_table_steal(document_models, old_key);
+                            g_hash_table_insert(document_models, new_key, doc);
+                            g_free(old_key);
+                        }
+                    }
+                    g_list_free(to_rekey);
+                }
+            }
+
+            // Update in sessions_model
             sessions_model_remove_session_name(sessions_model, old_name);
             sessions_model_add_session_name(sessions_model, new_name);
+
+            // Update current_selected_session BEFORE tree repopulation so the
+            // cursor-changed handler sees it matches and avoids switch_to_session.
+            gboolean was_current = (current_selected_session &&
+                                    strcmp(current_selected_session, old_name) == 0);
+            if (was_current) {
+                g_free(current_selected_session);
+                current_selected_session = g_strdup(new_name);
+            }
 
             // Update tree view
             populate_sessions_treeview();
 
-            // If the updated session is currently selected, update current_selected_session and window title
-            if (current_selected_session && strcmp(current_selected_session, old_name) == 0) {
-                g_free(current_selected_session);
-                current_selected_session = g_strdup(new_name);
+            // Re-select the renamed session in the tree
+            sessions_tree_syncing = TRUE;
+            {
+                GtkTreeIter si;
+                if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &si)) {
+                    do {
+                        char *sn = NULL;
+                        gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &si,
+                                           SESSION_COL_SESSION_NAME, &sn, -1);
+                        if (sn && strcmp(sn, new_name) == 0) {
+                            GtkTreeSelection *sel = gtk_tree_view_get_selection(
+                                GTK_TREE_VIEW(sessions_tree_view));
+                            GtkTreePath *path = gtk_tree_model_get_path(
+                                GTK_TREE_MODEL(sessions_tree_store), &si);
+                            gtk_tree_selection_select_path(sel, path);
+                            gtk_tree_path_free(path);
+                            g_free(sn);
+                            break;
+                        }
+                        g_free(sn);
+                    } while (gtk_tree_model_iter_next(
+                        GTK_TREE_MODEL(sessions_tree_store), &si));
+                }
+            }
+            sessions_tree_syncing = FALSE;
+
+            // Update window title for the renamed session
+            if (was_current) {
                 if (sessions_model) {
                     sessions_model_set_last_open_session(sessions_model, current_selected_session);
                 }
@@ -1678,6 +1744,9 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
 
             // Clear entry
             gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+
+            // Persist the rename
+            save_state();
 
             g_free(old_name);
         }
