@@ -102,9 +102,13 @@ static gchar *last_tree_selection_key = NULL;
 static GtkWidget *toc_container;
 static GtkWidget *toc_tree_view;
 static GtkTreeStore *toc_tree_store;
+static gboolean toc_tree_syncing = FALSE;
 
 /* Last directory used in file chooser */
 static char *last_open_dir = NULL;
+
+/* Tracks the last page selected in the TOC tree to avoid redundant updates */
+static int last_toc_selected_page = -1;
 
 /* Settings sidebar components */
 static GtkWidget *settings_container;
@@ -129,6 +133,7 @@ typedef enum {
 typedef enum {
     TOC_COL_LABEL = 0,
     TOC_COL_PAGE,
+    TOC_COL_NAMED_DEST,
     TOC_COL_COUNT
 } TOCTreeCols;
 
@@ -192,7 +197,10 @@ void populate_sessions_treeview(void);
 void populate_toc_treeview(void);
 static void update_sessions_tree_document_selection_for_tab(TabData *tab);
 static void update_sessions_tree_document_selection(void);
-static void on_toc_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data);
+static void update_toc_selection_for_current_page(TabData *tab);
+
+static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data);
+
 void hide_right_pane(void);
 static void set_right_notebook_session(const gchar *session_name);
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data);
@@ -1948,23 +1956,40 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
-static void populate_toc_treeview_recursive(PopplerIndexIter *iter, GtkTreeIter *parent) {
+static void populate_toc_treeview_recursive(PopplerIndexIter *iter, GtkTreeIter *parent, PopplerDocument *doc) {
     do {
         PopplerAction *action = poppler_index_iter_get_action(iter);
         if (action && action->type == POPPLER_ACTION_GOTO_DEST) {
             const char *title = action->goto_dest.title;
-            int page = action->goto_dest.dest ? action->goto_dest.dest->page_num : 0;
+            int page = 0;
+            char *named_dest = NULL;
+
+            if (action->goto_dest.dest) {
+                if (action->goto_dest.dest->page_num > 0) {
+                    page = action->goto_dest.dest->page_num;
+                } else if (action->goto_dest.dest->type == POPPLER_DEST_NAMED &&
+                           action->goto_dest.dest->named_dest) {
+                    named_dest = g_strdup(action->goto_dest.dest->named_dest);
+                    PopplerDest *resolved = poppler_document_find_dest(doc, named_dest);
+                    if (resolved) {
+                        page = resolved->page_num;
+                        poppler_dest_free(resolved);
+                    }
+                }
+            }
 
             GtkTreeIter child;
             gtk_tree_store_append(toc_tree_store, &child, parent);
             gtk_tree_store_set(toc_tree_store, &child,
                               TOC_COL_LABEL, title ? title : "(Untitled)",
                               TOC_COL_PAGE, page,
+                              TOC_COL_NAMED_DEST, named_dest,
                               -1);
+            g_free(named_dest);
 
             PopplerIndexIter *child_iter = poppler_index_iter_get_child(iter);
             if (child_iter) {
-                populate_toc_treeview_recursive(child_iter, &child);
+                populate_toc_treeview_recursive(child_iter, &child, doc);
                 poppler_index_iter_free(child_iter);
             }
         }
@@ -1973,18 +1998,60 @@ static void populate_toc_treeview_recursive(PopplerIndexIter *iter, GtkTreeIter 
 }
 
 static void populate_toc_treeview_for_tab(TabData *tab) {
+    last_toc_selected_page = -1;
     gtk_tree_store_clear(toc_tree_store);
     if (!tab || !tab->doc) return;
 
     PopplerIndexIter *root_iter = poppler_index_iter_new(tab->doc);
     if (!root_iter) return;
 
-    populate_toc_treeview_recursive(root_iter, NULL);
+    populate_toc_treeview_recursive(root_iter, NULL, tab->doc);
     poppler_index_iter_free(root_iter);
 }
 
 void populate_toc_treeview(void) {
     populate_toc_treeview_for_tab(get_current_left_tab());
+}
+
+typedef struct {
+    int target_page;
+    int best_page;
+    GtkTreePath *best_path;
+} TocFindData;
+
+static gboolean toc_find_nearest_cb(GtkTreeModel *model, GtkTreePath *path, GtkTreeIter *iter, gpointer data) {
+    TocFindData *find = data;
+    int page = 0;
+    gtk_tree_model_get(model, iter, TOC_COL_PAGE, &page, -1);
+    if (page > 0 && page <= find->target_page && page > find->best_page) {
+        find->best_page = page;
+        if (find->best_path) gtk_tree_path_free(find->best_path);
+        find->best_path = gtk_tree_path_copy(path);
+    }
+    return FALSE;
+}
+
+static void update_toc_selection_for_current_page(TabData *tab) {
+    if (!toc_tree_store || !toc_tree_view || !tab) return;
+
+    int target_page = tab->cur_page + 1;
+    if (target_page < 1) target_page = 1;
+
+    if (target_page == last_toc_selected_page) return;
+
+    TocFindData find = { .target_page = target_page, .best_page = 0, .best_path = NULL };
+    gtk_tree_model_foreach(GTK_TREE_MODEL(toc_tree_store), toc_find_nearest_cb, &find);
+
+    if (find.best_path) {
+        toc_tree_syncing = TRUE;
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(toc_tree_view));
+        gtk_tree_selection_select_path(sel, find.best_path);
+        gtk_tree_view_expand_to_path(GTK_TREE_VIEW(toc_tree_view), find.best_path);
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(toc_tree_view), find.best_path, NULL, FALSE, 0, 0);
+        last_toc_selected_page = target_page;
+        gtk_tree_path_free(find.best_path);
+        toc_tree_syncing = FALSE;
+    }
 }
 
 static void update_sessions_tree_document_selection_for_tab(TabData *tab) {
@@ -2038,31 +2105,43 @@ static void update_sessions_tree_document_selection(void) {
     update_sessions_tree_document_selection_for_tab(get_current_left_tab());
 }
 
-static void on_toc_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data) {
+static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+    (void)column;
     (void)user_data;
 
+    if (toc_tree_syncing) return;
     if (!gtk_widget_get_visible(toc_container)) return;
 
     GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
     GtkTreeIter iter;
-    GtkTreePath *path = NULL;
-    gtk_tree_view_get_cursor(tree_view, &path, NULL);
-    if (!path) return;
+    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
 
-    if (gtk_tree_model_get_iter(model, &iter, path)) {
-        int page = 0;
-        gtk_tree_model_get(model, &iter, TOC_COL_PAGE, &page, -1);
-        if (page > 0) {
-            TabData *tab = get_current_left_tab();
-            if (tab) {
-                cancel_doc_model_debounce(tab);
-                tab->cur_page = page - 1;
-                scroll_to_page(tab, page - 1);
-                update_document_model_from_tab(tab);
+    int page = 0;
+    char *named_dest = NULL;
+    gtk_tree_model_get(model, &iter, TOC_COL_PAGE, &page, TOC_COL_NAMED_DEST, &named_dest, -1);
+
+    if (page == 0 && named_dest) {
+        TabData *tab = get_current_left_tab();
+        if (tab && tab->doc) {
+            PopplerDest *resolved = poppler_document_find_dest(tab->doc, named_dest);
+            if (resolved && resolved->page_num > 0) {
+                page = resolved->page_num;
             }
+            if (resolved) poppler_dest_free(resolved);
         }
     }
-    gtk_tree_path_free(path);
+
+    if (page > 0) {
+        TabData *tab = get_current_left_tab();
+        if (tab) {
+            cancel_doc_model_debounce(tab);
+            last_toc_selected_page = page;
+            tab->cur_page = page - 1;
+            scroll_to_page(tab, page - 1);
+            update_document_model_from_tab(tab);
+        }
+    }
+    g_free(named_dest);
 }
 
 static void on_toc_clicked(GtkButton *button, gpointer user_data) {
@@ -2085,6 +2164,7 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         populate_toc_treeview();
 
         gtk_widget_show_all(toc_container);
+        update_toc_selection_for_current_page(get_current_left_tab());
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -2531,6 +2611,9 @@ static gboolean deferred_update_document_model(gpointer data) {
     tab->scroll_doc_debounce_id = 0;
     if (!tab || !tab->doc) return G_SOURCE_REMOVE;
     update_document_model_from_tab(tab);
+    if (current_sidebar_mode == SIDEBAR_TOC) {
+        update_toc_selection_for_current_page(tab);
+    }
     return G_SOURCE_REMOVE;
 }
 
@@ -3820,7 +3903,10 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     sync_left_layout_buttons(tab);
     sync_page_widget_from_tab(tab);
-    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview_for_tab(tab);
+    if (current_sidebar_mode == SIDEBAR_TOC) {
+        populate_toc_treeview_for_tab(tab);
+        update_toc_selection_for_current_page(tab);
+    }
     if (current_sidebar_mode == SIDEBAR_SESSIONS) {
         sessions_tree_syncing = TRUE;
         update_sessions_tree_document_selection_for_tab(tab);
@@ -4424,7 +4510,7 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_unref(toc_attr);
     gtk_box_pack_start(GTK_BOX(toc_container), toc_title, FALSE, FALSE, 0);
 
-    toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT);
+    toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
 
     toc_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(toc_tree_store));
     g_object_unref(toc_tree_store);
@@ -4433,7 +4519,8 @@ GtkWidget* create_main_window(void) {
     GtkTreeViewColumn *toc_col = gtk_tree_view_column_new_with_attributes("Section", toc_renderer, "text", TOC_COL_LABEL, NULL);
     gtk_tree_view_append_column(GTK_TREE_VIEW(toc_tree_view), toc_col);
 
-    g_signal_connect(toc_tree_view, "cursor-changed", G_CALLBACK(on_toc_treeview_cursor_changed), NULL);
+    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(toc_tree_view), TRUE);
+    g_signal_connect(toc_tree_view, "row-activated", G_CALLBACK(on_toc_row_activated), NULL);
 
     GtkWidget *toc_scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(toc_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
