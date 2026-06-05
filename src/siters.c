@@ -56,6 +56,11 @@ typedef struct TabDataStruct {
     guint scroll_doc_debounce_id; /* debounce timer for document model update on scroll */
     int zoom_scroll_target_page; /* target page for post-zoom scroll restore */
     double zoom_scroll_fraction; /* fractional offset within target page */
+    gboolean dragging;          /* drag-to-scroll in progress */
+    double drag_start_x;        /* cursor X at drag start in widget coords */
+    double drag_start_y;        /* cursor Y at drag start in widget coords */
+    double drag_scroll_x;       /* h_scrollbar value at drag start */
+    double drag_scroll_y;       /* vadjustment value at drag start */
 } TabData;
 
 typedef enum {
@@ -197,6 +202,8 @@ static void build_continuous_view(TabData *tab);
 static void scroll_to_page(TabData *tab, int page);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
+static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
+static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean restore_zoom_scroll_cb(gpointer user_data);
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
@@ -2649,9 +2656,56 @@ static gboolean on_h_scrollbar_leave(GtkWidget *w, GdkEvent *e, gpointer user_da
     return FALSE;
 }
 
+static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    TabData *tab = user_data;
+    if (!tab || event->button != GDK_BUTTON_PRIMARY) return FALSE;
+    tab->dragging = TRUE;
+    tab->drag_start_x = event->x;
+    tab->drag_start_y = event->y;
+    GtkAdjustment *hadj_main = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    tab->drag_scroll_x = gtk_adjustment_get_value(hadj_main);
+    if (tab->layout_mode == 2 && tab->h_scrollbar) {
+        GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+        tab->drag_scroll_x = gtk_adjustment_get_value(sadj);
+    }
+    GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+    tab->drag_scroll_y = gtk_adjustment_get_value(vadj);
+    GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), GDK_FLEUR);
+    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
+    g_object_unref(cursor);
+    return TRUE;
+}
+
+static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
+    TabData *tab = user_data;
+    if (!tab || event->button != GDK_BUTTON_PRIMARY) return FALSE;
+    tab->dragging = FALSE;
+    GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), GDK_LEFT_PTR);
+    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
+    g_object_unref(cursor);
+    return TRUE;
+}
+
 static gboolean on_drawing_motion_notify(GtkWidget *widget, GdkEventMotion *event, gpointer user_data) {
     TabData *tab = user_data;
-    if (!tab || tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
+    if (!tab) return FALSE;
+
+    if (tab->dragging) {
+        double dy = tab->drag_start_y - event->y;
+        double dx = tab->drag_start_x - event->x;
+        GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+        gtk_adjustment_set_value(vadj, tab->drag_scroll_y + dy);
+        if (tab->layout_mode == 2 && tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            gtk_adjustment_set_value(sadj, tab->drag_scroll_x + dx);
+        } else {
+            GtkAdjustment *hadj = gtk_scrolled_window_get_hadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+            gtk_adjustment_set_value(hadj, tab->drag_scroll_x + dx);
+        }
+        return TRUE;
+    }
+
+    if (tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
     GtkAllocation alloc;
     gtk_widget_get_allocation(widget, &alloc);
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
@@ -3325,9 +3379,11 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     GtkAdjustment *scroll_adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
     g_signal_connect(G_OBJECT(scroll_adj), "value-changed", G_CALLBACK(on_scroll_value_changed), tab);
     g_signal_connect(G_OBJECT(tab->pages_drawing), "scroll-event", G_CALLBACK(on_drawing_scroll), tab);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "button-press-event", G_CALLBACK(on_drawing_button_press), tab);
+    g_signal_connect(G_OBJECT(tab->pages_drawing), "button-release-event", G_CALLBACK(on_drawing_button_release), tab);
     g_signal_connect(G_OBJECT(tab->pages_drawing), "motion-notify-event", G_CALLBACK(on_drawing_motion_notify), tab);
     g_signal_connect(G_OBJECT(tab->pages_drawing), "leave-notify-event", G_CALLBACK(on_drawing_leave), tab);
-    gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK);
+    gtk_widget_add_events(tab->pages_drawing, GDK_SCROLL_MASK | GDK_POINTER_MOTION_MASK | GDK_LEAVE_NOTIFY_MASK | GDK_BUTTON_PRESS_MASK | GDK_BUTTON_RELEASE_MASK);
     g_signal_connect(G_OBJECT(tab->h_scrollbar), "enter-notify-event", G_CALLBACK(on_h_scrollbar_enter), tab);
     g_signal_connect(G_OBJECT(tab->h_scrollbar), "leave-notify-event", G_CALLBACK(on_h_scrollbar_leave), tab);
     gtk_widget_add_events(tab->h_scrollbar, GDK_ENTER_NOTIFY_MASK | GDK_LEAVE_NOTIFY_MASK);
