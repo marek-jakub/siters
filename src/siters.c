@@ -103,6 +103,9 @@ static GtkWidget *toc_container;
 static GtkWidget *toc_tree_view;
 static GtkTreeStore *toc_tree_store;
 
+/* Last directory used in file chooser */
+static char *last_open_dir = NULL;
+
 /* Settings sidebar components */
 static GtkWidget *settings_container;
 static GtkWidget *tabbar_combo;
@@ -385,6 +388,11 @@ void save_state(void) {
         json_builder_add_int_value(builder, sessions_model_get_tab_width(sessions_model));
     }
 
+    if (last_open_dir) {
+        json_builder_set_member_name(builder, "last_open_dir");
+        json_builder_add_string_value(builder, last_open_dir);
+    }
+
     json_builder_end_object(builder);
 
     json_builder_set_member_name(builder, "sessions");
@@ -551,6 +559,9 @@ void load_state(void) {
         current_y = y;
         current_maximized = max;
     }
+
+    g_free(last_open_dir);
+    last_open_dir = g_strdup(json_object_get_string_member_with_default(root_obj, "last_open_dir", NULL));
 
     if (sessions_model && win) {
         const char *pos = json_object_get_string_member_with_default(win, "tabbar_position", "top");
@@ -3541,8 +3552,22 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
     gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
 
+    if (last_open_dir && g_file_test(last_open_dir, G_FILE_TEST_IS_DIR)) {
+        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), last_open_dir);
+    }
+
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
         GSList *filenames = gtk_file_chooser_get_filenames(GTK_FILE_CHOOSER(dialog));
+        if (filenames) {
+            char *first_file = (char *)filenames->data;
+            if (first_file) {
+                char *dir = g_path_get_dirname(first_file);
+                if (dir) {
+                    g_free(last_open_dir);
+                    last_open_dir = dir;
+                }
+            }
+        }
         gboolean changed = FALSE;
         for (GSList *f = filenames; f; f = f->next) {
             char *fname = (char *)f->data;
