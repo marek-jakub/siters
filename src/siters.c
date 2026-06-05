@@ -98,6 +98,11 @@ static sessions_model_t *sessions_model;
 static gboolean sessions_tree_syncing = FALSE;
 static gchar *last_tree_selection_key = NULL;
 
+/* TOC sidebar components */
+static GtkWidget *toc_container;
+static GtkWidget *toc_tree_view;
+static GtkTreeStore *toc_tree_store;
+
 /* Settings sidebar components */
 static GtkWidget *settings_container;
 static GtkWidget *tabbar_combo;
@@ -117,6 +122,12 @@ typedef enum {
     SESSION_ROW_SESSION = 0,
     SESSION_ROW_FILE = 1
 } SessionRowKind;
+
+typedef enum {
+    TOC_COL_LABEL = 0,
+    TOC_COL_PAGE,
+    TOC_COL_COUNT
+} TOCTreeCols;
 
 /* Session models - map from session name to session_model_t */
 static GHashTable *session_models;
@@ -175,6 +186,8 @@ static void sync_right_layout_buttons(TabData *tab);
 /* Function prototypes */
 void save_state(void);
 void populate_sessions_treeview(void);
+void populate_toc_treeview(void);
+static void on_toc_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data);
 void hide_right_pane(void);
 static void set_right_notebook_session(const gchar *session_name);
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data);
@@ -1878,6 +1891,8 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
         gtk_widget_hide(settings_container);
+        gtk_widget_hide(toc_container);
+        gtk_tree_store_clear(toc_tree_store);
 
         // Show sessions container
         gtk_widget_show_all(sessions_container);
@@ -1945,6 +1960,72 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
     }
 }
 
+static void populate_toc_treeview_recursive(PopplerIndexIter *iter, GtkTreeIter *parent) {
+    do {
+        PopplerAction *action = poppler_index_iter_get_action(iter);
+        if (action && action->type == POPPLER_ACTION_GOTO_DEST) {
+            const char *title = action->goto_dest.title;
+            int page = action->goto_dest.dest ? action->goto_dest.dest->page_num : 0;
+
+            GtkTreeIter child;
+            gtk_tree_store_append(toc_tree_store, &child, parent);
+            gtk_tree_store_set(toc_tree_store, &child,
+                              TOC_COL_LABEL, title ? title : "(Untitled)",
+                              TOC_COL_PAGE, page,
+                              -1);
+
+            PopplerIndexIter *child_iter = poppler_index_iter_get_child(iter);
+            if (child_iter) {
+                populate_toc_treeview_recursive(child_iter, &child);
+                poppler_index_iter_free(child_iter);
+            }
+        }
+        if (action) poppler_action_free(action);
+    } while (poppler_index_iter_next(iter));
+}
+
+static void populate_toc_treeview_for_tab(TabData *tab) {
+    gtk_tree_store_clear(toc_tree_store);
+    if (!tab || !tab->doc) return;
+
+    PopplerIndexIter *root_iter = poppler_index_iter_new(tab->doc);
+    if (!root_iter) return;
+
+    populate_toc_treeview_recursive(root_iter, NULL);
+    poppler_index_iter_free(root_iter);
+}
+
+void populate_toc_treeview(void) {
+    populate_toc_treeview_for_tab(get_current_left_tab());
+}
+
+static void on_toc_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data) {
+    (void)user_data;
+
+    if (!gtk_widget_get_visible(toc_container)) return;
+
+    GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
+    GtkTreeIter iter;
+    GtkTreePath *path = NULL;
+    gtk_tree_view_get_cursor(tree_view, &path, NULL);
+    if (!path) return;
+
+    if (gtk_tree_model_get_iter(model, &iter, path)) {
+        int page = 0;
+        gtk_tree_model_get(model, &iter, TOC_COL_PAGE, &page, -1);
+        if (page > 0) {
+            TabData *tab = get_current_left_tab();
+            if (tab) {
+                cancel_doc_model_debounce(tab);
+                tab->cur_page = page - 1;
+                scroll_to_page(tab, page - 1);
+                update_document_model_from_tab(tab);
+            }
+        }
+    }
+    gtk_tree_path_free(path);
+}
+
 static void on_toc_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
@@ -1962,9 +2043,9 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sessions_container);
         gtk_widget_hide(settings_container);
 
-        // Show sidebar_label with TOC text
-        gtk_label_set_text(GTK_LABEL(sidebar_label), "Table of Contents\n\n• Chapter 1\n• Chapter 2\n• Chapter 3\n\nSelect a section to navigate.");
-        gtk_widget_show_all(sidebar_label);
+        populate_toc_treeview();
+
+        gtk_widget_show_all(toc_container);
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -2145,6 +2226,8 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         // Hide other sidebar contents
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
+        gtk_widget_hide(toc_container);
+        gtk_tree_store_clear(toc_tree_store);
 
         // Show settings container
         gtk_widget_show_all(settings_container);
@@ -3320,6 +3403,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
             sync_right_page_widget_from_tab(tab);
         }
     }
+    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
 }
 
 static TabData *create_new_tab(GtkWidget *notebook) {
@@ -3683,6 +3767,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     sync_left_layout_buttons(tab);
     sync_page_widget_from_tab(tab);
+    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview_for_tab(tab);
 }
 
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
@@ -4266,6 +4351,39 @@ GtkWidget* create_main_window(void) {
 
     gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
     gtk_widget_hide(sessions_container);
+
+    /* TOC container */
+    toc_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(toc_container), 5);
+    g_object_ref(toc_container);
+
+    GtkWidget *toc_title = gtk_label_new("Table of Contents");
+    gtk_widget_set_halign(toc_title, GTK_ALIGN_START);
+    PangoAttrList *toc_attr = pango_attr_list_new();
+    pango_attr_list_insert(toc_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    pango_attr_list_insert(toc_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
+    gtk_label_set_attributes(GTK_LABEL(toc_title), toc_attr);
+    pango_attr_list_unref(toc_attr);
+    gtk_box_pack_start(GTK_BOX(toc_container), toc_title, FALSE, FALSE, 0);
+
+    toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT);
+
+    toc_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(toc_tree_store));
+    g_object_unref(toc_tree_store);
+
+    GtkCellRenderer *toc_renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *toc_col = gtk_tree_view_column_new_with_attributes("Section", toc_renderer, "text", TOC_COL_LABEL, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(toc_tree_view), toc_col);
+
+    g_signal_connect(toc_tree_view, "cursor-changed", G_CALLBACK(on_toc_treeview_cursor_changed), NULL);
+
+    GtkWidget *toc_scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(toc_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_container_add(GTK_CONTAINER(toc_scrolled), toc_tree_view);
+    gtk_box_pack_start(GTK_BOX(toc_container), toc_scrolled, TRUE, TRUE, 0);
+
+    gtk_box_pack_start(GTK_BOX(sidebar), toc_container, TRUE, TRUE, 0);
+    gtk_widget_hide(toc_container);
 
     /* Settings container */
     settings_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
