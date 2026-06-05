@@ -211,6 +211,7 @@ static void on_right_color_set(GtkColorButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
+static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
 static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 
@@ -3380,6 +3381,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
 
     /* Add tab to notebook */
     int page_num = gtk_notebook_append_page(GTK_NOTEBOOK(notebook), tab_box, label_box);
+    gtk_notebook_set_tab_reorderable(GTK_NOTEBOOK(notebook), tab_box, TRUE);
     gtk_notebook_set_current_page(GTK_NOTEBOOK(notebook), page_num);
 
     return tab;
@@ -3641,6 +3643,17 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     /* keep left widget tied to primary (left) document */
     sync_page_widget_from_tab(get_current_left_tab());
     sync_right_page_widget_from_tab(tab);
+}
+
+static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
+    (void)notebook;
+    (void)page;
+    (void)page_num;
+    (void)user_data;
+    if (current_selected_session) {
+        save_open_tabs_for_session(current_selected_session);
+        populate_sessions_treeview();
+    }
 }
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
@@ -4527,6 +4540,7 @@ GtkWidget* create_main_window(void) {
     gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, TRUE);
     atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
     g_signal_connect(left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
+    g_signal_connect(left_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
 
     // Use last open session if available, otherwise default to "Default"
     const char *initial_session = "Default";
@@ -4555,6 +4569,7 @@ GtkWidget* create_main_window(void) {
     gtk_notebook_set_scrollable(GTK_NOTEBOOK(right_notebook), TRUE);
     gtk_container_add(GTK_CONTAINER(right_nb_overlay), right_notebook);
     g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
+    g_signal_connect(right_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
 
     /* Right page navigation entry + label */
     right_page_entry = gtk_entry_new();
