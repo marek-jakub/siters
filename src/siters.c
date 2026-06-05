@@ -2896,9 +2896,9 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_surface_set_device_scale(pimg, dsx, dsy);
                     cairo_t *picr = cairo_create(pimg);
                     cairo_set_font_options(picr, fo);
-                    cairo_set_antialias(picr, cairo_get_antialias(cr));
+                    cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                     cairo_scale(picr, scale, scale);
-                    poppler_page_render_for_printing(page, picr);
+                    poppler_page_render(page, picr);
                     cairo_destroy(picr);
                     cairo_set_source_surface(cr, pimg, off_x, off_y);
                     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
@@ -2960,7 +2960,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             cairo_font_options_t *fo2 = cairo_font_options_create();
             cairo_get_font_options(cr, fo2);
             cairo_surface_get_device_scale(cairo_get_target(cr), &dsx2, &dsy2);
-            cairo_antialias_t aa2 = cairo_get_antialias(cr);
+            cairo_antialias_t aa2 = CAIRO_ANTIALIAS_BEST;
 
             /* draw left page */
             if (p1 && page_h1 > 0) {
@@ -2981,7 +2981,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_set_font_options(picr, fo2);
                         cairo_set_antialias(picr, aa2);
                         cairo_scale(picr, scale, scale);
-                        poppler_page_render_for_printing(p1, picr);
+                        poppler_page_render(p1, picr);
                         cairo_destroy(picr);
                         cairo_set_source_surface(cr, pimg, left_x, off_y1);
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
@@ -3010,7 +3010,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_set_font_options(picr, fo2);
                         cairo_set_antialias(picr, aa2);
                         cairo_scale(picr, scale, scale);
-                        poppler_page_render_for_printing(p2, picr);
+                        poppler_page_render(p2, picr);
                         cairo_destroy(picr);
                         cairo_set_source_surface(cr, pimg, right_x, off_y2);
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
@@ -3062,9 +3062,9 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_surface_set_device_scale(pimg, dsxh, dsyh);
                     cairo_t *picr = cairo_create(pimg);
                     cairo_set_font_options(picr, foh);
-                    cairo_set_antialias(picr, cairo_get_antialias(cr));
+                    cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                     cairo_scale(picr, scale, scale);
-                    poppler_page_render_for_printing(page, picr);
+                    poppler_page_render(page, picr);
                     cairo_destroy(picr);
                     cairo_set_source_surface(cr, pimg, dev_x, off_y);
                     cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
