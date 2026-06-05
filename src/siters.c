@@ -53,6 +53,7 @@ typedef struct TabDataStruct {
     gboolean is_helper; /* TRUE if this tab is in the right (helper) notebook */
     guint zoom_scroll_source_id; /* pending zoom-scroll idle callback source id */
     guint h_scrollbar_timer_id;  /* auto-hide timer for horizontal scrollbar */
+    guint scroll_doc_debounce_id; /* debounce timer for document model update on scroll */
     int zoom_scroll_target_page; /* target page for post-zoom scroll restore */
     double zoom_scroll_fraction; /* fractional offset within target page */
 } TabData;
@@ -158,6 +159,7 @@ static void on_page_up_right(GtkButton *btn, gpointer user_data);
 static void on_page_down_right(GtkButton *btn, gpointer user_data);
 
 static void cancel_tab_restore(TabData *tab);
+static void cancel_doc_model_debounce(TabData *tab);
 static void destroy_tab_data(gpointer data);
 static void apply_layout_to_tab(TabData *tab, int layout);
 static void on_layout_left_toggled(GtkToggleButton *btn, gpointer user_data);
@@ -227,6 +229,7 @@ static void destroy_tab_data(gpointer data) {
     TabData *tab = data;
     if (!tab) return;
     cancel_tab_restore(tab);
+    cancel_doc_model_debounce(tab);
     if (tab->zoom_scroll_source_id) {
         g_source_remove(tab->zoom_scroll_source_id);
         tab->zoom_scroll_source_id = 0;
@@ -1189,16 +1192,22 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         /* Validate basic state */
         if (!gtk_widget_get_realized(tab->scrolled)) {
             /* Widget not ready, retry next idle */
-            restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
-            return FALSE;
-        }
-
-        GtkAllocation alloc;
-        gtk_widget_get_allocation(tab->scrolled, &alloc);
-        if (alloc.width < 1 || alloc.height < 1) {
-            /* Layout not finalized, retry next idle */
-            restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
-            return FALSE;
+            restore->settle_attempts++;
+            if (restore->settle_attempts < 50) {
+                restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
+                return FALSE;
+            }
+        } else {
+            GtkAllocation alloc;
+            gtk_widget_get_allocation(tab->scrolled, &alloc);
+            if (alloc.width < 1 || alloc.height < 1) {
+                restore->settle_attempts++;
+                if (restore->settle_attempts < 50) {
+                    /* Layout not finalized, retry next idle */
+                    restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
+                    return FALSE;
+                }
+            }
         }
 
         /* Clamp page to valid range */
@@ -2198,7 +2207,6 @@ static void restore_open_tabs_for_session(const char *session_name) {
             TabData *tab = create_new_tab(left_notebook);
             if (tab) {
                 load_file_into_tab(tab, filename);
-                tab->initial_scroll_pending = TRUE;
                 if (last_read_uri && g_strcmp0(uri, last_read_uri) == 0) {
                     matched_left_index = left_index;
                 }
@@ -2222,7 +2230,6 @@ static void restore_open_tabs_for_session(const char *session_name) {
             TabData *tab = create_new_tab(right_notebook);
             if (tab) {
                 load_file_into_tab(tab, filename);
-                tab->initial_scroll_pending = TRUE;
                 if (last_read_help_uri && g_strcmp0(uri, last_read_help_uri) == 0) {
                     matched_right_index = right_index;
                 }
@@ -2320,6 +2327,27 @@ static void scroll_to_page(TabData *tab, int page) {
     gtk_adjustment_set_value(vadj, y);
 }
 
+static gboolean deferred_update_document_model(gpointer data) {
+    TabData *tab = data;
+    tab->scroll_doc_debounce_id = 0;
+    if (!tab || !tab->doc) return G_SOURCE_REMOVE;
+    update_document_model_from_tab(tab);
+    return G_SOURCE_REMOVE;
+}
+
+static void cancel_doc_model_debounce(TabData *tab) {
+    if (tab && tab->scroll_doc_debounce_id) {
+        g_source_remove(tab->scroll_doc_debounce_id);
+        tab->scroll_doc_debounce_id = 0;
+    }
+}
+
+static void schedule_doc_model_update(TabData *tab) {
+    if (!tab) return;
+    cancel_doc_model_debounce(tab);
+    tab->scroll_doc_debounce_id = g_timeout_add(400, deferred_update_document_model, tab);
+}
+
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
     TabData *tab = user_data;
     if (!tab || !tab->doc) return;
@@ -2348,7 +2376,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
             if (tab == get_current_right_tab()) {
                 sync_right_page_widget_from_tab(tab);
             }
-            update_document_model_from_tab(tab);
+            schedule_doc_model_update(tab);
             gtk_widget_queue_draw(tab->pages_drawing);
             return;
         }
@@ -2378,7 +2406,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         if (tab == get_current_right_tab()) {
             sync_right_page_widget_from_tab(tab);
         }
-        update_document_model_from_tab(tab);
+        schedule_doc_model_update(tab);
         gtk_widget_queue_draw(tab->pages_drawing);
         return;
     }
@@ -2399,7 +2427,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         if (tab == get_current_right_tab()) {
             sync_right_page_widget_from_tab(tab);
         }
-        update_document_model_from_tab(tab);
+        schedule_doc_model_update(tab);
         return;
     }
 
@@ -2471,7 +2499,7 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         sync_right_page_widget_from_tab(tab);
     }
 
-    update_document_model_from_tab(tab);
+    schedule_doc_model_update(tab);
 }
 
 static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *allocation, gpointer user_data) {
@@ -3181,6 +3209,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->scroll_offset = -1.0;
     tab->is_helper = (notebook == right_notebook);
     tab->zoom_scroll_source_id = 0;
+    tab->scroll_doc_debounce_id = 0;
 
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
