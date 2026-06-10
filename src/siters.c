@@ -2724,6 +2724,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
         int vp_w = allocation ? allocation->width : 200;
         GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
         gtk_adjustment_set_page_size(sadj, vp_w > 0 ? vp_w : 200);
+        gtk_adjustment_set_step_increment(sadj, vp_w > 0 ? vp_w * 0.1 : 20);
         gtk_adjustment_set_page_increment(sadj, vp_w * 0.9);
         double upper = gtk_adjustment_get_upper(sadj);
         if (upper < 1.0) upper = 1.0;
@@ -2864,11 +2865,13 @@ static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpoi
     show_h_scrollbar_temporarily(tab);
     GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
     double val = gtk_adjustment_get_value(adj);
-    double step = 40.0;
+    double step = gtk_adjustment_get_step_increment(adj);
+    if (step < 1.0) step = 40.0;
     if (event->direction == GDK_SCROLL_SMOOTH) {
         double dx, dy;
         gdk_event_get_scroll_deltas((GdkEvent*)event, &dx, &dy);
-        val += dx * step;
+        double delta = fabs(dx) >= fabs(dy) ? dx : dy;
+        val += delta * step;
     } else if (event->direction == GDK_SCROLL_RIGHT || event->direction == GDK_SCROLL_DOWN) {
         val += step;
     } else if (event->direction == GDK_SCROLL_LEFT || event->direction == GDK_SCROLL_UP) {
@@ -3146,11 +3149,11 @@ static void build_continuous_view(TabData *tab) {
         }
         if (total_w < 1.0) total_w = 1.0;
         if (max_h < 1.0) max_h = 1.0;
+        max_h *= 1.15;
         if (tab->h_scrollbar) {
             GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
             gtk_adjustment_set_lower(adj, 0.0);
             gtk_adjustment_set_upper(adj, total_w);
-            gtk_adjustment_set_step_increment(adj, 10.0);
         }
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
         gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(max_h));
