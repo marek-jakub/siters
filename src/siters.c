@@ -63,6 +63,7 @@ typedef struct TabDataStruct {
     double drag_scroll_y;       /* vadjustment value at drag start */
     double *cached_page_widths;  /* raw page widths from poppler_page_get_size */
     double *cached_page_heights; /* raw page heights from poppler_page_get_size */
+    double max_page_h;           /* tallest page height (scaled) for row view sizing */
 } TabData;
 
 typedef enum {
@@ -2722,6 +2723,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
        here to the full total_w BEFORE scroll_to_page runs below. */
     if (tab->layout_mode == 2 && tab->cached_page_widths && tab->n_pages > 0 && tab->h_scrollbar) {
         int vp_w = allocation ? allocation->width : 200;
+        int vp_h = allocation ? allocation->height : 200;
         GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
         gtk_adjustment_set_page_size(sadj, vp_w > 0 ? vp_w : 200);
         gtk_adjustment_set_step_increment(sadj, vp_w > 0 ? vp_w * 0.1 : 20);
@@ -2729,6 +2731,8 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
         double upper = gtk_adjustment_get_upper(sadj);
         if (upper < 1.0) upper = 1.0;
         gtk_adjustment_set_upper(sadj, upper);
+        double target_h = MAX(vp_h, tab->max_page_h);
+        gtk_widget_set_size_request(tab->pages_drawing, -1, (int)ceil(target_h));
     }
 
     if (tab->initial_scroll_pending) {
@@ -3045,12 +3049,14 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
             scroll_x = gtk_adjustment_get_value(sadj);
         }
+        GtkAdjustment *vadj_row = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+        double viewport_h = gtk_adjustment_get_page_size(vadj_row);
         double x = spacing;
         for (int i = 0; i < tab->n_pages; ++i) {
             double page_w = tab->cached_page_widths[i] * scale;
             double page_h = tab->cached_page_heights[i] * scale;
             double dev_x = x - scroll_x;
-            double off_y = (alloc.height - page_h) / 2.0;
+            double off_y = tab->max_page_h > viewport_h ? 0.0 : (alloc.height - page_h) / 2.0;
             if (dev_x + page_w > 0 && dev_x < alloc.width &&
                 off_y + page_h > 0 && off_y < alloc.height) {
                 PopplerPage *page = poppler_document_get_page(tab->doc, i);
@@ -3149,7 +3155,7 @@ static void build_continuous_view(TabData *tab) {
         }
         if (total_w < 1.0) total_w = 1.0;
         if (max_h < 1.0) max_h = 1.0;
-        max_h *= 1.15;
+        tab->max_page_h = max_h;
         if (tab->h_scrollbar) {
             GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
             gtk_adjustment_set_lower(adj, 0.0);
