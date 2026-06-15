@@ -64,6 +64,7 @@ typedef struct TabDataStruct {
     double *cached_page_widths;  /* raw page widths from poppler_page_get_size */
     double *cached_page_heights; /* raw page heights from poppler_page_get_size */
     double max_page_h;           /* tallest page height (scaled) for row view sizing */
+    cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
 } TabData;
 
 typedef enum {
@@ -231,6 +232,7 @@ static void load_file_into_tab(TabData *tab, const char *filename);
 static void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
 static void build_continuous_view(TabData *tab);
+static void invalidate_page_cache(TabData *tab);
 static void scroll_to_page(TabData *tab, int page);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
@@ -282,6 +284,8 @@ static void destroy_tab_data(gpointer data) {
         g_object_unref(tab->doc);
     }
     g_free(tab->current_file);
+    invalidate_page_cache(tab);
+    g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
     g_free(tab);
@@ -763,6 +767,9 @@ static double get_page_height_ppi(TabData *tab, int page_idx) {
 static void cache_page_dimensions(TabData *tab) {
     if (!tab || !tab->doc || tab->n_pages <= 0) {
         if (tab) {
+            invalidate_page_cache(tab);
+            g_free(tab->page_cache);
+            tab->page_cache = NULL;
             g_free(tab->cached_page_widths);
             g_free(tab->cached_page_heights);
             tab->cached_page_widths = NULL;
@@ -770,8 +777,11 @@ static void cache_page_dimensions(TabData *tab) {
         }
         return;
     }
+    invalidate_page_cache(tab);
+    g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
+    tab->page_cache = g_malloc0(sizeof(cairo_surface_t *) * tab->n_pages);
     tab->cached_page_widths = g_malloc(sizeof(double) * tab->n_pages);
     tab->cached_page_heights = g_malloc(sizeof(double) * tab->n_pages);
     for (int i = 0; i < tab->n_pages; ++i) {
@@ -783,6 +793,16 @@ static void cache_page_dimensions(TabData *tab) {
         }
         tab->cached_page_widths[i] = pw > 0 ? pw : 1.0;
         tab->cached_page_heights[i] = ph > 0 ? ph : 1.0;
+    }
+}
+
+static void invalidate_page_cache(TabData *tab) {
+    if (!tab || !tab->page_cache) return;
+    for (int i = 0; i < tab->n_pages; ++i) {
+        if (tab->page_cache[i]) {
+            cairo_surface_destroy(tab->page_cache[i]);
+            tab->page_cache[i] = NULL;
+        }
     }
 }
 
@@ -2903,6 +2923,10 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     double scale = get_ppi_scale(tab);
     if (tab->layout_mode == 0) {
         double y = spacing;
+        double dsx, dsy;
+        cairo_surface_get_device_scale(cairo_get_target(cr), &dsx, &dsy);
+        cairo_font_options_t *fo = cairo_font_options_create();
+        cairo_get_font_options(cr, fo);
         for (int i = 0; i < tab->n_pages; ++i) {
             double page_w = tab->cached_page_widths[i] * scale;
             double page_h = tab->cached_page_heights[i] * scale;
@@ -2920,37 +2944,50 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, off_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                /* render page to intermediate image surface to isolate from window */
-                double dsx, dsy;
-                cairo_font_options_t *fo = cairo_font_options_create();
-                cairo_get_font_options(cr, fo);
-                cairo_surface_get_device_scale(cairo_get_target(cr), &dsx, &dsy);
                 int iw = (int)(tab->cached_page_widths[i] * scale * dsx + 0.5);
                 int ih = (int)(tab->cached_page_heights[i] * scale * dsy + 0.5);
                 if (iw > 0 && ih > 0) {
-                    cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
-                    cairo_surface_set_device_scale(pimg, dsx, dsy);
-                    cairo_t *picr = cairo_create(pimg);
-                    cairo_set_font_options(picr, fo);
-                    cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
-                    cairo_scale(picr, scale, scale);
-                    poppler_page_render(page, picr);
-                    cairo_destroy(picr);
-                    cairo_set_source_surface(cr, pimg, off_x, off_y);
-                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                    cairo_paint(cr);
-                    cairo_surface_destroy(pimg);
+                    if (tab->page_cache[i]) {
+                        int cw = cairo_image_surface_get_width(tab->page_cache[i]);
+                        int ch = cairo_image_surface_get_height(tab->page_cache[i]);
+                        if (cw != iw || ch != ih) {
+                            cairo_surface_destroy(tab->page_cache[i]);
+                            tab->page_cache[i] = NULL;
+                        }
+                    }
+                    if (tab->page_cache[i]) {
+                        cairo_set_source_surface(cr, tab->page_cache[i], off_x, off_y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    } else {
+                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+                        cairo_surface_set_device_scale(pimg, dsx, dsy);
+                        cairo_t *picr = cairo_create(pimg);
+                        cairo_set_font_options(picr, fo);
+                        cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                        cairo_scale(picr, scale, scale);
+                        poppler_page_render(page, picr);
+                        cairo_destroy(picr);
+                        tab->page_cache[i] = pimg;
+                        cairo_set_source_surface(cr, tab->page_cache[i], off_x, off_y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    }
                 }
-                cairo_font_options_destroy(fo);
                 g_object_unref(page);
             }
 
             y += page_h + spacing;
         }
+        cairo_font_options_destroy(fo);
 
     } else if (tab->layout_mode == 1) {
         int n = tab->n_pages;
         double y = spacing;
+        double dsx2, dsy2;
+        cairo_surface_get_device_scale(cairo_get_target(cr), &dsx2, &dsy2);
+        cairo_font_options_t *fo2 = cairo_font_options_create();
+        cairo_get_font_options(cr, fo2);
         for (int i = 0; i < n; i += 2) {
             /* left page dims */
             double page_w1 = tab->cached_page_widths[i] * scale;
@@ -2975,12 +3012,6 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             double left_x = row_x;
             double right_x = left_x + page_w1 + spacing;
 
-            double dsx2, dsy2;
-            cairo_font_options_t *fo2 = cairo_font_options_create();
-            cairo_get_font_options(cr, fo2);
-            cairo_surface_get_device_scale(cairo_get_target(cr), &dsx2, &dsy2);
-            cairo_antialias_t aa2 = CAIRO_ANTIALIAS_BEST;
-
             /* draw left page if visible */
             if (page_h1 > 0 && !(y + page_h1 < clip_y1 || y > clip_y2)) {
                 PopplerPage *p1 = poppler_document_get_page(tab->doc, i);
@@ -2993,18 +3024,32 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     int iw1 = (int)(tab->cached_page_widths[i] * scale * dsx2 + 0.5);
                     int ih1 = (int)(tab->cached_page_heights[i] * scale * dsy2 + 0.5);
                     if (iw1 > 0 && ih1 > 0) {
-                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw1, ih1);
-                        cairo_surface_set_device_scale(pimg, dsx2, dsy2);
-                        cairo_t *picr = cairo_create(pimg);
-                        cairo_set_font_options(picr, fo2);
-                        cairo_set_antialias(picr, aa2);
-                        cairo_scale(picr, scale, scale);
-                        poppler_page_render(p1, picr);
-                        cairo_destroy(picr);
-                        cairo_set_source_surface(cr, pimg, left_x, y);
-                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                        cairo_paint(cr);
-                        cairo_surface_destroy(pimg);
+                        if (tab->page_cache[i]) {
+                            int cw = cairo_image_surface_get_width(tab->page_cache[i]);
+                            int ch = cairo_image_surface_get_height(tab->page_cache[i]);
+                            if (cw != iw1 || ch != ih1) {
+                                cairo_surface_destroy(tab->page_cache[i]);
+                                tab->page_cache[i] = NULL;
+                            }
+                        }
+                        if (tab->page_cache[i]) {
+                            cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                        } else {
+                            cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw1, ih1);
+                            cairo_surface_set_device_scale(pimg, dsx2, dsy2);
+                            cairo_t *picr = cairo_create(pimg);
+                            cairo_set_font_options(picr, fo2);
+                            cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                            cairo_scale(picr, scale, scale);
+                            poppler_page_render(p1, picr);
+                            cairo_destroy(picr);
+                            tab->page_cache[i] = pimg;
+                            cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                        }
                     }
                     g_object_unref(p1);
                 }
@@ -3022,27 +3067,40 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     int iw2 = (int)(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5);
                     int ih2 = (int)(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5);
                     if (iw2 > 0 && ih2 > 0) {
-                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw2, ih2);
-                        cairo_surface_set_device_scale(pimg, dsx2, dsy2);
-                        cairo_t *picr = cairo_create(pimg);
-                        cairo_set_font_options(picr, fo2);
-                        cairo_set_antialias(picr, aa2);
-                        cairo_scale(picr, scale, scale);
-                        poppler_page_render(p2, picr);
-                        cairo_destroy(picr);
-                        cairo_set_source_surface(cr, pimg, right_x, y);
-                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                        cairo_paint(cr);
-                        cairo_surface_destroy(pimg);
+                        if (tab->page_cache[i + 1]) {
+                            int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
+                            int ch = cairo_image_surface_get_height(tab->page_cache[i + 1]);
+                            if (cw != iw2 || ch != ih2) {
+                                cairo_surface_destroy(tab->page_cache[i + 1]);
+                                tab->page_cache[i + 1] = NULL;
+                            }
+                        }
+                        if (tab->page_cache[i + 1]) {
+                            cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                        } else {
+                            cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw2, ih2);
+                            cairo_surface_set_device_scale(pimg, dsx2, dsy2);
+                            cairo_t *picr = cairo_create(pimg);
+                            cairo_set_font_options(picr, fo2);
+                            cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                            cairo_scale(picr, scale, scale);
+                            poppler_page_render(p2, picr);
+                            cairo_destroy(picr);
+                            tab->page_cache[i + 1] = pimg;
+                            cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                        }
                     }
                     g_object_unref(p2);
                 }
             }
 
-            cairo_font_options_destroy(fo2);
-
             y += row_h + spacing;
         }
+        cairo_font_options_destroy(fo2);
     } else if (tab->layout_mode == 2) {
         double scroll_x = 0.0;
         if (tab->h_scrollbar) {
@@ -3051,6 +3109,10 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
         }
         GtkAdjustment *vadj_row = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
         double viewport_h = gtk_adjustment_get_page_size(vadj_row);
+        double dsxh, dsyh;
+        cairo_surface_get_device_scale(cairo_get_target(cr), &dsxh, &dsyh);
+        cairo_font_options_t *foh = cairo_font_options_create();
+        cairo_get_font_options(cr, foh);
         double x = spacing;
         for (int i = 0; i < tab->n_pages; ++i) {
             double page_w = tab->cached_page_widths[i] * scale;
@@ -3066,32 +3128,41 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, dev_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                /* render page to intermediate image surface */
-                double dsxh, dsyh;
-                cairo_font_options_t *foh = cairo_font_options_create();
-                cairo_get_font_options(cr, foh);
-                cairo_surface_get_device_scale(cairo_get_target(cr), &dsxh, &dsyh);
                 int iwh = (int)(tab->cached_page_widths[i] * scale * dsxh + 0.5);
                 int ihh = (int)(tab->cached_page_heights[i] * scale * dsyh + 0.5);
                 if (iwh > 0 && ihh > 0) {
-                    cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iwh, ihh);
-                    cairo_surface_set_device_scale(pimg, dsxh, dsyh);
-                    cairo_t *picr = cairo_create(pimg);
-                    cairo_set_font_options(picr, foh);
-                    cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
-                    cairo_scale(picr, scale, scale);
-                    poppler_page_render(page, picr);
-                    cairo_destroy(picr);
-                    cairo_set_source_surface(cr, pimg, dev_x, off_y);
-                    cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                    cairo_paint(cr);
-                    cairo_surface_destroy(pimg);
+                    if (tab->page_cache[i]) {
+                        int cw = cairo_image_surface_get_width(tab->page_cache[i]);
+                        int ch = cairo_image_surface_get_height(tab->page_cache[i]);
+                        if (cw != iwh || ch != ihh) {
+                            cairo_surface_destroy(tab->page_cache[i]);
+                            tab->page_cache[i] = NULL;
+                        }
+                    }
+                    if (tab->page_cache[i]) {
+                        cairo_set_source_surface(cr, tab->page_cache[i], dev_x, off_y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    } else {
+                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iwh, ihh);
+                        cairo_surface_set_device_scale(pimg, dsxh, dsyh);
+                        cairo_t *picr = cairo_create(pimg);
+                        cairo_set_font_options(picr, foh);
+                        cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                        cairo_scale(picr, scale, scale);
+                        poppler_page_render(page, picr);
+                        cairo_destroy(picr);
+                        tab->page_cache[i] = pimg;
+                        cairo_set_source_surface(cr, tab->page_cache[i], dev_x, off_y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    }
                 }
-                cairo_font_options_destroy(foh);
                 g_object_unref(page);
             }
             x += page_w + spacing;
         }
+        cairo_font_options_destroy(foh);
     }
 
     return FALSE;
@@ -3099,6 +3170,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
 static void build_continuous_view(TabData *tab) {
     if (!tab || !tab->cached_page_widths || !tab->pages_drawing) return;
+    invalidate_page_cache(tab);
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
     int page_width_px = tab->n_pages > 0 ? (int)ceil(tab->cached_page_widths[0] * scale) : 800;
