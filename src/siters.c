@@ -2921,6 +2921,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
+    int first_visible = -1, last_visible = -1;
     if (tab->layout_mode == 0) {
         double y = spacing;
         double dsx, dsy;
@@ -2973,6 +2974,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
                     }
+                    if (first_visible == -1) first_visible = i;
+                    last_visible = i;
                 }
                 g_object_unref(page);
             }
@@ -3050,6 +3053,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
                         }
+                        if (first_visible == -1) first_visible = i;
+                        last_visible = i;
                     }
                     g_object_unref(p1);
                 }
@@ -3093,6 +3098,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
                         }
+                        if (first_visible == -1) first_visible = i + 1;
+                        last_visible = i + 1;
                     }
                     g_object_unref(p2);
                 }
@@ -3157,12 +3164,25 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
                     }
+                    if (first_visible == -1) first_visible = i;
+                    last_visible = i;
                 }
                 g_object_unref(page);
             }
             x += page_w + spacing;
         }
         cairo_font_options_destroy(foh);
+    }
+
+    /* Prune cache: keep only pages within margin of the visible range */
+    if (first_visible >= 0 && last_visible >= 0) {
+        int margin = 4;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            if (tab->page_cache[i] && (i < first_visible - margin || i > last_visible + margin)) {
+                cairo_surface_destroy(tab->page_cache[i]);
+                tab->page_cache[i] = NULL;
+            }
+        }
     }
 
     return FALSE;
