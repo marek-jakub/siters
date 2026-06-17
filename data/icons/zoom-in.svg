@@ -1,0 +1,64 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+   width="28"
+   height="28"
+   viewBox="0 0 24 24"
+   fill="none"
+   stroke="#FFFFAD"
+   stroke-width="2"
+   stroke-linecap="round"
+   stroke-linejoin="round"
+   class="feather feather-zoom-in"
+   version="1.1"
+   id="svg75967"
+   sodipodi:docname="zoom-in.svg"
+   inkscape:version="1.2.2 (b0a8486541, 2022-12-01)"
+   xmlns:inkscape="http://www.inkscape.org/namespaces/inkscape"
+   xmlns:sodipodi="http://sodipodi.sourceforge.net/DTD/sodipodi-0.dtd"
+   xmlns="http://www.w3.org/2000/svg"
+   xmlns:svg="http://www.w3.org/2000/svg">
+  <defs
+     id="defs75971" />
+  <sodipodi:namedview
+     id="namedview75969"
+     pagecolor="#505050"
+     bordercolor="#eeeeee"
+     borderopacity="1"
+     inkscape:showpageshadow="0"
+     inkscape:pageopacity="0"
+     inkscape:pagecheckerboard="0"
+     inkscape:deskcolor="#505050"
+     showgrid="false"
+     inkscape:zoom="30.357143"
+     inkscape:cx="13.983529"
+     inkscape:cy="14"
+     inkscape:window-width="1920"
+     inkscape:window-height="1052"
+     inkscape:window-x="0"
+     inkscape:window-y="1440"
+     inkscape:window-maximized="1"
+     inkscape:current-layer="svg75967" />
+  <circle
+     cx="11"
+     cy="11"
+     r="8"
+     id="circle75959" />
+  <line
+     x1="21"
+     y1="21"
+     x2="16.65"
+     y2="16.65"
+     id="line75961" />
+  <line
+     x1="11"
+     y1="8"
+     x2="11"
+     y2="14"
+     id="line75963" />
+  <line
+     x1="8"
+     y1="11"
+     x2="14"
+     y2="11"
+     id="line75965" />
+</svg>

@@ -256,6 +256,121 @@ static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, g
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
 static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 
+/* Theme-aware icon color: dark theme uses yellow, light theme uses dark brown */
+static gboolean is_dark_theme = TRUE;
+
+/* Create a GtkImage from an SVG icon, recoloring it for the current theme.
+   The 'name' parameter is the stem of the SVG file (e.g. "zoom-in" for zoom-in.svg). */
+static GtkWidget* create_toolbar_icon(const char *name) {
+    char *path = g_strdup_printf(DATADIR "/data/icons/%s.svg", name);
+    gchar *svg_content;
+    gsize length;
+    if (!g_file_get_contents(path, &svg_content, &length, NULL)) {
+        g_free(path);
+        return gtk_image_new();
+    }
+    g_free(path);
+
+    const char *target_color = is_dark_theme ? "#FFFFAD" : "#141400";
+
+    /* Recolor all #XXXXXX values in the SVG to match the theme */
+    char *p = svg_content;
+    while ((p = strstr(p, "#FFFFAD")) != NULL) {
+        memcpy(p, target_color, 7);
+        p += 7;
+    }
+    p = svg_content;
+    while ((p = strstr(p, "#FFFFAD")) != NULL) {
+        memcpy(p, target_color, 7);
+        p += 7;
+    }
+
+    GBytes *bytes = g_bytes_new_take(svg_content, length);
+    GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream_at_scale(stream, 20, 20, TRUE, NULL, NULL);
+    g_object_unref(stream);
+    g_bytes_unref(bytes);
+
+    GtkWidget *image;
+    if (pixbuf) {
+        image = gtk_image_new_from_pixbuf(pixbuf);
+        g_object_unref(pixbuf);
+    } else {
+        image = gtk_image_new();
+    }
+    return image;
+}
+
+/* Refresh a single button's icon from its stored icon-name data.
+   Toggle buttons use icon-on/icon-off based on their current state. */
+static void recolor_toolbar_button(GtkWidget *btn) {
+    const char *icon_on = g_object_get_data(G_OBJECT(btn), "icon-on");
+    const char *icon_off = g_object_get_data(G_OBJECT(btn), "icon-off");
+    if (icon_on && icon_off && GTK_IS_TOGGLE_BUTTON(btn)) {
+        gboolean active = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(btn));
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon(active ? icon_on : icon_off));
+        return;
+    }
+    const char *icon_name = g_object_get_data(G_OBJECT(btn), "icon-name");
+    if (icon_name) {
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon(icon_name));
+    }
+}
+
+/* Recursively walk a container and recolor all buttons with icon data */
+static void recolor_toolbar_children(GtkWidget *parent) {
+    if (!parent) return;
+    if (GTK_IS_BUTTON(parent)) {
+        recolor_toolbar_button(parent);
+        return;
+    }
+    if (GTK_IS_CONTAINER(parent)) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(parent));
+        for (GList *iter = children; iter; iter = iter->next) {
+            recolor_toolbar_children(GTK_WIDGET(iter->data));
+        }
+        g_list_free(children);
+    }
+}
+
+/* Recolor all toolbar icons when the system theme changes */
+static void on_theme_changed(GObject *gobject, GParamSpec *pspec, gpointer user_data) {
+    (void)gobject;
+    (void)pspec;
+    (void)user_data;
+    gboolean prefer_dark = FALSE;
+    GtkSettings *settings = gtk_settings_get_default();
+    if (settings) {
+        g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+        gchar *theme_name = NULL;
+        g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
+        if (theme_name) {
+            gchar *lower = g_ascii_strdown(theme_name, -1);
+            if (strstr(lower, "dark") || strstr(lower, "black") ||
+                strstr(lower, "night") || strstr(lower, "nokto"))
+                prefer_dark = TRUE;
+            g_free(lower);
+            g_free(theme_name);
+        }
+    }
+    is_dark_theme = prefer_dark;
+
+    if (main_hbox) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(main_hbox));
+        for (GList *iter = children; iter; iter = iter->next) {
+            recolor_toolbar_children(GTK_WIDGET(iter->data));
+        }
+        g_list_free(children);
+    }
+    if (right_pane) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(right_pane));
+        for (GList *iter = children; iter; iter = iter->next) {
+            recolor_toolbar_children(GTK_WIDGET(iter->data));
+        }
+        g_list_free(children);
+    }
+}
+
 /* Save state on closing app */
 static void cancel_tab_restore(TabData *tab) {
     if (!tab || !tab->pending_restore) return;
@@ -408,6 +523,8 @@ void save_state(void) {
         json_builder_add_string_value(builder, sessions_model_get_tabbar_position(sessions_model));
         json_builder_set_member_name(builder, "tab_width");
         json_builder_add_int_value(builder, sessions_model_get_tab_width(sessions_model));
+        json_builder_set_member_name(builder, "theme");
+        json_builder_add_string_value(builder, sessions_model_get_theme(sessions_model));
     }
 
     if (last_open_dir) {
@@ -590,6 +707,9 @@ void load_state(void) {
         sessions_model_set_tabbar_position(sessions_model, pos);
         int tw = (int)json_object_get_int_member_with_default(win, "tab_width", 100);
         sessions_model_set_tab_width(sessions_model, tw);
+        /* Theme is auto-detected in create_main_window; always keep the model
+           in sync with auto-detection so create_toolbar_icon stays correct. */
+        sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
     }
 
     JsonObject *sessions_obj = json_object_get_object_member(root_obj, "sessions");
@@ -1439,24 +1559,20 @@ static void start_initial_scroll_restore(TabData *tab, int target_page, double t
 }
 
 static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
-    GtkImage *image = GTK_IMAGE(user_data);
-    if (gtk_toggle_button_get_active(button)) {
-        gtk_image_set_from_file(image, DATADIR "/data/icons/horiz-scroll-on.png");
-    } else {
-        gtk_image_set_from_file(image, DATADIR "/data/icons/horiz-scroll-off.png");
-    }
+    (void)button;
+    (void)user_data;
+    /* Icon handled statically — button will be repurposed in the future */
 }
 
 static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
-    GtkImage *image = GTK_IMAGE(user_data);
+    (void)user_data;
     gboolean active = gtk_toggle_button_get_active(button);
+    GtkWidget *btn = GTK_WIDGET(button);
     if (active) {
-        gtk_image_set_from_file(image, DATADIR "/data/icons/title-bar-on.png");
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("title-bar-on"));
         gtk_window_set_decorated(GTK_WINDOW(window), TRUE);
     } else {
-        gtk_image_set_from_file(image, DATADIR "/data/icons/title-bar-off.png");
-        // If window is maximized, need to unmaximize, remove decoration, then re-maximize
-        // to ensure it fills the screen properly
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("title-bar-off"));
         gboolean was_maximized = gtk_window_is_maximized(GTK_WINDOW(window));
         if (was_maximized) {
             gtk_window_unmaximize(GTK_WINDOW(window));
@@ -1471,11 +1587,12 @@ static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
 }
 
 static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
-    GtkImage *image = GTK_IMAGE(user_data);
+    (void)user_data;
     gboolean active = gtk_toggle_button_get_active(button);
+    GtkWidget *btn = GTK_WIDGET(button);
 
     if (active) {
-        gtk_image_set_from_file(image, DATADIR "/data/icons/sidebar-helper-on.png");
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("sidebar-helper-on"));
         if (right_pane) {
             gtk_widget_show_all(GTK_WIDGET(right_pane));
             set_right_notebook_session(current_selected_session ? current_selected_session : "Default");
@@ -1486,7 +1603,7 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
         if (current_selected_session) {
             save_open_tabs_for_session(current_selected_session);
         }
-        gtk_image_set_from_file(image, DATADIR "/data/icons/sidebar-helper-off.png");
+        gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("sidebar-helper-off"));
         if (right_pane) {
             gtk_widget_hide(GTK_WIDGET(right_pane));
         }
@@ -3843,6 +3960,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             g_free(t->cached_page_heights);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
+            invalidate_page_cache(t);
         }
     }
 
@@ -3913,6 +4031,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
             g_free(t->cached_page_heights);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
+            invalidate_page_cache(t);
         }
     }
 
@@ -4360,6 +4479,30 @@ GtkWidget* create_main_window(void) {
         }
     }
 
+    /* Auto-detect dark vs light theme: check both the prefer-dark setting
+       and the theme name for known dark-theme keywords. */
+    {
+        gboolean prefer_dark = FALSE;
+        GtkSettings *settings = gtk_settings_get_default();
+        if (settings) {
+            g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+            gchar *theme_name = NULL;
+            g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
+            if (theme_name) {
+                gchar *lower = g_ascii_strdown(theme_name, -1);
+                if (strstr(lower, "dark") || strstr(lower, "black") ||
+                    strstr(lower, "night") || strstr(lower, "nokto"))
+                    prefer_dark = TRUE;
+                g_free(lower);
+                g_free(theme_name);
+            }
+        }
+        is_dark_theme = prefer_dark;
+        sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+        g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(on_theme_changed), NULL);
+        g_signal_connect(settings, "notify::gtk-application-prefer-dark-theme", G_CALLBACK(on_theme_changed), NULL);
+    }
+
     g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
     g_signal_connect(window, "configure-event", G_CALLBACK(on_window_configure), NULL);
 
@@ -4580,27 +4723,30 @@ GtkWidget* create_main_window(void) {
 
     /* Buttons*/
     /* Sessions button */
-    GtkWidget *sessions_icon = gtk_image_new_from_file(DATADIR "/data/icons/sessions.png");
+    GtkWidget *sessions_icon = create_toolbar_icon("sessions");
     GtkWidget *sessions_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(sessions_btn), sessions_icon);
+    g_object_set_data_full(G_OBJECT(sessions_btn), "icon-name", g_strdup("sessions"), g_free);
     gtk_widget_set_tooltip_text(sessions_btn, "Sessions");
     atk_object_set_name(gtk_widget_get_accessible(sessions_btn), "Sessions");
     g_signal_connect(sessions_btn, "clicked", G_CALLBACK(on_sessions_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), sessions_btn, FALSE, FALSE, 1);
 
     /* Table of contents button */
-    GtkWidget *toc_icon = gtk_image_new_from_file(DATADIR "/data/icons/toc.png");
+    GtkWidget *toc_icon = create_toolbar_icon("toc");
     GtkWidget *toc_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(toc_btn), toc_icon);
+    g_object_set_data_full(G_OBJECT(toc_btn), "icon-name", g_strdup("toc"), g_free);
     gtk_widget_set_tooltip_text(toc_btn, "Table of contents");
     atk_object_set_name(gtk_widget_get_accessible(toc_btn), "Table of contents");
     g_signal_connect(toc_btn, "clicked", G_CALLBACK(on_toc_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), toc_btn, FALSE, FALSE, 1);
 
     /* Settings button */
-    GtkWidget *settings_icon = gtk_image_new_from_file(DATADIR "/data/icons/settings.png");
+    GtkWidget *settings_icon = create_toolbar_icon("settings");
     GtkWidget *settings_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(settings_btn), settings_icon);
+    g_object_set_data_full(G_OBJECT(settings_btn), "icon-name", g_strdup("settings"), g_free);
     gtk_widget_set_tooltip_text(settings_btn, "Settings");
     atk_object_set_name(gtk_widget_get_accessible(settings_btn), "Settings");
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), NULL);
@@ -4615,18 +4761,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), middle_box, TRUE, FALSE, 0);
 
     /* Open file button */
-    GtkWidget *open_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-plus.png");
+    GtkWidget *open_file_icon = create_toolbar_icon("file-plus");
     GtkWidget *open_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(open_file_btn), open_file_icon);
+    g_object_set_data_full(G_OBJECT(open_file_btn), "icon-name", g_strdup("file-plus"), g_free);
     gtk_widget_set_tooltip_text(open_file_btn, "Open file");
     atk_object_set_name(gtk_widget_get_accessible(open_file_btn), "Open file");
     g_signal_connect(open_file_btn, "clicked", G_CALLBACK(on_open_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), open_file_btn, FALSE, FALSE, 1);
 
     /* Close file button*/
-    GtkWidget *close_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-minus.png");
+    GtkWidget *close_file_icon = create_toolbar_icon("file-minus");
     GtkWidget *close_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(close_file_btn), close_file_icon);
+    g_object_set_data_full(G_OBJECT(close_file_btn), "icon-name", g_strdup("file-minus"), g_free);
     gtk_widget_set_tooltip_text(close_file_btn, "Close file");
     atk_object_set_name(gtk_widget_get_accessible(close_file_btn), "Close file");
     g_signal_connect(close_file_btn, "clicked", G_CALLBACK(on_close_file_clicked), NULL);
@@ -4637,18 +4785,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_b, FALSE, FALSE, 5);
 
     /* Page up button*/
-    GtkWidget *page_up_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-up.png");
+    GtkWidget *page_up_icon = create_toolbar_icon("page-up");
     GtkWidget *page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_up_btn), page_up_icon);
+    g_object_set_data_full(G_OBJECT(page_up_btn), "icon-name", g_strdup("page-up"), g_free);
     gtk_widget_set_tooltip_text(page_up_btn, "Page up");
     atk_object_set_name(gtk_widget_get_accessible(page_up_btn), "Page backward");
     g_signal_connect(page_up_btn, "clicked", G_CALLBACK(on_page_up_left), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), page_up_btn, FALSE, FALSE, 1);
 
     /* Page down button*/
-    GtkWidget *page_down_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-down.png");
+    GtkWidget *page_down_icon = create_toolbar_icon("page-down");
     GtkWidget *page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_down_btn), page_down_icon);
+    g_object_set_data_full(G_OBJECT(page_down_btn), "icon-name", g_strdup("page-down"), g_free);
     gtk_widget_set_tooltip_text(page_down_btn, "Page down");
     atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page forward");
     g_signal_connect(page_down_btn, "clicked", G_CALLBACK(on_page_down_left), NULL);
@@ -4679,18 +4829,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_c, FALSE, FALSE, 5);
 
     /* Zoom in button*/
-    GtkWidget *zoom_in_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-in.png");
+    GtkWidget *zoom_in_icon = create_toolbar_icon("zoom-in");
     GtkWidget *zoom_in_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(zoom_in_btn), zoom_in_icon);
+    g_object_set_data_full(G_OBJECT(zoom_in_btn), "icon-name", g_strdup("zoom-in"), g_free);
     gtk_widget_set_tooltip_text(zoom_in_btn, "Zoom in");
     atk_object_set_name(gtk_widget_get_accessible(zoom_in_btn), "Zoom in");
     gtk_box_pack_start(GTK_BOX(middle_box), zoom_in_btn, FALSE, FALSE, 1);
     g_signal_connect(G_OBJECT(zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_left), NULL);
 
     /* Zoom out button*/
-    GtkWidget *zoom_out_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-out.png");
+    GtkWidget *zoom_out_icon = create_toolbar_icon("zoom-out");
     GtkWidget *zoom_out_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(zoom_out_btn), zoom_out_icon);
+    g_object_set_data_full(G_OBJECT(zoom_out_btn), "icon-name", g_strdup("zoom-out"), g_free);
     gtk_widget_set_tooltip_text(zoom_out_btn, "Zoom out");
     atk_object_set_name(gtk_widget_get_accessible(zoom_out_btn), "Zoom out");
     gtk_box_pack_start(GTK_BOX(middle_box), zoom_out_btn, FALSE, FALSE, 1);
@@ -4701,10 +4853,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_d, FALSE, FALSE, 5);
 
     /* Column view button*/
-    GtkWidget *column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
+    GtkWidget *column_view_icon = create_toolbar_icon("column");
     left_column_btn = gtk_radio_button_new(NULL);
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_column_btn), column_view_icon);
+    g_object_set_data_full(G_OBJECT(left_column_btn), "icon-name", g_strdup("column"), g_free);
     gtk_widget_set_tooltip_text(left_column_btn, "Page column");
     atk_object_set_name(gtk_widget_get_accessible(left_column_btn), "Page column");
     g_object_set_data(G_OBJECT(left_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
@@ -4712,10 +4865,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_column_btn, FALSE, FALSE, 1);
 
     /* Double column view button*/
-    GtkWidget *double_column_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
+    GtkWidget *double_column_view_icon = create_toolbar_icon("double-column");
     left_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_double_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_double_column_btn), double_column_view_icon);
+    g_object_set_data_full(G_OBJECT(left_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
     gtk_widget_set_tooltip_text(left_double_column_btn, "Page double column");
     atk_object_set_name(gtk_widget_get_accessible(left_double_column_btn), "Page double column");
     g_object_set_data(G_OBJECT(left_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
@@ -4723,10 +4877,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_double_column_btn, FALSE, FALSE, 1);
 
     /* Row view button*/
-    GtkWidget *row_view_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
+    GtkWidget *row_view_icon = create_toolbar_icon("row");
     left_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_row_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(left_row_btn), row_view_icon);
+    g_object_set_data_full(G_OBJECT(left_row_btn), "icon-name", g_strdup("row"), g_free);
     gtk_widget_set_tooltip_text(left_row_btn, "Page row");
     atk_object_set_name(gtk_widget_get_accessible(left_row_btn), "Page row");
     g_object_set_data(G_OBJECT(left_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
@@ -4734,13 +4889,14 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), left_row_btn, FALSE, FALSE, 1);
 
     /* Horizontal scroll toggle button*/
-    GtkWidget *horiz_scroll_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/horiz-scroll-off.png");
+    GtkWidget *horiz_scroll_toggle_icon = create_toolbar_icon("file");
     GtkWidget *horiz_scroll_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(horiz_scroll_toggle_btn), horiz_scroll_toggle_icon);
+    g_object_set_data_full(G_OBJECT(horiz_scroll_toggle_btn), "icon-name", g_strdup("file"), g_free);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(horiz_scroll_toggle_btn), FALSE);
     gtk_widget_set_tooltip_text(horiz_scroll_toggle_btn, "Toggle horizontal scroll");
     atk_object_set_name(gtk_widget_get_accessible(horiz_scroll_toggle_btn), "Toggle horizontal scroll");
-    g_signal_connect(horiz_scroll_toggle_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), horiz_scroll_toggle_icon);
+    g_signal_connect(horiz_scroll_toggle_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), horiz_scroll_toggle_btn, FALSE, FALSE, 1);
 
     /* Separator */
@@ -4748,23 +4904,27 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), separator_e, FALSE, FALSE, 5);
 
     /* Title bar toggle button*/
-    GtkWidget *title_bar_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/title-bar-on.png");
+    GtkWidget *title_bar_toggle_icon = create_toolbar_icon("title-bar-on");
     GtkWidget *title_bar_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(title_bar_toggle_btn), title_bar_toggle_icon);
+    g_object_set_data_full(G_OBJECT(title_bar_toggle_btn), "icon-on", g_strdup("title-bar-on"), g_free);
+    g_object_set_data_full(G_OBJECT(title_bar_toggle_btn), "icon-off", g_strdup("title-bar-off"), g_free);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(title_bar_toggle_btn), TRUE);
     gtk_widget_set_tooltip_text(title_bar_toggle_btn, "Toggle title bar visibility");
     atk_object_set_name(gtk_widget_get_accessible(title_bar_toggle_btn), "Toggle title bar visibility");
-    g_signal_connect(title_bar_toggle_btn, "toggled", G_CALLBACK(on_title_bar_toggle), title_bar_toggle_icon);
+    g_signal_connect(title_bar_toggle_btn, "toggled", G_CALLBACK(on_title_bar_toggle), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), title_bar_toggle_btn, FALSE, FALSE, 1);
 
     /* Helpers toggle button*/
-    GtkWidget *helper_toggle_icon = gtk_image_new_from_file(DATADIR "/data/icons/sidebar-helper-off.png");
+    GtkWidget *helper_toggle_icon = create_toolbar_icon("sidebar-helper-off");
     GtkWidget *helper_toggle_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(helper_toggle_btn), helper_toggle_icon);
+    g_object_set_data_full(G_OBJECT(helper_toggle_btn), "icon-on", g_strdup("sidebar-helper-on"), g_free);
+    g_object_set_data_full(G_OBJECT(helper_toggle_btn), "icon-off", g_strdup("sidebar-helper-off"), g_free);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(helper_toggle_btn), FALSE);
     gtk_widget_set_tooltip_text(helper_toggle_btn, "Helper files");
     atk_object_set_name(gtk_widget_get_accessible(helper_toggle_btn), "Helper files");
-    g_signal_connect(helper_toggle_btn, "toggled", G_CALLBACK(on_helper_toggle), helper_toggle_icon);
+    g_signal_connect(helper_toggle_btn, "toggled", G_CALLBACK(on_helper_toggle), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), helper_toggle_btn, FALSE, FALSE, 1);
 
     /* Separator */
@@ -4772,27 +4932,30 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(toolbar), separator_f, FALSE, FALSE, 5);
 
     /* Close button*/
-    GtkWidget *close_icon = gtk_image_new_from_file(DATADIR "/data/icons/plug.png");
+    GtkWidget *close_icon = create_toolbar_icon("plug");
     GtkWidget *close_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(close_btn), close_icon);
+    g_object_set_data_full(G_OBJECT(close_btn), "icon-name", g_strdup("plug"), g_free);
     gtk_widget_set_tooltip_text(close_btn, "Close");
     atk_object_set_name(gtk_widget_get_accessible(close_btn), "Close");
     g_signal_connect(close_btn, "clicked", G_CALLBACK(on_close_clicked), NULL);
     gtk_box_pack_end(GTK_BOX(toolbar), close_btn, FALSE, FALSE, 1);
 
     /* Maximize button*/
-    GtkWidget *maximize_icon = gtk_image_new_from_file(DATADIR "/data/icons/maximize-2.png");
+    GtkWidget *maximize_icon = create_toolbar_icon("maximize-2");
     GtkWidget *maximize_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(maximize_btn), maximize_icon);
+    g_object_set_data_full(G_OBJECT(maximize_btn), "icon-name", g_strdup("maximize-2"), g_free);
     gtk_widget_set_tooltip_text(maximize_btn, "Maximize");
     atk_object_set_name(gtk_widget_get_accessible(maximize_btn), "Maximize");
     g_signal_connect(maximize_btn, "clicked", G_CALLBACK(on_maximize_clicked), window);
     gtk_box_pack_end(GTK_BOX(toolbar), maximize_btn, FALSE, FALSE, 1);
 
     /* Minimize button*/
-    GtkWidget *minimize_icon = gtk_image_new_from_file(DATADIR "/data/icons/minimize-2.png");
+    GtkWidget *minimize_icon = create_toolbar_icon("minimize-2");
     GtkWidget *minimize_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(minimize_btn), minimize_icon);
+    g_object_set_data_full(G_OBJECT(minimize_btn), "icon-name", g_strdup("minimize-2"), g_free);
     gtk_widget_set_tooltip_text(minimize_btn, "Minimize");
     atk_object_set_name(gtk_widget_get_accessible(minimize_btn), "Minimize");
     g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
@@ -4900,18 +5063,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_toolbar), right_middle_box, TRUE, FALSE, 0);
 
     /* Right toolbar buttons - Open file */
-    GtkWidget *right_open_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-plus.png");
+    GtkWidget *right_open_file_icon = create_toolbar_icon("file-plus");
     GtkWidget *right_open_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_open_file_btn), right_open_file_icon);
+    g_object_set_data_full(G_OBJECT(right_open_file_btn), "icon-name", g_strdup("file-plus"), g_free);
     gtk_widget_set_tooltip_text(right_open_file_btn, "Open file");
     atk_object_set_name(gtk_widget_get_accessible(right_open_file_btn), "Open file");
     g_signal_connect(right_open_file_btn, "clicked", G_CALLBACK(on_open_helper_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_open_file_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Close file */
-    GtkWidget *right_close_file_icon = gtk_image_new_from_file(DATADIR "/data/icons/file-minus.png");
+    GtkWidget *right_close_file_icon = create_toolbar_icon("file-minus");
     GtkWidget *right_close_file_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_close_file_btn), right_close_file_icon);
+    g_object_set_data_full(G_OBJECT(right_close_file_btn), "icon-name", g_strdup("file-minus"), g_free);
     gtk_widget_set_tooltip_text(right_close_file_btn, "Close file");
     atk_object_set_name(gtk_widget_get_accessible(right_close_file_btn), "Close file");
     g_signal_connect(right_close_file_btn, "clicked", G_CALLBACK(on_close_helper_file_clicked), NULL);
@@ -4922,18 +5087,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_a, FALSE, FALSE, 5);
 
     /* Right toolbar - Page up */
-    GtkWidget *right_page_up_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-up.png");
+    GtkWidget *right_page_up_icon = create_toolbar_icon("page-up");
     GtkWidget *right_page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_up_btn), right_page_up_icon);
+    g_object_set_data_full(G_OBJECT(right_page_up_btn), "icon-name", g_strdup("page-up"), g_free);
     gtk_widget_set_tooltip_text(right_page_up_btn, "Page up");
     atk_object_set_name(gtk_widget_get_accessible(right_page_up_btn), "Page backward");
     g_signal_connect(right_page_up_btn, "clicked", G_CALLBACK(on_page_up_right), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_up_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page down */
-    GtkWidget *right_page_down_icon = gtk_image_new_from_file(DATADIR "/data/icons/page-down.png");
+    GtkWidget *right_page_down_icon = create_toolbar_icon("page-down");
     GtkWidget *right_page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_down_btn), right_page_down_icon);
+    g_object_set_data_full(G_OBJECT(right_page_down_btn), "icon-name", g_strdup("page-down"), g_free);
     gtk_widget_set_tooltip_text(right_page_down_btn, "Page down");
     atk_object_set_name(gtk_widget_get_accessible(right_page_down_btn), "Page forward");
     g_signal_connect(right_page_down_btn, "clicked", G_CALLBACK(on_page_down_right), NULL);
@@ -4944,18 +5111,20 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_b, FALSE, FALSE, 5);
 
     /* Right toolbar - Zoom in */
-    GtkWidget *right_zoom_in_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-in.png");
+    GtkWidget *right_zoom_in_icon = create_toolbar_icon("zoom-in");
     GtkWidget *right_zoom_in_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_zoom_in_btn), right_zoom_in_icon);
+    g_object_set_data_full(G_OBJECT(right_zoom_in_btn), "icon-name", g_strdup("zoom-in"), g_free);
     gtk_widget_set_tooltip_text(right_zoom_in_btn, "Zoom in");
     atk_object_set_name(gtk_widget_get_accessible(right_zoom_in_btn), "Zoom in");
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_zoom_in_btn, FALSE, FALSE, 1);
     g_signal_connect(G_OBJECT(right_zoom_in_btn), "clicked", G_CALLBACK(on_zoom_in_right), NULL);
 
     /* Right toolbar - Zoom out */
-    GtkWidget *right_zoom_out_icon = gtk_image_new_from_file(DATADIR "/data/icons/zoom-out.png");
+    GtkWidget *right_zoom_out_icon = create_toolbar_icon("zoom-out");
     GtkWidget *right_zoom_out_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_zoom_out_btn), right_zoom_out_icon);
+    g_object_set_data_full(G_OBJECT(right_zoom_out_btn), "icon-name", g_strdup("zoom-out"), g_free);
     gtk_widget_set_tooltip_text(right_zoom_out_btn, "Zoom out");
     atk_object_set_name(gtk_widget_get_accessible(right_zoom_out_btn), "Zoom out");
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_zoom_out_btn, FALSE, FALSE, 1);
@@ -4966,10 +5135,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_c, FALSE, FALSE, 5);
 
     /* Right toolbar - Page column */
-    GtkWidget *right_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/column.png");
+    GtkWidget *right_column_icon = create_toolbar_icon("column");
     right_column_btn = gtk_radio_button_new(NULL);
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_column_btn), right_column_icon);
+    g_object_set_data_full(G_OBJECT(right_column_btn), "icon-name", g_strdup("column"), g_free);
     gtk_widget_set_tooltip_text(right_column_btn, "Page column");
     atk_object_set_name(gtk_widget_get_accessible(right_column_btn), "Page column");
     g_object_set_data(G_OBJECT(right_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
@@ -4977,10 +5147,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page double column */
-    GtkWidget *right_double_column_icon = gtk_image_new_from_file(DATADIR "/data/icons/double-column.png");
+    GtkWidget *right_double_column_icon = create_toolbar_icon("double-column");
     right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_double_column_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_double_column_btn), right_double_column_icon);
+    g_object_set_data_full(G_OBJECT(right_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
     gtk_widget_set_tooltip_text(right_double_column_btn, "Page double column");
     atk_object_set_name(gtk_widget_get_accessible(right_double_column_btn), "Page double column");
     g_object_set_data(G_OBJECT(right_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
@@ -4988,10 +5159,11 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_double_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page row */
-    GtkWidget *right_row_icon = gtk_image_new_from_file(DATADIR "/data/icons/row.png");
+    GtkWidget *right_row_icon = create_toolbar_icon("row");
     right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
     gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_row_btn), FALSE);
     gtk_button_set_image(GTK_BUTTON(right_row_btn), right_row_icon);
+    g_object_set_data_full(G_OBJECT(right_row_btn), "icon-name", g_strdup("row"), g_free);
     gtk_widget_set_tooltip_text(right_row_btn, "Page row");
     atk_object_set_name(gtk_widget_get_accessible(right_row_btn), "Page row");
     g_object_set_data(G_OBJECT(right_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
@@ -5003,13 +5175,14 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_d, FALSE, FALSE, 5);
 
     /* Right toolbar - Horizontal scroll toggle */
-    GtkWidget *right_horiz_scroll_icon = gtk_image_new_from_file(DATADIR "/data/icons/horiz-scroll-off.png");
+    GtkWidget *right_horiz_scroll_icon = create_toolbar_icon("file");
     GtkWidget *right_horiz_scroll_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(right_horiz_scroll_btn), right_horiz_scroll_icon);
+    g_object_set_data_full(G_OBJECT(right_horiz_scroll_btn), "icon-name", g_strdup("file"), g_free);
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_horiz_scroll_btn), FALSE);
     gtk_widget_set_tooltip_text(right_horiz_scroll_btn, "Toggle horizontal scroll");
     atk_object_set_name(gtk_widget_get_accessible(right_horiz_scroll_btn), "Toggle horizontal scroll");
-    g_signal_connect(right_horiz_scroll_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), right_horiz_scroll_icon);
+    g_signal_connect(right_horiz_scroll_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_horiz_scroll_btn, FALSE, FALSE, 1);
 
     return window;
