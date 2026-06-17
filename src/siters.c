@@ -280,7 +280,7 @@ static GtkWidget* create_toolbar_icon(const char *name) {
         p += 7;
     }
     p = svg_content;
-    while ((p = strstr(p, "#FFFFAD")) != NULL) {
+    while ((p = strstr(p, "#ffffad")) != NULL) {
         memcpy(p, target_color, 7);
         p += 7;
     }
