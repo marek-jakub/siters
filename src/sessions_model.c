@@ -14,6 +14,7 @@ sessions_model_t* sessions_model_new() {
     model->last_opened_directory = NULL;
     model->theme = g_strdup("light"); // default
     model->tabbar_position = g_strdup("top"); // default
+    model->keep_dark = FALSE; // default
     return model;
 }
 
@@ -105,4 +106,12 @@ const char* sessions_model_get_tabbar_position(sessions_model_t* model) {
 void sessions_model_set_tabbar_position(sessions_model_t* model, const char* position) {
     g_free(model->tabbar_position);
     model->tabbar_position = g_strdup(position);
+}
+
+gboolean sessions_model_get_keep_dark(sessions_model_t* model) {
+    return model->keep_dark;
+}
+
+void sessions_model_set_keep_dark(sessions_model_t* model, gboolean keep) {
+    model->keep_dark = keep;
 }

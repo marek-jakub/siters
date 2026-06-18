@@ -249,6 +249,9 @@ static session_model_t *get_current_session_model(void);
 static void apply_page_color_to_notebook(GtkWidget *notebook, const char *color_str);
 static void on_left_color_set(GtkColorButton *btn, gpointer user_data);
 static void on_right_color_set(GtkColorButton *btn, gpointer user_data);
+static gboolean detect_system_dark_theme(void);
+static void apply_dark_css(gboolean apply);
+static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -258,6 +261,32 @@ static char* make_document_key(const char *session_name, const char *uri, gboole
 
 /* Theme-aware icon color: dark theme uses yellow, light theme uses dark brown */
 static gboolean is_dark_theme = TRUE;
+
+/* User override to force dark theme regardless of system */
+static gboolean keep_dark_theme = FALSE;
+static GtkWidget *keep_dark_check = NULL;
+static GtkCssProvider *dark_css_provider = NULL;
+
+/* Detect whether the system theme is dark by checking gtk-application-prefer-dark-theme
+   and gtk-theme-name for keywords. */
+static gboolean detect_system_dark_theme(void) {
+    gboolean prefer_dark = FALSE;
+    GtkSettings *settings = gtk_settings_get_default();
+    if (settings) {
+        g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+        gchar *theme_name = NULL;
+        g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
+        if (theme_name) {
+            gchar *lower = g_ascii_strdown(theme_name, -1);
+            if (strstr(lower, "dark") || strstr(lower, "black") ||
+                strstr(lower, "night") || strstr(lower, "nokto"))
+                prefer_dark = TRUE;
+            g_free(lower);
+            g_free(theme_name);
+        }
+    }
+    return prefer_dark;
+}
 
 /* Create a GtkImage from an SVG icon, recoloring it for the current theme.
    The 'name' parameter is the stem of the SVG file (e.g. "zoom-in" for zoom-in.svg). */
@@ -333,28 +362,8 @@ static void recolor_toolbar_children(GtkWidget *parent) {
     }
 }
 
-/* Recolor all toolbar icons when the system theme changes */
-static void on_theme_changed(GObject *gobject, GParamSpec *pspec, gpointer user_data) {
-    (void)gobject;
-    (void)pspec;
-    (void)user_data;
-    gboolean prefer_dark = FALSE;
-    GtkSettings *settings = gtk_settings_get_default();
-    if (settings) {
-        g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
-        gchar *theme_name = NULL;
-        g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
-        if (theme_name) {
-            gchar *lower = g_ascii_strdown(theme_name, -1);
-            if (strstr(lower, "dark") || strstr(lower, "black") ||
-                strstr(lower, "night") || strstr(lower, "nokto"))
-                prefer_dark = TRUE;
-            g_free(lower);
-            g_free(theme_name);
-        }
-    }
-    is_dark_theme = prefer_dark;
-
+/* Recolor all toolbar icons */
+static void recolor_all_toolbars(void) {
     if (main_hbox) {
         GList *children = gtk_container_get_children(GTK_CONTAINER(main_hbox));
         for (GList *iter = children; iter; iter = iter->next) {
@@ -368,6 +377,77 @@ static void on_theme_changed(GObject *gobject, GParamSpec *pspec, gpointer user_
             recolor_toolbar_children(GTK_WIDGET(iter->data));
         }
         g_list_free(children);
+    }
+}
+
+/* Recolor all toolbar icons when the system theme changes.
+   When keep_dark_theme is active, the CSS provider is the sole mechanism
+   for dark widget styling — no GTK settings are touched. */
+static void on_theme_changed(GObject *gobject, GParamSpec *pspec, gpointer user_data) {
+    (void)gobject;
+    (void)pspec;
+    (void)user_data;
+    if (keep_dark_theme) {
+        is_dark_theme = TRUE;
+        apply_dark_css(TRUE);
+    } else {
+        apply_dark_css(FALSE);
+        is_dark_theme = detect_system_dark_theme();
+        if (sessions_model)
+            sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+    }
+    recolor_all_toolbars();
+}
+
+/* Dark CSS theme applied via GtkCssProvider when keep_dark_theme is active.
+   This overrides GTK widget colors to dark even when the system theme is light,
+   working around the limitation of gtk-theme-name:dark and prefer-dark-theme
+   not being reliably re-applied on system theme changes. */
+static void apply_dark_css(gboolean apply) {
+    GdkScreen *screen = gdk_screen_get_default();
+    if (!screen) return;
+    if (apply) {
+        if (!dark_css_provider) {
+            dark_css_provider = gtk_css_provider_new();
+            const char *css =
+                "window, window.background, box, notebook, scrolledwindow,\n"
+                "menubar, menu, .sidebar { background: #2e2e2e; }\n"
+                "menubar, menu { color: #ffffff; }\n"
+                "label { color: #ffffff; }\n"
+                "button, combobox button, spinbutton button {\n"
+                "    background: #3c3c3c; border: 1px solid #2F2F34;\n"
+                "    color: #ffffff;\n"
+                "}\n"
+                "button:hover, combobox button:hover, spinbutton button:hover {\n"
+                "    background: #4a4a4a;\n"
+                "}\n"
+                "button:checked {\n"
+                "    background: #505050; border-color: #454655;\n"
+                "}\n"
+                "entry, spinbutton, spinbutton entry, treeview, treeview.view,\n"
+                "drawingarea { background: #1e1e1e; color: #ffffff; }\n"
+                "entry { border: 1px solid #2F2F34; }\n"
+                "treeview:selected, treeview.view:selected {\n"
+                "    background: #3584e4;\n"
+                "}\n"
+                "notebook > header { background: #353535; }\n"
+                "notebook tab { background: #353535; color: #9a9a9a; }\n"
+                "notebook tab:checked { background: #2e2e2e; color: #ffffff; }\n"
+                "scrollbar { background: #2e2e2e; }\n"
+                "scrollbar slider { background: #2F2F34; }\n"
+                "paned > separator, separator { background: #2F2F34; }\n"
+                "menu menuitem:hover { background: #3584e4; }\n"
+                "dialog .background { background: #2e2e2e; }\n";
+            gtk_css_provider_load_from_data(dark_css_provider, css, -1, NULL);
+        }
+        gtk_style_context_add_provider_for_screen(screen,
+            GTK_STYLE_PROVIDER(dark_css_provider),
+            GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
+    } else {
+        if (dark_css_provider) {
+            gtk_style_context_remove_provider_for_screen(screen,
+                GTK_STYLE_PROVIDER(dark_css_provider));
+        }
     }
 }
 
@@ -525,6 +605,8 @@ void save_state(void) {
         json_builder_add_int_value(builder, sessions_model_get_tab_width(sessions_model));
         json_builder_set_member_name(builder, "theme");
         json_builder_add_string_value(builder, sessions_model_get_theme(sessions_model));
+        json_builder_set_member_name(builder, "keep_dark");
+        json_builder_add_boolean_value(builder, sessions_model_get_keep_dark(sessions_model));
     }
 
     if (last_open_dir) {
@@ -710,6 +792,22 @@ void load_state(void) {
         /* Theme is auto-detected in create_main_window; always keep the model
            in sync with auto-detection so create_toolbar_icon stays correct. */
         sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+
+        /* Restore keep_dark override */
+        gboolean saved_keep = json_object_get_boolean_member_with_default(win, "keep_dark", FALSE);
+        sessions_model_set_keep_dark(sessions_model, saved_keep);
+        keep_dark_theme = saved_keep;
+        if (keep_dark_check) {
+            g_signal_handlers_block_by_func(keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(keep_dark_check), saved_keep);
+            g_signal_handlers_unblock_by_func(keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
+        }
+        if (saved_keep) {
+            is_dark_theme = TRUE;
+            sessions_model_set_theme(sessions_model, "dark");
+            apply_dark_css(TRUE);
+            recolor_all_toolbars();
+        }
     }
 
     JsonObject *sessions_obj = json_object_get_object_member(root_obj, "sessions");
@@ -2396,6 +2494,22 @@ static void on_tab_width_spin_changed(GtkSpinButton *spin, gpointer user_data) {
     int w = (int)gtk_spin_button_get_value(spin);
     sessions_model_set_tab_width(sessions_model, w);
     apply_tab_width(w);
+    save_state();
+}
+
+static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+    keep_dark_theme = gtk_toggle_button_get_active(btn);
+    if (keep_dark_theme) {
+        is_dark_theme = TRUE;
+        apply_dark_css(TRUE);
+    } else {
+        apply_dark_css(FALSE);
+        is_dark_theme = detect_system_dark_theme();
+    }
+    recolor_all_toolbars();
+    if (sessions_model)
+        sessions_model_set_keep_dark(sessions_model, keep_dark_theme);
     save_state();
 }
 
@@ -4482,22 +4596,8 @@ GtkWidget* create_main_window(void) {
     /* Auto-detect dark vs light theme: check both the prefer-dark setting
        and the theme name for known dark-theme keywords. */
     {
-        gboolean prefer_dark = FALSE;
         GtkSettings *settings = gtk_settings_get_default();
-        if (settings) {
-            g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
-            gchar *theme_name = NULL;
-            g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
-            if (theme_name) {
-                gchar *lower = g_ascii_strdown(theme_name, -1);
-                if (strstr(lower, "dark") || strstr(lower, "black") ||
-                    strstr(lower, "night") || strstr(lower, "nokto"))
-                    prefer_dark = TRUE;
-                g_free(lower);
-                g_free(theme_name);
-            }
-        }
-        is_dark_theme = prefer_dark;
+        is_dark_theme = detect_system_dark_theme();
         sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
         g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(on_theme_changed), NULL);
         g_signal_connect(settings, "notify::gtk-application-prefer-dark-theme", G_CALLBACK(on_theme_changed), NULL);
@@ -4713,6 +4813,11 @@ GtkWidget* create_main_window(void) {
     right_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
     gtk_box_pack_start(GTK_BOX(settings_container), right_color_btn, FALSE, FALSE, 0);
     g_signal_connect(right_color_btn, "color-set", G_CALLBACK(on_right_color_set), NULL);
+
+    /* Keep dark theme toggle */
+    keep_dark_check = gtk_check_button_new_with_label("Keep dark theme");
+    gtk_box_pack_start(GTK_BOX(settings_container), keep_dark_check, FALSE, FALSE, 0);
+    g_signal_connect(keep_dark_check, "toggled", G_CALLBACK(on_keep_dark_toggled), NULL);
 
     gtk_box_pack_start(GTK_BOX(sidebar), settings_container, TRUE, TRUE, 0);
     gtk_widget_hide(settings_container);

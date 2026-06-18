@@ -10,6 +10,7 @@ typedef struct {
     char *last_opened_directory; // Path to the last opened directory
     char *theme;                 // Theme: "dark" or "light"
     char *tabbar_position;       // Tab bar position: "left", "top", "right"
+    gboolean keep_dark;          // Force dark theme override
 } sessions_model_t;
 
 // Constructor and destructor
@@ -23,6 +24,7 @@ int sessions_model_get_tab_width(sessions_model_t* model);
 const char* sessions_model_get_last_opened_directory(sessions_model_t* model);
 const char* sessions_model_get_theme(sessions_model_t* model);
 const char* sessions_model_get_tabbar_position(sessions_model_t* model);
+gboolean sessions_model_get_keep_dark(sessions_model_t* model);
 
 // Setters
 void sessions_model_set_session_names(sessions_model_t* model, GList* names);
@@ -31,6 +33,7 @@ void sessions_model_set_tab_width(sessions_model_t* model, int width);
 void sessions_model_set_last_opened_directory(sessions_model_t* model, const char* directory);
 void sessions_model_set_theme(sessions_model_t* model, const char* theme);
 void sessions_model_set_tabbar_position(sessions_model_t* model, const char* position);
+void sessions_model_set_keep_dark(sessions_model_t* model, gboolean keep);
 
 // Utility functions
 void sessions_model_add_session_name(sessions_model_t* model, const char* name);
