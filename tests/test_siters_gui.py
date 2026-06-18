@@ -23,12 +23,10 @@ import sys
 import tempfile
 import time
 import unittest
-from typing import Any
-
 try:
-    from dogtail import config
-    from dogtail.tree import root
-    from dogtail.utils import run
+    from dogtail import config  # type: ignore[import-untyped]
+    from dogtail.tree import root  # type: ignore[import-untyped]
+    from dogtail.utils import run  # type: ignore[import-untyped]
 except ImportError as e:
     print("Error: Dogtail is not installed.")
     print("Install it with: pip install dogtail python3-pyatspi")
@@ -44,7 +42,9 @@ logging.disable(logging.INFO)
 class SitersGUITestCase(unittest.TestCase):
     """Base test case for Siters GUI tests with setup/teardown."""
 
-    app: Any
+    def __init__(self, methodName: str = 'runTest') -> None:
+        super().__init__(methodName)
+        self.app = None
 
     @classmethod
     def setUpClass(cls):
@@ -84,7 +84,7 @@ class SitersGUITestCase(unittest.TestCase):
         try:
             # Use dumb=True to skip dogtail's accessibility-based startup detection
             # This prevents hanging when the app doesn't expose itself via AT-SPI
-            self.app = run(self.siters_binary, timeout=5, dumb=True)
+            self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
             time.sleep(0.5)
         except Exception as e:
             self.skipTest(f"Could not start Siters application: {e}")
@@ -93,7 +93,7 @@ class SitersGUITestCase(unittest.TestCase):
         """Close the Siters application after each test."""
         if hasattr(self, "app") and self.app:
             try:
-                self.app.kill()
+                self.app.kill()  # type: ignore[union-attr]
                 time.sleep(0.5)
             except Exception:
                 pass
@@ -811,9 +811,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
                 # Restart app to reload config
                 if hasattr(self, "app") and self.app:
-                    self.app.kill()
+                    self.app.kill()  # type: ignore[union-attr]
                     time.sleep(0.5)
-                self.app = run(self.siters_binary, timeout=5, dumb=True)
+                self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
                 time.sleep(2)
                 siters_app = root.application("siters")
                 time.sleep(1)
@@ -980,10 +980,10 @@ class TestSitersSessionManagement(SitersGUITestCase):
         # Restart the app after writing the test config file so it reloads from disk
         try:
             if hasattr(self, "app") and self.app:
-                self.app.kill()
+                self.app.kill()  # type: ignore[union-attr]
                 time.sleep(0.5)
 
-            self.app = run(self.siters_binary, timeout=5, dumb=True)
+            self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
             time.sleep(2)
 
             siters_app = root.application("siters")
