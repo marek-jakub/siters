@@ -71,7 +71,8 @@ typedef enum {
     SIDEBAR_NONE,
     SIDEBAR_SESSIONS,
     SIDEBAR_TOC,
-    SIDEBAR_SETTINGS
+    SIDEBAR_SETTINGS,
+    SIDEBAR_FILE_INFO
 } SidebarMode;
 
 /* Current window geometry */
@@ -123,6 +124,14 @@ static GtkWidget *tabbar_combo;
 static GtkWidget *tab_width_spin;
 static GtkWidget *left_color_btn;
 static GtkWidget *right_color_btn;
+
+/* File info sidebar */
+static GtkWidget *file_info_container;
+static GtkWidget *file_info_btn = NULL;
+static GtkWidget *file_info_name_label;
+static GtkWidget *file_info_path_label;
+static GtkWidget *file_info_size_label;
+static GtkWidget *file_info_pages_label;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -252,6 +261,8 @@ static void on_right_color_set(GtkColorButton *btn, gpointer user_data);
 static gboolean detect_system_dark_theme(void);
 static void apply_dark_css(gboolean apply);
 static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_left_file_info_clicked(GtkButton *btn, gpointer user_data);
+static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -329,6 +340,63 @@ static GtkWidget* create_toolbar_icon(const char *name) {
     }
     return image;
 }
+
+static gchar* format_file_size(goffset size) {
+    if (size < 1024)
+        return g_strdup_printf("%lld B", (long long)size);
+    else if (size < 1024 * 1024)
+        return g_strdup_printf("%.1f KB", size / 1024.0);
+    else if (size < 1024 * 1024 * 1024)
+        return g_strdup_printf("%.1f MB", size / (1024.0 * 1024.0));
+    else
+        return g_strdup_printf("%.1f GB", size / (1024.0 * 1024.0 * 1024.0));
+}
+
+static void update_file_info_labels(TabData *tab) {
+    if (!tab || !tab->current_file) {
+        gtk_label_set_text(GTK_LABEL(file_info_name_label), "Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(file_info_path_label), "Path: (none)");
+        gtk_label_set_text(GTK_LABEL(file_info_size_label), "Size: (none)");
+        gtk_label_set_text(GTK_LABEL(file_info_pages_label), "Pages: (none)");
+        return;
+    }
+
+    gchar *basename = g_path_get_basename(tab->current_file);
+    gchar *name_text = g_strdup_printf("Name: %s", basename);
+    g_free(basename);
+    gtk_label_set_text(GTK_LABEL(file_info_name_label), name_text);
+    g_free(name_text);
+
+    gchar *path_text = g_strdup_printf("Path: %s", tab->current_file);
+    gtk_label_set_text(GTK_LABEL(file_info_path_label), path_text);
+    g_free(path_text);
+
+    GFile *gf = g_file_new_for_path(tab->current_file);
+    GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                         G_FILE_QUERY_INFO_NONE, NULL, NULL);
+    if (info) {
+        goffset size = g_file_info_get_size(info);
+        gchar *size_str = format_file_size(size);
+        gchar *size_text = g_strdup_printf("Size: %s", size_str);
+        gtk_label_set_text(GTK_LABEL(file_info_size_label), size_text);
+        g_free(size_text);
+        g_free(size_str);
+        g_object_unref(info);
+    } else {
+        gtk_label_set_text(GTK_LABEL(file_info_size_label), "Size: Unknown");
+    }
+    g_object_unref(gf);
+
+    if (tab->doc) {
+        int n_pages = poppler_document_get_n_pages(tab->doc);
+        gchar *pages_text = g_strdup_printf("Pages: %d", n_pages);
+        gtk_label_set_text(GTK_LABEL(file_info_pages_label), pages_text);
+        g_free(pages_text);
+    } else {
+        gtk_label_set_text(GTK_LABEL(file_info_pages_label), "Pages: N/A");
+    }
+}
+
 
 /* Refresh a single button's icon from its stored icon-name data.
    Toggle buttons use icon-on/icon-off based on their current state. */
@@ -411,9 +479,9 @@ static void apply_dark_css(gboolean apply) {
             dark_css_provider = gtk_css_provider_new();
             const char *css =
                 "window, window.background, box, notebook, scrolledwindow,\n"
-                "menubar, menu, .sidebar { background: #2e2e2e; }\n"
+                "popover, popover.background, menubar, menu, .sidebar { background: #2e2e2e; }\n"
                 "menubar, menu { color: #ffffff; }\n"
-                "label { color: #ffffff; }\n"
+                "label, popover label { color: #ffffff; }\n"
                 "button, combobox button, spinbutton button {\n"
                 "    background: #3c3c3c; border: 1px solid #2F2F34;\n"
                 "    color: #ffffff;\n"
@@ -2124,7 +2192,12 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sessions_container);
         gtk_widget_hide(settings_container);
         gtk_widget_hide(toc_container);
+        gtk_widget_hide(file_info_container);
         gtk_tree_store_clear(toc_tree_store);
+
+        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
 
         // Show sessions container
         gtk_widget_show_all(sessions_container);
@@ -2373,6 +2446,11 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
         gtk_widget_hide(settings_container);
+        gtk_widget_hide(file_info_container);
+
+        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
 
         populate_toc_treeview();
 
@@ -2575,7 +2653,12 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_hide(sidebar_label);
         gtk_widget_hide(sessions_container);
         gtk_widget_hide(toc_container);
+        gtk_widget_hide(file_info_container);
         gtk_tree_store_clear(toc_tree_store);
+
+        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
+        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
 
         // Show settings container
         gtk_widget_show_all(settings_container);
@@ -2585,6 +2668,134 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_SETTINGS;
     }
+}
+
+static GtkWidget *right_file_info_popover = NULL;
+static GtkWidget *right_popover_name_label;
+static GtkWidget *right_popover_path_label;
+static GtkWidget *right_popover_size_label;
+static GtkWidget *right_popover_pages_label;
+
+static void on_left_file_info_clicked(GtkButton *button, gpointer user_data) {
+    (void)button;
+    (void)user_data;
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
+        current_sidebar_mode = SIDEBAR_NONE;
+    } else {
+        if (gtk_widget_get_parent(sidebar) != NULL) {
+            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+        }
+
+        gtk_widget_hide(sidebar_label);
+        gtk_widget_hide(sessions_container);
+        gtk_widget_hide(toc_container);
+        gtk_widget_hide(settings_container);
+        gtk_tree_store_clear(toc_tree_store);
+
+        update_file_info_labels(get_current_left_tab());
+        gtk_widget_show_all(file_info_container);
+
+        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_show(sidebar);
+        current_sidebar_mode = SIDEBAR_FILE_INFO;
+    }
+}
+
+static void on_right_file_info_popover_closed(GtkPopover *popover, gpointer user_data);
+
+static void on_right_file_info_clicked(GtkButton *button, gpointer user_data) {
+    (void)user_data;
+    GtkWidget *btn = GTK_WIDGET(button);
+
+    if (!right_file_info_popover) {
+        right_file_info_popover = gtk_popover_new(btn);
+        gtk_popover_set_position(GTK_POPOVER(right_file_info_popover), GTK_POS_LEFT);
+        gtk_popover_set_modal(GTK_POPOVER(right_file_info_popover), FALSE);
+
+        GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+        gtk_container_set_border_width(GTK_CONTAINER(box), 8);
+
+        right_popover_name_label = gtk_label_new("Name: (no file)");
+        gtk_widget_set_halign(right_popover_name_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), right_popover_name_label, FALSE, FALSE, 0);
+
+        right_popover_path_label = gtk_label_new("Path: (none)");
+        gtk_widget_set_halign(right_popover_path_label, GTK_ALIGN_FILL);
+        gtk_label_set_line_wrap(GTK_LABEL(right_popover_path_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(right_popover_path_label), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_max_width_chars(GTK_LABEL(right_popover_path_label), 60);
+        gtk_box_pack_start(GTK_BOX(box), right_popover_path_label, FALSE, FALSE, 0);
+
+        right_popover_size_label = gtk_label_new("Size: (none)");
+        gtk_widget_set_halign(right_popover_size_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), right_popover_size_label, FALSE, FALSE, 0);
+
+        right_popover_pages_label = gtk_label_new("Pages: (none)");
+        gtk_widget_set_halign(right_popover_pages_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), right_popover_pages_label, FALSE, FALSE, 0);
+
+        gtk_container_add(GTK_CONTAINER(right_file_info_popover), box);
+        gtk_widget_show_all(box);
+        g_signal_connect(right_file_info_popover, "closed",
+                         G_CALLBACK(on_right_file_info_popover_closed), btn);
+    }
+
+    if (gtk_widget_get_mapped(right_file_info_popover)) {
+        gtk_popover_popdown(GTK_POPOVER(right_file_info_popover));
+    } else {
+        TabData *tab = get_current_right_tab();
+
+        if (tab && tab->current_file) {
+            gchar *basename = g_path_get_basename(tab->current_file);
+            gchar *text = g_strdup_printf("Name: %s", basename);
+            gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+            g_free(text);
+            g_free(basename);
+
+            text = g_strdup_printf("Path: %s", tab->current_file);
+            gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+            g_free(text);
+
+            GFile *gf = g_file_new_for_path(tab->current_file);
+            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (info) {
+                gchar *size_str = format_file_size(g_file_info_get_size(info));
+                gchar *size_text = g_strdup_printf("Size: %s", size_str);
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                g_free(size_text);
+                g_free(size_str);
+                g_object_unref(info);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+            }
+            g_object_unref(gf);
+
+            if (tab->doc) {
+                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(tab->doc));
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                g_free(pages_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+            }
+        } else {
+            gtk_label_set_text(GTK_LABEL(right_popover_name_label), "Name: (no file)");
+            gtk_label_set_text(GTK_LABEL(right_popover_path_label), "Path: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+        }
+
+        gtk_popover_popup(GTK_POPOVER(right_file_info_popover));
+    }
+}
+
+static void on_right_file_info_popover_closed(GtkPopover *popover, gpointer user_data) {
+    (void)popover;
+    GtkWidget *btn = GTK_WIDGET(user_data);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(btn), FALSE);
 }
 
 static void save_open_tabs_for_session(const char *session_name) {
@@ -3715,6 +3926,47 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
         }
     }
     if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
+    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+        TabData *rtab = get_current_right_tab();
+        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
+        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        g_free(text);
+        g_free(basename);
+
+        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
+        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        g_free(text);
+
+        if (rtab && rtab->current_file) {
+            GFile *gf = g_file_new_for_path(rtab->current_file);
+            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (info) {
+                gchar *size_str = format_file_size(g_file_info_get_size(info));
+                gchar *size_text = g_strdup_printf("Size: %s", size_str);
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                g_free(size_text);
+                g_free(size_str);
+                g_object_unref(info);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+            }
+            g_object_unref(gf);
+
+            if (rtab->doc) {
+                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                g_free(pages_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+            }
+        } else {
+            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+        }
+    }
 }
 
 static TabData *create_new_tab(GtkWidget *notebook) {
@@ -3993,6 +4245,51 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
 
     if (closed_uri) g_free(closed_uri);
 
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
+        update_file_info_labels(get_current_left_tab());
+    }
+
+    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+        TabData *rtab = get_current_right_tab();
+        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
+        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        g_free(text);
+        g_free(basename);
+
+        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
+        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        g_free(text);
+
+        if (rtab && rtab->current_file) {
+            GFile *gf = g_file_new_for_path(rtab->current_file);
+            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (info) {
+                gchar *size_str = format_file_size(g_file_info_get_size(info));
+                text = g_strdup_printf("Size: %s", size_str);
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), text);
+                g_free(text);
+                g_free(size_str);
+                g_object_unref(info);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+            }
+            g_object_unref(gf);
+
+            if (rtab->doc) {
+                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                g_free(pages_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+            }
+        } else {
+            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+        }
+    }
+
     if (is_left) {
         populate_sessions_treeview();
     }
@@ -4125,6 +4422,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
         update_sessions_tree_document_selection_for_tab(tab);
         sessions_tree_syncing = FALSE;
     }
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(tab);
 }
 
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
@@ -4163,6 +4461,47 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     /* keep left widget tied to primary (left) document */
     sync_page_widget_from_tab(get_current_left_tab());
     sync_right_page_widget_from_tab(tab);
+
+    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+        TabData *rtab = tab;
+        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
+        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        g_free(text);
+        g_free(basename);
+
+        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
+        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        g_free(text);
+
+        if (rtab && rtab->current_file) {
+            GFile *gf = g_file_new_for_path(rtab->current_file);
+            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (info) {
+                gchar *size_str = format_file_size(g_file_info_get_size(info));
+                gchar *size_text = g_strdup_printf("Size: %s", size_str);
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                g_free(size_text);
+                g_free(size_str);
+                g_object_unref(info);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+            }
+            g_object_unref(gf);
+
+            if (rtab->doc) {
+                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                g_free(pages_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+            }
+        } else {
+            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+        }
+    }
 }
 
 static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
@@ -4252,6 +4591,52 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
     }
 
     if (closed_uri) g_free(closed_uri);
+
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
+        update_file_info_labels(get_current_left_tab());
+    }
+
+    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+        TabData *rtab = get_current_right_tab();
+        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
+        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        g_free(text);
+        g_free(basename);
+
+        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
+        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        g_free(text);
+
+        if (rtab && rtab->current_file) {
+            GFile *gf = g_file_new_for_path(rtab->current_file);
+            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
+            if (info) {
+                gchar *size_str = format_file_size(g_file_info_get_size(info));
+                text = g_strdup_printf("Size: %s", size_str);
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), text);
+                g_free(text);
+                g_free(size_str);
+                g_object_unref(info);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+            }
+            g_object_unref(gf);
+
+            if (rtab->doc) {
+                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                g_free(pages_text);
+            } else {
+                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+            }
+        } else {
+            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+        }
+    }
+
     g_free(ci);
 
     if (is_left) {
@@ -4822,6 +5207,42 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(sidebar), settings_container, TRUE, TRUE, 0);
     gtk_widget_hide(settings_container);
 
+    /* File info container */
+    file_info_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(file_info_container), 8);
+    g_object_ref(file_info_container);
+
+    GtkWidget *file_info_title = gtk_label_new("File Information");
+    gtk_widget_set_halign(file_info_title, GTK_ALIGN_START);
+    PangoAttrList *fi_attr = pango_attr_list_new();
+    pango_attr_list_insert(fi_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    pango_attr_list_insert(fi_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
+    gtk_label_set_attributes(GTK_LABEL(file_info_title), fi_attr);
+    pango_attr_list_unref(fi_attr);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_title, FALSE, FALSE, 0);
+
+    file_info_name_label = gtk_label_new("Name: (no file)");
+    gtk_widget_set_halign(file_info_name_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_name_label, FALSE, FALSE, 0);
+
+    file_info_path_label = gtk_label_new("Path: (none)");
+    gtk_widget_set_halign(file_info_path_label, GTK_ALIGN_FILL);
+    gtk_label_set_line_wrap(GTK_LABEL(file_info_path_label), TRUE);
+    gtk_label_set_line_wrap_mode(GTK_LABEL(file_info_path_label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(file_info_path_label), 60);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_path_label, FALSE, FALSE, 0);
+
+    file_info_size_label = gtk_label_new("Size: (none)");
+    gtk_widget_set_halign(file_info_size_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_size_label, FALSE, FALSE, 0);
+
+    file_info_pages_label = gtk_label_new("Pages: (none)");
+    gtk_widget_set_halign(file_info_pages_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_pages_label, FALSE, FALSE, 0);
+
+    gtk_box_pack_start(GTK_BOX(sidebar), file_info_container, TRUE, TRUE, 0);
+    gtk_widget_hide(file_info_container);
+
     /* Content area on the right*/
     content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_box_pack_start(GTK_BOX(main_hbox), content_vbox, TRUE, TRUE, 0);
@@ -4856,6 +5277,17 @@ GtkWidget* create_main_window(void) {
     atk_object_set_name(gtk_widget_get_accessible(settings_btn), "Settings");
     g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), settings_btn, FALSE, FALSE, 1);
+
+    /* File information button */
+    GtkWidget *file_info_icon = create_toolbar_icon("file");
+    file_info_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(file_info_btn), file_info_icon);
+    g_object_set_data_full(G_OBJECT(file_info_btn), "icon-name", g_strdup("file"), g_free);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+    gtk_widget_set_tooltip_text(file_info_btn, "File information");
+    atk_object_set_name(gtk_widget_get_accessible(file_info_btn), "File information");
+    g_signal_connect(file_info_btn, "toggled", G_CALLBACK(on_left_file_info_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(toolbar), file_info_btn, FALSE, FALSE, 1);
 
     /* Separator */
     GtkWidget *separator_a = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -4992,17 +5424,6 @@ GtkWidget* create_main_window(void) {
     g_object_set_data(G_OBJECT(left_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
     g_signal_connect(left_row_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), left_row_btn, FALSE, FALSE, 1);
-
-    /* Horizontal scroll toggle button*/
-    GtkWidget *horiz_scroll_toggle_icon = create_toolbar_icon("file");
-    GtkWidget *horiz_scroll_toggle_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(horiz_scroll_toggle_btn), horiz_scroll_toggle_icon);
-    g_object_set_data_full(G_OBJECT(horiz_scroll_toggle_btn), "icon-name", g_strdup("file"), g_free);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(horiz_scroll_toggle_btn), FALSE);
-    gtk_widget_set_tooltip_text(horiz_scroll_toggle_btn, "Toggle horizontal scroll");
-    atk_object_set_name(gtk_widget_get_accessible(horiz_scroll_toggle_btn), "Toggle horizontal scroll");
-    g_signal_connect(horiz_scroll_toggle_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), NULL);
-    gtk_box_pack_start(GTK_BOX(middle_box), horiz_scroll_toggle_btn, FALSE, FALSE, 1);
 
     /* Separator */
     GtkWidget *separator_e = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -5187,6 +5608,17 @@ GtkWidget* create_main_window(void) {
     g_signal_connect(right_close_file_btn, "clicked", G_CALLBACK(on_close_helper_file_clicked), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_close_file_btn, FALSE, FALSE, 1);
 
+    /* Right toolbar - File information */
+    GtkWidget *right_file_info_icon = create_toolbar_icon("file");
+    GtkWidget *right_file_info_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(right_file_info_btn), right_file_info_icon);
+    g_object_set_data_full(G_OBJECT(right_file_info_btn), "icon-name", g_strdup("file"), g_free);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_file_info_btn), FALSE);
+    gtk_widget_set_tooltip_text(right_file_info_btn, "File information");
+    atk_object_set_name(gtk_widget_get_accessible(right_file_info_btn), "File information");
+    g_signal_connect(right_file_info_btn, "toggled", G_CALLBACK(on_right_file_info_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(right_middle_box), right_file_info_btn, FALSE, FALSE, 1);
+
     /* Right toolbar separator */
     GtkWidget *right_sep_a = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_a, FALSE, FALSE, 5);
@@ -5278,17 +5710,6 @@ GtkWidget* create_main_window(void) {
     /* Right toolbar separator */
     GtkWidget *right_sep_d = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_d, FALSE, FALSE, 5);
-
-    /* Right toolbar - Horizontal scroll toggle */
-    GtkWidget *right_horiz_scroll_icon = create_toolbar_icon("file");
-    GtkWidget *right_horiz_scroll_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(right_horiz_scroll_btn), right_horiz_scroll_icon);
-    g_object_set_data_full(G_OBJECT(right_horiz_scroll_btn), "icon-name", g_strdup("file"), g_free);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_horiz_scroll_btn), FALSE);
-    gtk_widget_set_tooltip_text(right_horiz_scroll_btn, "Toggle horizontal scroll");
-    atk_object_set_name(gtk_widget_get_accessible(right_horiz_scroll_btn), "Toggle horizontal scroll");
-    g_signal_connect(right_horiz_scroll_btn, "toggled", G_CALLBACK(on_horiz_scroll_toggle), NULL);
-    gtk_box_pack_start(GTK_BOX(right_middle_box), right_horiz_scroll_btn, FALSE, FALSE, 1);
 
     return window;
 }
