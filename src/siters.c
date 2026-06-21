@@ -132,6 +132,31 @@ static GtkWidget *file_info_name_label;
 static GtkWidget *file_info_path_label;
 static GtkWidget *file_info_size_label;
 static GtkWidget *file_info_pages_label;
+static GtkWidget *file_info_search_entry;
+static GtkWidget *file_info_search_btn;
+static GtkWidget *file_info_search_results_view;
+static GtkListStore *file_info_search_results_store;
+static GtkWidget *file_info_search_no_results;
+static GtkWidget *file_info_search_overflow_label;
+
+enum {
+    SEARCH_COL_PAGE = 0,
+    SEARCH_COL_COUNT,
+    SEARCH_COL_LABEL,
+    SEARCH_COL_NCOL
+};
+
+#define SEARCH_MAX_PER_PAGE 10
+#define SEARCH_MAX_PAGES 200
+
+typedef struct {
+    int page;
+    int n_matches;
+    PopplerRectangle rects[SEARCH_MAX_PER_PAGE];
+} SearchPageResult;
+
+static SearchPageResult search_page_results[SEARCH_MAX_PAGES];
+static int search_page_results_n = 0;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -263,6 +288,11 @@ static void apply_dark_css(gboolean apply);
 static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_left_file_info_clicked(GtkButton *btn, gpointer user_data);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
+static void clear_file_info_search_results(void);
+static SearchPageResult* find_search_result_for_page(int page_1based);
+static void on_file_info_search_activated(GtkEntry *entry, gpointer user_data);
+static void on_file_info_search_clicked(GtkButton *btn, gpointer user_data);
+static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -353,6 +383,10 @@ static gchar* format_file_size(goffset size) {
 }
 
 static void update_file_info_labels(TabData *tab) {
+    clear_file_info_search_results();
+    if (file_info_search_entry) {
+        gtk_entry_set_text(GTK_ENTRY(file_info_search_entry), "");
+    }
     if (!tab || !tab->current_file) {
         gtk_label_set_text(GTK_LABEL(file_info_name_label), "Name: (no file)");
         gtk_label_set_text(GTK_LABEL(file_info_path_label), "Path: (none)");
@@ -2204,6 +2238,7 @@ static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_set_size_request(sidebar, 300, -1);
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_SESSIONS;
 
@@ -2459,6 +2494,7 @@ static void on_toc_clicked(GtkButton *button, gpointer user_data) {
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_set_size_request(sidebar, 300, -1);
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_TOC;
     }
@@ -2665,8 +2701,134 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_set_size_request(sidebar, 300, -1);
         gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_SETTINGS;
+        current_sidebar_mode = SIDEBAR_FILE_INFO;
+    }
+}
+
+static SearchPageResult* find_search_result_for_page(int page_1based) {
+    for (int i = 0; i < search_page_results_n; i++) {
+        if (search_page_results[i].page == page_1based)
+            return &search_page_results[i];
+    }
+    return NULL;
+}
+
+static void clear_file_info_search_results(void) {
+    search_page_results_n = 0;
+    if (file_info_search_results_store) {
+        gtk_list_store_clear(file_info_search_results_store);
+    }
+    if (file_info_search_no_results) {
+        gtk_widget_hide(file_info_search_no_results);
+    }
+    if (file_info_search_overflow_label) {
+        gtk_widget_hide(file_info_search_overflow_label);
+    }
+    TabData *tab = get_current_left_tab();
+    if (tab) queue_draw(tab);
+}
+
+static void perform_file_info_search(const char *text) {
+    clear_file_info_search_results();
+    if (!text || !*text) {
+        TabData *tab = get_current_left_tab();
+        if (tab) queue_draw(tab);
+        return;
+    }
+
+    TabData *tab = get_current_left_tab();
+    if (!tab || !ensure_tab_doc_loaded(tab)) return;
+    if (!tab->doc) return;
+
+    int n_pages = poppler_document_get_n_pages(tab->doc);
+    if (n_pages <= 0) return;
+
+    for (int i = 0; i < n_pages && search_page_results_n < SEARCH_MAX_PAGES; i++) {
+        PopplerPage *page = poppler_document_get_page(tab->doc, i);
+        if (!page) continue;
+
+        GList *matches = poppler_page_find_text(page, text);
+        int n_matches = 0;
+        if (matches) {
+            n_matches = g_list_length(matches);
+            if (n_matches > SEARCH_MAX_PER_PAGE) n_matches = SEARCH_MAX_PER_PAGE;
+            SearchPageResult *r = &search_page_results[search_page_results_n];
+            r->page = i + 1;
+            r->n_matches = n_matches;
+            GList *iter = matches;
+            for (int m = 0; m < n_matches && iter; m++, iter = iter->next) {
+                r->rects[m] = *(PopplerRectangle *)iter->data;
+            }
+            search_page_results_n++;
+        }
+        g_list_free_full(matches, g_free);
+
+        if (n_matches > 0) {
+            GtkTreeIter tree_iter;
+            const char *plural = n_matches == 1 ? "" : "es";
+            gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n_matches, plural);
+            gtk_list_store_append(file_info_search_results_store, &tree_iter);
+            gtk_list_store_set(file_info_search_results_store, &tree_iter,
+                               SEARCH_COL_PAGE, i + 1,
+                               SEARCH_COL_COUNT, n_matches,
+                               SEARCH_COL_LABEL, label, -1);
+            g_free(label);
+        }
+
+        g_object_unref(page);
+    }
+
+    if (search_page_results_n == 0) {
+        gtk_widget_show(file_info_search_no_results);
+    }
+
+    if (search_page_results_n >= SEARCH_MAX_PAGES) {
+        gchar *overflow = g_strdup_printf("Results limited to %d pages", SEARCH_MAX_PAGES);
+        gtk_label_set_text(GTK_LABEL(file_info_search_overflow_label), overflow);
+        g_free(overflow);
+        gtk_widget_show(file_info_search_overflow_label);
+    } else {
+        gtk_widget_hide(file_info_search_overflow_label);
+    }
+
+    queue_draw(tab);
+}
+
+static void on_file_info_search_activated(GtkEntry *entry, gpointer user_data) {
+    (void)user_data;
+    const char *text = gtk_entry_get_text(entry);
+    perform_file_info_search(text);
+}
+
+static void on_file_info_search_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn;
+    (void)user_data;
+    const char *text = gtk_entry_get_text(GTK_ENTRY(file_info_search_entry));
+    perform_file_info_search(text);
+}
+
+static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
+    (void)tree_view;
+    (void)column;
+    (void)user_data;
+
+    GtkTreeModel *model = GTK_TREE_MODEL(file_info_search_results_store);
+    GtkTreeIter iter;
+    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
+
+    int page = 0;
+    gtk_tree_model_get(model, &iter, SEARCH_COL_PAGE, &page, -1);
+
+    if (page > 0) {
+        TabData *tab = get_current_left_tab();
+        if (tab) {
+            cancel_doc_model_debounce(tab);
+            tab->cur_page = page - 1;
+            scroll_to_page(tab, page - 1);
+            update_document_model_from_tab(tab);
+        }
     }
 }
 
@@ -2699,6 +2861,7 @@ static void on_left_file_info_clicked(GtkButton *button, gpointer user_data) {
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+        gtk_widget_set_size_request(sidebar, 300, -1);
         gtk_widget_show(sidebar);
         current_sidebar_mode = SIDEBAR_FILE_INFO;
     }
@@ -3419,6 +3582,24 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
+                if (search_page_results_n > 0) {
+                    SearchPageResult *sr = find_search_result_for_page(i + 1);
+                    if (sr) {
+                        double ph_pts = tab->cached_page_heights[i];
+                        cairo_save(cr);
+                        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
+                        for (int m = 0; m < sr->n_matches; m++) {
+                            PopplerRectangle *r = &sr->rects[m];
+                            cairo_rectangle(cr,
+                                off_x + r->x1 * scale,
+                                off_y + (ph_pts - r->y2) * scale,
+                                (r->x2 - r->x1) * scale,
+                                (r->y2 - r->y1) * scale);
+                        }
+                        cairo_fill(cr);
+                        cairo_restore(cr);
+                    }
+                }
                 g_object_unref(page);
             }
 
@@ -3498,6 +3679,24 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         if (first_visible == -1) first_visible = i;
                         last_visible = i;
                     }
+                    if (search_page_results_n > 0) {
+                        SearchPageResult *sr = find_search_result_for_page(i + 1);
+                        if (sr) {
+                            double ph_pts = tab->cached_page_heights[i];
+                            cairo_save(cr);
+                            cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
+                            for (int m = 0; m < sr->n_matches; m++) {
+                                PopplerRectangle *r = &sr->rects[m];
+                                cairo_rectangle(cr,
+                                    left_x + r->x1 * scale,
+                                    y + (ph_pts - r->y2) * scale,
+                                    (r->x2 - r->x1) * scale,
+                                    (r->y2 - r->y1) * scale);
+                            }
+                            cairo_fill(cr);
+                            cairo_restore(cr);
+                        }
+                    }
                     g_object_unref(p1);
                 }
             }
@@ -3542,6 +3741,24 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         }
                         if (first_visible == -1) first_visible = i + 1;
                         last_visible = i + 1;
+                    }
+                    if (search_page_results_n > 0) {
+                        SearchPageResult *sr = find_search_result_for_page(i + 2);
+                        if (sr) {
+                            double ph_pts = tab->cached_page_heights[i + 1];
+                            cairo_save(cr);
+                            cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
+                            for (int m = 0; m < sr->n_matches; m++) {
+                                PopplerRectangle *r = &sr->rects[m];
+                                cairo_rectangle(cr,
+                                    right_x + r->x1 * scale,
+                                    y + (ph_pts - r->y2) * scale,
+                                    (r->x2 - r->x1) * scale,
+                                    (r->y2 - r->y1) * scale);
+                            }
+                            cairo_fill(cr);
+                            cairo_restore(cr);
+                        }
                     }
                     g_object_unref(p2);
                 }
@@ -3608,6 +3825,24 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
+                }
+                if (search_page_results_n > 0) {
+                    SearchPageResult *sr = find_search_result_for_page(i + 1);
+                    if (sr) {
+                        double ph_pts = tab->cached_page_heights[i];
+                        cairo_save(cr);
+                        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
+                        for (int m = 0; m < sr->n_matches; m++) {
+                            PopplerRectangle *r = &sr->rects[m];
+                            cairo_rectangle(cr,
+                                dev_x + r->x1 * scale,
+                                off_y + (ph_pts - r->y2) * scale,
+                                (r->x2 - r->x1) * scale,
+                                (r->y2 - r->y1) * scale);
+                        }
+                        cairo_fill(cr);
+                        cairo_restore(cr);
+                    }
                 }
                 g_object_unref(page);
             }
@@ -5227,9 +5462,10 @@ GtkWidget* create_main_window(void) {
 
     file_info_path_label = gtk_label_new("Path: (none)");
     gtk_widget_set_halign(file_info_path_label, GTK_ALIGN_FILL);
+    gtk_label_set_xalign(GTK_LABEL(file_info_path_label), 0.0);
     gtk_label_set_line_wrap(GTK_LABEL(file_info_path_label), TRUE);
     gtk_label_set_line_wrap_mode(GTK_LABEL(file_info_path_label), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_max_width_chars(GTK_LABEL(file_info_path_label), 60);
+    gtk_label_set_max_width_chars(GTK_LABEL(file_info_path_label), 30);
     gtk_box_pack_start(GTK_BOX(file_info_container), file_info_path_label, FALSE, FALSE, 0);
 
     file_info_size_label = gtk_label_new("Size: (none)");
@@ -5240,6 +5476,64 @@ GtkWidget* create_main_window(void) {
     gtk_widget_set_halign(file_info_pages_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(file_info_container), file_info_pages_label, FALSE, FALSE, 0);
 
+    /* Separator before search */
+    GtkWidget *search_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
+    gtk_box_pack_start(GTK_BOX(file_info_container), search_sep, FALSE, FALSE, 5);
+
+    /* Search title */
+    GtkWidget *search_title = gtk_label_new("Search in Document");
+    gtk_widget_set_halign(search_title, GTK_ALIGN_START);
+    PangoAttrList *sa = pango_attr_list_new();
+    pango_attr_list_insert(sa, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    pango_attr_list_insert(sa, pango_attr_scale_new(PANGO_SCALE_LARGE));
+    gtk_label_set_attributes(GTK_LABEL(search_title), sa);
+    pango_attr_list_unref(sa);
+    gtk_box_pack_start(GTK_BOX(file_info_container), search_title, FALSE, FALSE, 0);
+
+    /* Search entry + button row */
+    GtkWidget *search_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    file_info_search_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(file_info_search_entry), "Search text...");
+    gtk_box_pack_start(GTK_BOX(search_hbox), file_info_search_entry, TRUE, TRUE, 0);
+    g_signal_connect(file_info_search_entry, "activate", G_CALLBACK(on_file_info_search_activated), NULL);
+
+    file_info_search_btn = gtk_button_new_with_label("Search");
+    gtk_box_pack_start(GTK_BOX(search_hbox), file_info_search_btn, FALSE, FALSE, 0);
+    g_signal_connect(file_info_search_btn, "clicked", G_CALLBACK(on_file_info_search_clicked), NULL);
+
+    gtk_box_pack_start(GTK_BOX(file_info_container), search_hbox, FALSE, FALSE, 0);
+
+    /* Results tree view */
+    file_info_search_results_store = gtk_list_store_new(SEARCH_COL_NCOL, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
+    file_info_search_results_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(file_info_search_results_store));
+    g_object_unref(file_info_search_results_store);
+
+    GtkCellRenderer *sr = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *sc = gtk_tree_view_column_new_with_attributes("Page", sr, "text", SEARCH_COL_LABEL, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(file_info_search_results_view), sc);
+
+    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(file_info_search_results_view), TRUE);
+    g_signal_connect(file_info_search_results_view, "row-activated", G_CALLBACK(on_file_info_search_row_activated), NULL);
+
+    GtkWidget *search_scrolled = gtk_scrolled_window_new(NULL, NULL);
+    gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(search_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
+    gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(search_scrolled), 80);
+    gtk_container_add(GTK_CONTAINER(search_scrolled), file_info_search_results_view);
+    gtk_box_pack_start(GTK_BOX(file_info_container), search_scrolled, TRUE, TRUE, 0);
+
+    /* No results label */
+    file_info_search_no_results = gtk_label_new("No results found");
+    gtk_widget_set_halign(file_info_search_no_results, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_search_no_results, FALSE, FALSE, 0);
+    gtk_widget_hide(file_info_search_no_results);
+
+    /* Overflow label */
+    file_info_search_overflow_label = gtk_label_new(NULL);
+    gtk_widget_set_halign(file_info_search_overflow_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_search_overflow_label, FALSE, FALSE, 0);
+    gtk_widget_hide(file_info_search_overflow_label);
+
+    gtk_widget_set_size_request(file_info_container, 300, -1);
     gtk_box_pack_start(GTK_BOX(sidebar), file_info_container, TRUE, TRUE, 0);
     gtk_widget_hide(file_info_container);
 
