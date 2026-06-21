@@ -4480,6 +4480,12 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
 
     if (closed_uri) g_free(closed_uri);
 
+    if (is_left) {
+        sync_page_widget_from_tab(get_current_left_tab());
+    } else if (is_right) {
+        sync_right_page_widget_from_tab(get_current_right_tab());
+    }
+
     if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
         update_file_info_labels(get_current_left_tab());
     }
@@ -4826,6 +4832,12 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
     }
 
     if (closed_uri) g_free(closed_uri);
+
+    if (is_left) {
+        sync_page_widget_from_tab(get_current_left_tab());
+    } else if (is_right) {
+        sync_right_page_widget_from_tab(get_current_right_tab());
+    }
 
     if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
         update_file_info_labels(get_current_left_tab());
