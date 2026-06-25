@@ -2763,7 +2763,7 @@ static void perform_file_info_search(const char *text) {
             }
             search_page_results_n++;
         }
-        g_list_free_full(matches, g_free);
+        g_list_free_full(matches, (GDestroyNotify)poppler_rectangle_free);
 
         if (n_matches > 0) {
             GtkTreeIter tree_iter;
@@ -2858,6 +2858,8 @@ static void on_left_file_info_clicked(GtkButton *button, gpointer user_data) {
 
         update_file_info_labels(get_current_left_tab());
         gtk_widget_show_all(file_info_container);
+        gtk_widget_hide(file_info_search_no_results);
+        gtk_widget_hide(file_info_search_overflow_label);
 
         gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -5181,6 +5183,22 @@ GtkWidget* create_main_window(void) {
     window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
     gtk_window_set_title(GTK_WINDOW(window), "Siters");
     gtk_window_set_default_size(GTK_WINDOW(window), 1000, 800);
+
+    // Load application icon from PNG (gdk-pixbuf always supports PNG)
+    GError *icon_err = NULL;
+    gchar *icon_path = g_strdup_printf(DATADIR "/data/icons/siters_64.png");
+    GdkPixbuf *icon_pb = gdk_pixbuf_new_from_file(icon_path, &icon_err);
+    if (icon_pb) {
+        GList *icons = NULL;
+        icons = g_list_append(icons, icon_pb);
+        gtk_window_set_default_icon_list(icons);
+        g_list_free(icons);
+        g_object_unref(icon_pb);
+    } else {
+        g_warning("Could not load app icon: %s", icon_err->message);
+        g_clear_error(&icon_err);
+    }
+    g_free(icon_path);
 
     // Set minimal size to prevent unusable layouts
     GdkGeometry hints = {0};
