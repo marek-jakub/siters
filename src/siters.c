@@ -2712,7 +2712,7 @@ static void on_settings_clicked(GtkButton *button, gpointer user_data) {
         gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
         gtk_widget_set_size_request(sidebar, 300, -1);
         gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_FILE_INFO;
+        current_sidebar_mode = SIDEBAR_SETTINGS;
     }
 }
 
