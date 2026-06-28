@@ -65,6 +65,8 @@ typedef struct TabDataStruct {
     double *cached_page_heights; /* raw page heights from poppler_page_get_size */
     double max_page_h;           /* tallest page height (scaled) for row view sizing */
     cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
+    GList **page_links;     /* array[n_pages]: GList of PopplerLinkMapping*, NULL = not loaded */
+    int page_links_n;       /* size of page_links array (== n_pages) */
 } TabData;
 
 typedef enum {
@@ -585,6 +587,13 @@ static void destroy_tab_data(gpointer data) {
     g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
+    if (tab->page_links) {
+        for (int i = 0; i < tab->page_links_n; i++) {
+            if (tab->page_links[i])
+                poppler_page_free_link_mapping(tab->page_links[i]);
+        }
+        g_free(tab->page_links);
+    }
     g_free(tab);
 }
 
@@ -3413,6 +3422,156 @@ static gboolean on_h_scrollbar_leave(GtkWidget *w, GdkEvent *e, gpointer user_da
     return FALSE;
 }
 
+/* Load link mappings for all pages (lazy, called on first hover/click) */
+static void ensure_links_loaded(TabData *tab) {
+    if (!tab || !tab->doc || tab->page_links) return;
+    tab->page_links_n = tab->n_pages;
+    tab->page_links = g_new0(GList*, tab->n_pages);
+    for (int i = 0; i < tab->n_pages; i++) {
+        PopplerPage *page = poppler_document_get_page(tab->doc, i);
+        if (page) {
+            tab->page_links[i] = poppler_page_get_link_mapping(page);
+            g_object_unref(page);
+        }
+    }
+}
+
+/* Convert widget coordinates to page index and page-relative Poppler-space (points, bottom-left origin).
+   Returns 0-based page index, or -1 if no page at (wx, wy). */
+static int widget_to_page_coords(TabData *tab, double wx, double wy,
+                                  double *out_px, double *out_py) {
+    if (!tab || !tab->cached_page_widths || !tab->pages_drawing) return -1;
+    GtkAllocation alloc;
+    gtk_widget_get_allocation(tab->pages_drawing, &alloc);
+    double scale = get_ppi_scale(tab);
+    const double spacing = 6.0;
+
+    if (tab->layout_mode == 0) {
+        double y = spacing;
+        for (int i = 0; i < tab->n_pages; i++) {
+            double pw = tab->cached_page_widths[i] * scale;
+            double ph = tab->cached_page_heights[i] * scale;
+            double ox = (alloc.width - pw) / 2.0;
+            if (wx >= ox && wx < ox + pw && wy >= y && wy < y + ph) {
+                if (out_px) *out_px = (wx - ox) / scale;
+                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - y) / scale;
+                return i;
+            }
+            y += ph + spacing;
+        }
+    } else if (tab->layout_mode == 1) {
+        double y = spacing;
+        for (int i = 0; i < tab->n_pages; i += 2) {
+            double pw1 = tab->cached_page_widths[i] * scale;
+            double ph1 = tab->cached_page_heights[i] * scale;
+            double pw2 = 0, ph2 = 0;
+            if (i + 1 < tab->n_pages) {
+                pw2 = tab->cached_page_widths[i + 1] * scale;
+                ph2 = tab->cached_page_heights[i + 1] * scale;
+            }
+            double rw = pw1 + (pw2 > 0 ? spacing + pw2 : 0);
+            double rh = ph1;
+            if (ph2 > rh) rh = ph2;
+            double rx = (alloc.width - rw) / 2.0;
+            if (rx < spacing) rx = spacing;
+            double lx = rx;
+            double rx2 = lx + pw1 + spacing;
+            if (wx >= lx && wx < lx + pw1 && wy >= y && wy < y + ph1) {
+                if (out_px) *out_px = (wx - lx) / scale;
+                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - y) / scale;
+                return i;
+            }
+            if (pw2 > 0 && wx >= rx2 && wx < rx2 + pw2 && wy >= y && wy < y + ph2) {
+                if (out_px) *out_px = (wx - rx2) / scale;
+                if (out_py) *out_py = tab->cached_page_heights[i + 1] - (wy - y) / scale;
+                return i + 1;
+            }
+            y += rh + spacing;
+        }
+    } else if (tab->layout_mode == 2) {
+        double scroll_x = 0.0;
+        if (tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            scroll_x = gtk_adjustment_get_value(sadj);
+        }
+        double x = spacing - scroll_x;
+        GtkAdjustment *vadj_row = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
+        double viewport_h = vadj_row ? gtk_adjustment_get_page_size(vadj_row) : 0.0;
+        for (int i = 0; i < tab->n_pages; i++) {
+            double pw = tab->cached_page_widths[i] * scale;
+            double ph = tab->cached_page_heights[i] * scale;
+            double oy = tab->max_page_h > viewport_h ? 0.0 : (alloc.height - ph) / 2.0;
+            if (wx >= x && wx < x + pw && wy >= oy && wy < oy + ph) {
+                if (out_px) *out_px = (wx - x) / scale;
+                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - oy) / scale;
+                return i;
+            }
+            x += pw + spacing;
+        }
+    }
+    return -1;
+}
+
+/* Check if there is a clickable link at the given page-relative Poppler coordinates */
+static gboolean has_link_at(TabData *tab, int page, double px, double py) {
+    if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
+    GList *iter = tab->page_links[page];
+    while (iter) {
+        PopplerLinkMapping *mapping = iter->data;
+        if (mapping) {
+            PopplerRectangle *a = &mapping->area;
+            if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2)
+                return TRUE;
+        }
+        iter = iter->next;
+    }
+    return FALSE;
+}
+
+/* Activate the link at the given page-relative Poppler coordinates (if any) */
+static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
+    if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
+    GList *iter = tab->page_links[page];
+    while (iter) {
+        PopplerLinkMapping *mapping = iter->data;
+        if (!mapping) { iter = iter->next; continue; }
+        PopplerRectangle *a = &mapping->area;
+        if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2) {
+            if (!mapping->action) { iter = iter->next; continue; }
+            switch (mapping->action->type) {
+                case POPPLER_ACTION_URI:
+                    if (mapping->action->uri.uri) {
+                        GError *err = NULL;
+                        gtk_show_uri_on_window(GTK_WINDOW(window),
+                            mapping->action->uri.uri, GDK_CURRENT_TIME, &err);
+                        if (err) {
+                            g_warning("Failed to open URI: %s", err->message);
+                            g_clear_error(&err);
+                        }
+                        return TRUE;
+                    }
+                    break;
+                case POPPLER_ACTION_GOTO_DEST:
+                    if (mapping->action->goto_dest.dest &&
+                        mapping->action->goto_dest.dest->page_num > 0) {
+                        int dest = mapping->action->goto_dest.dest->page_num - 1;
+                        if (dest >= 0 && dest < tab->n_pages) {
+                            tab->cur_page = dest;
+                            scroll_to_page(tab, dest);
+                            update_document_model_from_tab(tab);
+                            return TRUE;
+                        }
+                    }
+                    break;
+                default:
+                    break;
+            }
+        }
+        iter = iter->next;
+    }
+    return FALSE;
+}
+
 static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
     TabData *tab = user_data;
     if (!tab || event->button != GDK_BUTTON_PRIMARY) return FALSE;
@@ -3436,7 +3595,24 @@ static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event
 static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data) {
     TabData *tab = user_data;
     if (!tab || event->button != GDK_BUTTON_PRIMARY) return FALSE;
+    gboolean was_dragging = tab->dragging;
     tab->dragging = FALSE;
+
+    /* If the mouse barely moved, treat as a click — check for links */
+    if (was_dragging) {
+        double dx = event->x - tab->drag_start_x;
+        double dy = event->y - tab->drag_start_y;
+        if (dx * dx + dy * dy < 25.0) { /* 5px threshold */
+            int page;
+            double px, py;
+            page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
+            if (page >= 0) {
+                ensure_links_loaded(tab);
+                activate_link_at(tab, page, px, py);
+            }
+        }
+    }
+
     GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), GDK_LEFT_PTR);
     gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
     g_object_unref(cursor);
@@ -3461,6 +3637,20 @@ static gboolean on_drawing_motion_notify(GtkWidget *widget, GdkEventMotion *even
         }
         return TRUE;
     }
+
+    /* Check for links under cursor and change cursor accordingly */
+    GdkCursorType cursor_type = GDK_LEFT_PTR;
+    int page;
+    double px, py;
+    page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
+    if (page >= 0) {
+        ensure_links_loaded(tab);
+        if (has_link_at(tab, page, px, py))
+            cursor_type = GDK_HAND2;
+    }
+    GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), cursor_type);
+    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
+    g_object_unref(cursor);
 
     if (tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
     GtkAllocation alloc;
