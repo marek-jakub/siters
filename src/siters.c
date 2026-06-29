@@ -127,9 +127,14 @@ static GtkWidget *tab_width_spin;
 static GtkWidget *left_color_btn;
 static GtkWidget *right_color_btn;
 
+/* Sidebar toggle buttons */
+static GtkWidget *sessions_btn = NULL;
+static GtkWidget *toc_btn = NULL;
+static GtkWidget *settings_btn = NULL;
+static GtkWidget *file_info_btn = NULL;
+
 /* File info sidebar */
 static GtkWidget *file_info_container;
-static GtkWidget *file_info_btn = NULL;
 static GtkWidget *file_info_name_label;
 static GtkWidget *file_info_path_label;
 static GtkWidget *file_info_size_label;
@@ -288,7 +293,10 @@ static void on_right_color_set(GtkColorButton *btn, gpointer user_data);
 static gboolean detect_system_dark_theme(void);
 static void apply_dark_css(gboolean apply);
 static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data);
-static void on_left_file_info_clicked(GtkButton *btn, gpointer user_data);
+static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data);
+static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
 static void clear_file_info_search_results(void);
 static SearchPageResult* find_search_result_for_page(int page_1based);
@@ -2217,70 +2225,83 @@ cleanup:
     g_free(doc_uri);
 }
 
-static void on_sessions_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
+static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
-    if (current_sidebar_mode == SIDEBAR_SESSIONS) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-        current_sidebar_mode = SIDEBAR_NONE;
-    } else {
-        if (gtk_widget_get_parent(sidebar) != NULL) {
+    if (!gtk_toggle_button_get_active(btn)) {
+        /* Toggled off: close sidebar if we are the active mode */
+        if (current_sidebar_mode == SIDEBAR_SESSIONS) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
+            current_sidebar_mode = SIDEBAR_NONE;
         }
+        return;
+    }
 
-        // Hide other sidebar contents
-        gtk_widget_hide(sidebar_label);
-        gtk_widget_hide(sessions_container);
-        gtk_widget_hide(settings_container);
-        gtk_widget_hide(toc_container);
-        gtk_widget_hide(file_info_container);
-        gtk_tree_store_clear(toc_tree_store);
+    /* Toggled on: open sessions sidebar, deactivate other buttons */
+    if (gtk_widget_get_parent(sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    }
 
-        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
+    /* Deactivate other toggle buttons */
+    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
 
-        // Show sessions container
-        gtk_widget_show_all(sessions_container);
+    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
 
-        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_set_size_request(sidebar, 300, -1);
-        gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_SESSIONS;
+    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
 
-        /* Auto-select current session and document in the tree */
-        if (sessions_tree_store && current_selected_session) {
-            reset_sessions_tree_selection_guard();
-            sessions_tree_syncing = TRUE;
-            GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
-            GtkTreeIter iter;
-            if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
-                do {
-                    gchar *name = NULL;
-                    gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
-                                       SESSION_COL_SESSION_NAME, &name, -1);
-                    if (!name) continue;
-                    if (g_strcmp0(name, current_selected_session) != 0) {
-                        g_free(name);
-                        continue;
-                    }
-                    /* Found matching session row — select and expand it */
-                    GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
-                    if (path) {
-                        gtk_tree_selection_select_path(sel, path);
-                        gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
-                        gtk_tree_path_free(path);
-                    }
-                    update_sessions_tree_document_selection();
+    /* Hide other sidebar contents */
+    gtk_widget_hide(sidebar_label);
+    gtk_widget_hide(sessions_container);
+    gtk_widget_hide(settings_container);
+    gtk_widget_hide(toc_container);
+    gtk_widget_hide(file_info_container);
+    gtk_tree_store_clear(toc_tree_store);
+
+    /* Show sessions container */
+    gtk_widget_show_all(sessions_container);
+
+    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+    gtk_widget_set_size_request(sidebar, 300, -1);
+    gtk_widget_show(sidebar);
+    current_sidebar_mode = SIDEBAR_SESSIONS;
+
+    /* Auto-select current session and document in the tree */
+    if (sessions_tree_store && current_selected_session) {
+        reset_sessions_tree_selection_guard();
+        sessions_tree_syncing = TRUE;
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+        GtkTreeIter iter;
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+            do {
+                gchar *name = NULL;
+                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                                   SESSION_COL_SESSION_NAME, &name, -1);
+                if (!name) continue;
+                if (g_strcmp0(name, current_selected_session) != 0) {
                     g_free(name);
-                    break;
-                } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
-            }
-            sessions_tree_syncing = FALSE;
+                    continue;
+                }
+                /* Found matching session row — select and expand it */
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                if (path) {
+                    gtk_tree_selection_select_path(sel, path);
+                    gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                    gtk_tree_path_free(path);
+                }
+                update_sessions_tree_document_selection();
+                g_free(name);
+                break;
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
         }
+        sessions_tree_syncing = FALSE;
     }
 }
 
@@ -2474,39 +2495,51 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
     g_free(named_dest);
 }
 
-static void on_toc_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
+static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
-    if (current_sidebar_mode == SIDEBAR_TOC) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-        current_sidebar_mode = SIDEBAR_NONE;
-    } else {
-        if (gtk_widget_get_parent(sidebar) != NULL) {
+
+    if (!gtk_toggle_button_get_active(btn)) {
+        if (current_sidebar_mode == SIDEBAR_TOC) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
+            current_sidebar_mode = SIDEBAR_NONE;
         }
-
-        // Hide other sidebar contents
-        gtk_widget_hide(sidebar_label);
-        gtk_widget_hide(sessions_container);
-        gtk_widget_hide(settings_container);
-        gtk_widget_hide(file_info_container);
-
-        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
-
-        populate_toc_treeview();
-
-        gtk_widget_show_all(toc_container);
-        update_toc_selection_for_current_page(get_current_left_tab());
-
-        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_set_size_request(sidebar, 300, -1);
-        gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_TOC;
+        return;
     }
+
+    if (gtk_widget_get_parent(sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    }
+
+    /* Deactivate other toggle buttons */
+    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+
+    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+
+    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+
+    /* Hide other sidebar contents */
+    gtk_widget_hide(sidebar_label);
+    gtk_widget_hide(sessions_container);
+    gtk_widget_hide(settings_container);
+    gtk_widget_hide(file_info_container);
+
+    populate_toc_treeview();
+
+    gtk_widget_show_all(toc_container);
+    update_toc_selection_for_current_page(get_current_left_tab());
+
+    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+    gtk_widget_set_size_request(sidebar, 300, -1);
+    gtk_widget_show(sidebar);
+    current_sidebar_mode = SIDEBAR_TOC;
 }
 
 static double get_angle_for_position(const char *pos) {
@@ -2682,38 +2715,50 @@ static void on_right_color_set(GtkColorButton *btn, gpointer user_data) {
     save_state();
 }
 
-static void on_settings_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
+static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
-    if (current_sidebar_mode == SIDEBAR_SETTINGS) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-        current_sidebar_mode = SIDEBAR_NONE;
-    } else {
-        if (gtk_widget_get_parent(sidebar) != NULL) {
+
+    if (!gtk_toggle_button_get_active(btn)) {
+        if (current_sidebar_mode == SIDEBAR_SETTINGS) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
+            current_sidebar_mode = SIDEBAR_NONE;
         }
-
-        // Hide other sidebar contents
-        gtk_widget_hide(sidebar_label);
-        gtk_widget_hide(sessions_container);
-        gtk_widget_hide(toc_container);
-        gtk_widget_hide(file_info_container);
-        gtk_tree_store_clear(toc_tree_store);
-
-        g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
-        gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-        g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_clicked), NULL);
-
-        // Show settings container
-        gtk_widget_show_all(settings_container);
-
-        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_set_size_request(sidebar, 300, -1);
-        gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_SETTINGS;
+        return;
     }
+
+    if (gtk_widget_get_parent(sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    }
+
+    /* Deactivate other toggle buttons */
+    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+
+    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+
+    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+
+    /* Hide other sidebar contents */
+    gtk_widget_hide(sidebar_label);
+    gtk_widget_hide(sessions_container);
+    gtk_widget_hide(toc_container);
+    gtk_widget_hide(file_info_container);
+    gtk_tree_store_clear(toc_tree_store);
+
+    /* Show settings container */
+    gtk_widget_show_all(settings_container);
+
+    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+    gtk_widget_set_size_request(sidebar, 300, -1);
+    gtk_widget_show(sidebar);
+    current_sidebar_mode = SIDEBAR_SETTINGS;
 }
 
 static SearchPageResult* find_search_result_for_page(int page_1based) {
@@ -2847,35 +2892,51 @@ static GtkWidget *right_popover_path_label;
 static GtkWidget *right_popover_size_label;
 static GtkWidget *right_popover_pages_label;
 
-static void on_left_file_info_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
+static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-        current_sidebar_mode = SIDEBAR_NONE;
-    } else {
-        if (gtk_widget_get_parent(sidebar) != NULL) {
+
+    if (!gtk_toggle_button_get_active(btn)) {
+        if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
             gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
+            current_sidebar_mode = SIDEBAR_NONE;
         }
-
-        gtk_widget_hide(sidebar_label);
-        gtk_widget_hide(sessions_container);
-        gtk_widget_hide(toc_container);
-        gtk_widget_hide(settings_container);
-        gtk_tree_store_clear(toc_tree_store);
-
-        update_file_info_labels(get_current_left_tab());
-        gtk_widget_show_all(file_info_container);
-        gtk_widget_hide(file_info_search_no_results);
-        gtk_widget_hide(file_info_search_overflow_label);
-
-        gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-        gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-        gtk_widget_set_size_request(sidebar, 300, -1);
-        gtk_widget_show(sidebar);
-        current_sidebar_mode = SIDEBAR_FILE_INFO;
+        return;
     }
+
+    if (gtk_widget_get_parent(sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    }
+
+    /* Deactivate other toggle buttons */
+    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+
+    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+
+    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+
+    gtk_widget_hide(sidebar_label);
+    gtk_widget_hide(sessions_container);
+    gtk_widget_hide(toc_container);
+    gtk_widget_hide(settings_container);
+    gtk_tree_store_clear(toc_tree_store);
+
+    update_file_info_labels(get_current_left_tab());
+    gtk_widget_show_all(file_info_container);
+    gtk_widget_hide(file_info_search_no_results);
+    gtk_widget_hide(file_info_search_overflow_label);
+
+    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
+    gtk_widget_set_size_request(sidebar, 300, -1);
+    gtk_widget_show(sidebar);
+    current_sidebar_mode = SIDEBAR_FILE_INFO;
 }
 
 static void on_right_file_info_popover_closed(GtkPopover *popover, gpointer user_data);
@@ -5764,32 +5825,35 @@ GtkWidget* create_main_window(void) {
     /* Buttons*/
     /* Sessions button */
     GtkWidget *sessions_icon = create_toolbar_icon("sessions");
-    GtkWidget *sessions_btn = gtk_button_new();
+    sessions_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(sessions_btn), sessions_icon);
     g_object_set_data_full(G_OBJECT(sessions_btn), "icon-name", g_strdup("sessions"), g_free);
     gtk_widget_set_tooltip_text(sessions_btn, "Sessions");
     atk_object_set_name(gtk_widget_get_accessible(sessions_btn), "Sessions");
-    g_signal_connect(sessions_btn, "clicked", G_CALLBACK(on_sessions_clicked), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
+    g_signal_connect(sessions_btn, "toggled", G_CALLBACK(on_sessions_toggled), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), sessions_btn, FALSE, FALSE, 1);
 
     /* Table of contents button */
     GtkWidget *toc_icon = create_toolbar_icon("toc");
-    GtkWidget *toc_btn = gtk_button_new();
+    toc_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(toc_btn), toc_icon);
     g_object_set_data_full(G_OBJECT(toc_btn), "icon-name", g_strdup("toc"), g_free);
     gtk_widget_set_tooltip_text(toc_btn, "Table of contents");
     atk_object_set_name(gtk_widget_get_accessible(toc_btn), "Table of contents");
-    g_signal_connect(toc_btn, "clicked", G_CALLBACK(on_toc_clicked), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
+    g_signal_connect(toc_btn, "toggled", G_CALLBACK(on_toc_toggled), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), toc_btn, FALSE, FALSE, 1);
 
     /* Settings button */
     GtkWidget *settings_icon = create_toolbar_icon("settings");
-    GtkWidget *settings_btn = gtk_button_new();
+    settings_btn = gtk_toggle_button_new();
     gtk_button_set_image(GTK_BUTTON(settings_btn), settings_icon);
     g_object_set_data_full(G_OBJECT(settings_btn), "icon-name", g_strdup("settings"), g_free);
     gtk_widget_set_tooltip_text(settings_btn, "Settings");
     atk_object_set_name(gtk_widget_get_accessible(settings_btn), "Settings");
-    g_signal_connect(settings_btn, "clicked", G_CALLBACK(on_settings_clicked), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
+    g_signal_connect(settings_btn, "toggled", G_CALLBACK(on_settings_toggled), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), settings_btn, FALSE, FALSE, 1);
 
     /* File information button */
@@ -5800,7 +5864,7 @@ GtkWidget* create_main_window(void) {
     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
     gtk_widget_set_tooltip_text(file_info_btn, "File information");
     atk_object_set_name(gtk_widget_get_accessible(file_info_btn), "File information");
-    g_signal_connect(file_info_btn, "toggled", G_CALLBACK(on_left_file_info_clicked), NULL);
+    g_signal_connect(file_info_btn, "toggled", G_CALLBACK(on_left_file_info_toggled), NULL);
     gtk_box_pack_start(GTK_BOX(toolbar), file_info_btn, FALSE, FALSE, 1);
 
     /* Separator */
