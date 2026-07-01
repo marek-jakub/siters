@@ -1780,12 +1780,6 @@ static void start_initial_scroll_restore(TabData *tab, int target_page, double t
     restore->source_id = g_idle_add(do_initial_scroll_stage, restore);
 }
 
-static void on_horiz_scroll_toggle(GtkToggleButton *button, gpointer user_data) {
-    (void)button;
-    (void)user_data;
-    /* Icon handled statically — button will be repurposed in the future */
-}
-
 static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
     (void)user_data;
     gboolean active = gtk_toggle_button_get_active(button);
@@ -5667,6 +5661,7 @@ GtkWidget* create_main_window(void) {
 
     sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_tree_store));
     g_object_unref(sessions_tree_store);
+    atk_object_set_name(gtk_widget_get_accessible(sessions_tree_view), "Sessions tree");
 
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session / File", renderer, "text", SESSION_COL_LABEL, NULL);

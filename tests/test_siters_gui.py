@@ -433,40 +433,84 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Helper to find session tree view
             def find_sessions_tree():
                 try:
-                    # Try different role names for tree views
-                    roles_to_try = ["tree", "tree view", "table", "tree table"]
+                    # Try by unique accessible name (most reliable)
+                    try:
+                        result = siters_app.findChild(
+                            lambda x: x.name == "Sessions tree"
+                        )
+                        if result:
+                            return result
+                    except Exception:
+                        pass
 
+                    # Try different role names for tree views
+                    roles_to_try = ["tree table", "table", "tree", "tree view"]
                     for role in roles_to_try:
                         try:
-                            result = siters_app.findChild(lambda x: x.roleName == role)
+                            result = siters_app.findChild(
+                                lambda x: x.roleName == role
+                            )
                             if result:
                                 return result
                         except Exception:
                             pass
 
-                    # Try searching for any widget that might be a tree
-                    try:
-                        all_widgets = siters_app.findChildren(lambda x: True)
-                        tree_like = []
-                        for widget in all_widgets[:30]:  # Limit to first 30
-                            if any(
-                                keyword in widget.roleName.lower()
-                                for keyword in ["tree", "table", "list"]
-                            ):
-                                tree_like.append(f"{widget.roleName}: {widget.name}")
-                        if tree_like:
-                            pass
-                    except Exception:
-                        pass
-
                     return None
                 except Exception:
                     return None
 
+
+            # Helper to get session names — tries AT-SPI tree, falls back to config file
+            def get_session_names_from_tree():
+                names = []
+                tree = find_sessions_tree()
+                if tree:
+                    # Try "table cell" first, then "cell" as fallback
+                    cells = tree.findChildren(
+                        lambda x: x.roleName in ("table cell", "cell")
+                    )
+                    if cells:
+                        names = [cell.name for cell in cells if cell.name]
+                    else:
+                        # Fallback: read row children directly
+                        rows = tree.findChildren(
+                            lambda x: x.roleName in ("table row", "row")
+                        )
+                        for row in rows:
+                            child_cells = row.findChildren(lambda x: True)
+                            if child_cells and child_cells[0].name:
+                                names.append(child_cells[0].name)
+
+                # Config file fallback (most reliable when AT-SPI tree is slow to populate)
+                if not names:
+                    try:
+                        import json
+                        cfg_dir = os.path.join(os.environ.get("SITERS_CONFIG_DIR", ""), "siters")
+                        cfg_file = os.path.join(cfg_dir, "siters.json")
+                        if os.path.exists(cfg_file):
+                            with open(cfg_file) as f:
+                                cfg = json.load(f)
+                            sessions = cfg.get("sessions", {})
+                            names = sessions.get("names", [])
+                    except Exception:
+                        pass
+
+                if tree and not cells and not names:
+                    # Debug: print all widget roles and names under the tree
+                    try:
+                        all_kids = tree.findChildren(lambda x: True)
+                        print(
+                            f"DEBUG: Tree has {len(all_kids)} children: "
+                            + ", ".join(f"{c.roleName}='{c.name}'" for c in all_kids[:20])
+                        )
+                    except Exception:
+                        pass
+
+                return names
+
             # Helper to find entry field for new session name
             def find_session_entry():
                 try:
-                    # Search by accessible name first (matches atk_object_set_name)
                     try:
                         result = siters_app.findChild(
                             lambda x: x.name == "Sessions entry"
@@ -476,9 +520,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     except Exception:
                         pass
 
-                    # Fallback: search by role name
                     roles_to_try = ["text", "entry", "text input"]
-
                     for role in roles_to_try:
                         try:
                             result = siters_app.findChild(
@@ -498,13 +540,11 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Helper to find buttons in sessions sidebar
             def find_button_by_name(button_name):
                 try:
-                    # Try exact name match first
                     lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and x.name == '{button_name}'"
                     result = siters_app.findChild(eval(lambda_str))
                     if result:
                         return result
 
-                    # Try accessibility name variations
                     name_variations = {
                         "Add": ["Add session"],
                         "Remove": ["Remove session"],
@@ -518,7 +558,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
                             if result:
                                 return result
 
-                    # Try partial name match
                     lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and '{button_name}'.lower() in (x.name or '').lower()"
                     result = siters_app.findChild(eval(lambda_str))
                     if result:
@@ -527,20 +566,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     return None
                 except Exception:
                     return None
-
-            # Helper to get session names from tree view
-            def get_session_names_from_tree():
-                try:
-                    tree = find_sessions_tree()
-                    if tree:
-                        # Get all children that are cells (tree entries)
-                        cells = tree.findChildren(lambda x: x.roleName == "table cell")
-                        names = [cell.name for cell in cells if cell.name]
-                        return names
-                    else:
-                        return []
-                except Exception:
-                    return []
 
             # Step 1: Click Sessions button to open sessions sidebar
             if hasattr(sessions_btn, "do_action"):
