@@ -43,11 +43,12 @@ enable_testing()
 # Unit test executable
 add_executable(test_siters_unit
     tests/test_siters_unit.c
-    src/siters.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
 )
+
+target_include_directories(test_siters_unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 target_link_libraries(test_siters_unit
     ${GTK_LIBRARIES}
@@ -64,6 +65,10 @@ target_link_options(test_siters_unit PRIVATE
     -Wl,--wrap=gtk_window_set_default_size
     -Wl,--wrap=g_signal_connect_data
     -Wl,--wrap=gtk_window_set_geometry_hints
+    -Wl,--wrap=gtk_widget_get_allocation
+    -Wl,--wrap=gtk_range_get_adjustment
+    -Wl,--wrap=gtk_adjustment_get_value
+    -Wl,--wrap=gtk_scrolled_window_get_vadjustment
 )
 
 add_test(NAME unit_tests COMMAND test_siters_unit)
@@ -72,4 +77,10 @@ add_test(NAME unit_tests COMMAND test_siters_unit)
 install(TARGETS siters RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/siters/data
         PATTERN "test_pdfs" EXCLUDE)
-install(FILES data/icons/siters48x48.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps RENAME siters.png)
+install(FILES data/icons/siters.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+install(FILES data/icons/siters_16.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/16x16/apps RENAME siters.png)
+install(FILES data/icons/siters_24.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/24x24/apps RENAME siters.png)
+install(FILES data/icons/siters_32.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/32x32/apps RENAME siters.png)
+install(FILES data/icons/siters_48.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps RENAME siters.png)
+install(FILES data/icons/siters_64.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/64x64/apps RENAME siters.png)
+install(FILES data/icons/siters_128.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps RENAME siters.png)
