@@ -9,6 +9,9 @@
 #include "session_model.h"
 #include "document_model.h"
 
+/* To limit RAM use as large zoom takes many MB of resources */
+#define MAX_SURFACE_DIM 5000
+
 /* DATADIR is normally defined by -DDATADIR=... at build time.
    This fallback lets clang-based tools parse the file without flags. */
 #ifndef DATADIR
@@ -67,6 +70,8 @@ typedef struct TabDataStruct {
     cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
     GList **page_links;     /* array[n_pages]: GList of PopplerLinkMapping*, NULL = not loaded */
     int page_links_n;       /* size of page_links array (== n_pages) */
+    GdkCursorType last_cursor_type; /* last cursor set on drawing area (to avoid redundant X11 calls) */
+    gint64 last_cursor_check;       /* monotonic time of last link cursor check (for throttling) */
 } TabData;
 
 typedef enum {
@@ -3483,16 +3488,19 @@ static gboolean on_h_scrollbar_leave(GtkWidget *w, GdkEvent *e, gpointer user_da
     return FALSE;
 }
 
-/* Load link mappings for all pages (lazy, called on first hover/click) */
-static void ensure_links_loaded(TabData *tab) {
-    if (!tab || !tab->doc || tab->page_links) return;
-    tab->page_links_n = tab->n_pages;
-    tab->page_links = g_new0(GList*, tab->n_pages);
-    for (int i = 0; i < tab->n_pages; i++) {
-        PopplerPage *page = poppler_document_get_page(tab->doc, i);
-        if (page) {
-            tab->page_links[i] = poppler_page_get_link_mapping(page);
-            g_object_unref(page);
+/* Ensure link mappings are loaded for a specific page (lazy, per-page).
+   Only allocates the array if needed; only fetches the requested page if not yet loaded. */
+static void ensure_page_links_loaded(TabData *tab, int page) {
+    if (!tab || !tab->doc) return;
+    if (!tab->page_links) {
+        tab->page_links_n = tab->n_pages;
+        tab->page_links = g_new0(GList*, tab->n_pages);
+    }
+    if (page >= 0 && page < tab->page_links_n && !tab->page_links[page]) {
+        PopplerPage *ppage = poppler_document_get_page(tab->doc, page);
+        if (ppage) {
+            tab->page_links[page] = poppler_page_get_link_mapping(ppage);
+            g_object_unref(ppage);
         }
     }
 }
@@ -3613,13 +3621,60 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                     }
                     break;
                 case POPPLER_ACTION_GOTO_DEST:
-                    if (mapping->action->goto_dest.dest &&
-                        mapping->action->goto_dest.dest->page_num > 0) {
-                        int dest = mapping->action->goto_dest.dest->page_num - 1;
-                        if (dest >= 0 && dest < tab->n_pages) {
-                            tab->cur_page = dest;
-                            scroll_to_page(tab, dest);
+                    if (mapping->action->goto_dest.dest) {
+                        if (mapping->action->goto_dest.dest->page_num > 0) {
+                            int dest = mapping->action->goto_dest.dest->page_num - 1;
+                            if (dest >= 0 && dest < tab->n_pages) {
+                                tab->cur_page = dest;
+                                scroll_to_page(tab, dest);
+                                update_document_model_from_tab(tab);
+                                return TRUE;
+                            }
+                        } else if (mapping->action->goto_dest.dest->type == POPPLER_DEST_NAMED &&
+                                   mapping->action->goto_dest.dest->named_dest) {
+                            PopplerDest *resolved = poppler_document_find_dest(tab->doc,
+                                mapping->action->goto_dest.dest->named_dest);
+                            if (resolved && resolved->page_num > 0) {
+                                int dest = resolved->page_num - 1;
+                                if (dest >= 0 && dest < tab->n_pages) {
+                                    tab->cur_page = dest;
+                                    scroll_to_page(tab, dest);
+                                    update_document_model_from_tab(tab);
+                                    poppler_dest_free(resolved);
+                                    return TRUE;
+                                }
+                            }
+                            if (resolved) poppler_dest_free(resolved);
+                        }
+                    }
+                    break;
+                case POPPLER_ACTION_NAMED:
+                    if (mapping->action->named.named_dest) {
+                        const char *name = mapping->action->named.named_dest;
+                        if (g_strcmp0(name, "FirstPage") == 0) {
+                            tab->cur_page = 0;
+                            scroll_to_page(tab, 0);
                             update_document_model_from_tab(tab);
+                            return TRUE;
+                        } else if (g_strcmp0(name, "LastPage") == 0) {
+                            tab->cur_page = tab->n_pages - 1;
+                            scroll_to_page(tab, tab->n_pages - 1);
+                            update_document_model_from_tab(tab);
+                            return TRUE;
+                        } else if (g_strcmp0(name, "NextPage") == 0) {
+                            int p = MIN(tab->cur_page + 1, tab->n_pages - 1);
+                            tab->cur_page = p;
+                            scroll_to_page(tab, p);
+                            update_document_model_from_tab(tab);
+                            return TRUE;
+                        } else if (g_strcmp0(name, "PrevPage") == 0) {
+                            int p = MAX(tab->cur_page - 1, 0);
+                            tab->cur_page = p;
+                            scroll_to_page(tab, p);
+                            update_document_model_from_tab(tab);
+                            return TRUE;
+                        } else if (g_strcmp0(name, "GoBack") == 0 || g_strcmp0(name, "GoForward") == 0) {
+                            /* Silently ignore navigation history actions */
                             return TRUE;
                         }
                     }
@@ -3668,15 +3723,18 @@ static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *eve
             double px, py;
             page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
             if (page >= 0) {
-                ensure_links_loaded(tab);
+                ensure_page_links_loaded(tab, page);
                 activate_link_at(tab, page, px, py);
             }
         }
     }
 
-    GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), GDK_LEFT_PTR);
-    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-    g_object_unref(cursor);
+    if (tab->last_cursor_type != GDK_LEFT_PTR) {
+        GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), GDK_LEFT_PTR);
+        gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
+        g_object_unref(cursor);
+        tab->last_cursor_type = GDK_LEFT_PTR;
+    }
     return TRUE;
 }
 
@@ -3699,19 +3757,31 @@ static gboolean on_drawing_motion_notify(GtkWidget *widget, GdkEventMotion *even
         return TRUE;
     }
 
-    /* Check for links under cursor and change cursor accordingly */
+    /* Throttle link cursor check to ~10 Hz to avoid O(n) loop on every motion */
     GdkCursorType cursor_type = GDK_LEFT_PTR;
-    int page;
-    double px, py;
-    page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
-    if (page >= 0) {
-        ensure_links_loaded(tab);
-        if (has_link_at(tab, page, px, py))
-            cursor_type = GDK_HAND2;
+    gint64 now = g_get_monotonic_time();
+    if (now - tab->last_cursor_check > 100000) { /* 100ms */
+        tab->last_cursor_check = now;
+        int page;
+        double px, py;
+        page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
+        if (page >= 0) {
+            ensure_page_links_loaded(tab, page);
+            if (has_link_at(tab, page, px, py))
+                cursor_type = GDK_HAND2;
+        }
+    } else {
+        /* Use current cursor type — it won't change between throttled checks */
+        cursor_type = tab->last_cursor_type;
     }
-    GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), cursor_type);
-    gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
-    g_object_unref(cursor);
+
+    /* Only call into GDK/X11 when cursor type actually changes */
+    if (cursor_type != tab->last_cursor_type) {
+        GdkCursor *cursor = gdk_cursor_new_for_display(gtk_widget_get_display(widget), cursor_type);
+        gdk_window_set_cursor(gtk_widget_get_window(widget), cursor);
+        g_object_unref(cursor);
+        tab->last_cursor_type = cursor_type;
+    }
 
     if (tab->layout_mode != 2 || !tab->h_scrollbar) return FALSE;
     GtkAllocation alloc;
@@ -3805,6 +3875,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_restore(cr);
                 int iw = (int)(tab->cached_page_widths[i] * scale * dsx + 0.5);
                 int ih = (int)(tab->cached_page_heights[i] * scale * dsy + 0.5);
+                if (iw > MAX_SURFACE_DIM) iw = MAX_SURFACE_DIM;
+                if (ih > MAX_SURFACE_DIM) ih = MAX_SURFACE_DIM;
                 if (iw > 0 && ih > 0) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -3902,6 +3974,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_restore(cr);
                     int iw1 = (int)(tab->cached_page_widths[i] * scale * dsx2 + 0.5);
                     int ih1 = (int)(tab->cached_page_heights[i] * scale * dsy2 + 0.5);
+                    if (iw1 > MAX_SURFACE_DIM) iw1 = MAX_SURFACE_DIM;
+                    if (ih1 > MAX_SURFACE_DIM) ih1 = MAX_SURFACE_DIM;
                     if (iw1 > 0 && ih1 > 0) {
                         if (tab->page_cache[i]) {
                             int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -3965,6 +4039,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     cairo_restore(cr);
                     int iw2 = (int)(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5);
                     int ih2 = (int)(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5);
+                    if (iw2 > MAX_SURFACE_DIM) iw2 = MAX_SURFACE_DIM;
+                    if (ih2 > MAX_SURFACE_DIM) ih2 = MAX_SURFACE_DIM;
                     if (iw2 > 0 && ih2 > 0) {
                         if (tab->page_cache[i + 1]) {
                             int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
@@ -4049,6 +4125,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_restore(cr);
                 int iwh = (int)(tab->cached_page_widths[i] * scale * dsxh + 0.5);
                 int ihh = (int)(tab->cached_page_heights[i] * scale * dsyh + 0.5);
+                if (iwh > MAX_SURFACE_DIM) iwh = MAX_SURFACE_DIM;
+                if (ihh > MAX_SURFACE_DIM) ihh = MAX_SURFACE_DIM;
                 if (iwh > 0 && ihh > 0) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -4469,6 +4547,8 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->is_helper = (notebook == right_notebook);
     tab->zoom_scroll_source_id = 0;
     tab->scroll_doc_debounce_id = 0;
+    tab->last_cursor_type = GDK_LEFT_PTR;
+    tab->last_cursor_check = 0;
 
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
