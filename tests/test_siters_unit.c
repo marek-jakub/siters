@@ -101,8 +101,13 @@ gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_sig
     return 1;
 }
 
-/* Include siters.c to access static functions and types */
+/* Include siters.c to access static functions and types.
+   Suppress -Wunused-function: many static callbacks are registered
+   via g_signal_connect (function pointer) and appear unused to the compiler. */
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
 #include "../src/siters.c"
+#pragma GCC diagnostic pop
 
 /* Suppress GLib-GObject validation warnings during tests */
 static void suppress_gtk_warnings(const gchar *log_domain, GLogLevelFlags log_level,
