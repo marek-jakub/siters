@@ -4178,7 +4178,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
     /* Prune cache: keep only pages within margin of the visible range */
     if (first_visible >= 0 && last_visible >= 0) {
-        int margin = 4;
+        int margin = 2;
         for (int i = 0; i < tab->n_pages; ++i) {
             if (tab->page_cache[i] && (i < first_visible - margin || i > last_visible + margin)) {
                 cairo_surface_destroy(tab->page_cache[i]);
