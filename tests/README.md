@@ -32,11 +32,12 @@ make -f Makefile.tests run-unit-tests
 - GCC or Clang compiler
 - CMocka library (`libcmocka-dev` on Ubuntu/Debian)
 - GTK+3 development files (`libgtk-3-dev`)
-- Poppler-glib development files (`libpoppler-glib-dev`)
+- MuPDF development files
 
 **Install dependencies (Ubuntu/Debian):**
 ```bash
-sudo apt install libcmocka-dev libgtk-3-dev libpoppler-glib-dev
+sudo apt install libcmocka-dev libgtk-3-dev
+# MuPDF: build from source (see Makefile.tests for MUPDF_DIR)
 ```
 
 ### 2. GUI Tests (Dogtail)
@@ -164,7 +165,7 @@ jobs:
     steps:
       - uses: actions/checkout@v2
       - name: Install dependencies
-        run: sudo apt install libcmocka-dev libgtk-3-dev libpoppler-glib-dev
+        run: sudo apt install libcmocka-dev libgtk-3-dev
       - name: Build and test
         run: make -f Makefile.tests run-unit-tests
 
@@ -174,7 +175,7 @@ jobs:
       - uses: actions/checkout@v2
       - name: Install dependencies
         run: |
-          sudo apt install libgtk-3-dev libpoppler-glib-dev
+          sudo apt install libgtk-3-dev
           pip install dogtail python3-pyatspi
       - name: Build and test
         run: make -f Makefile.tests run-gui-tests

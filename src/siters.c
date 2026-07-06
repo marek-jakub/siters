@@ -2,15 +2,18 @@
 #include <atk/atk.h>
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
-#include <poppler.h>
+#include "pdf.h"
 #include <math.h>
 #include "siters.h"
 #include "sessions_model.h"
 #include "session_model.h"
 #include "document_model.h"
 
+#include "mem_debug.h"
+
 /* To limit RAM use as large zoom takes many MB of resources */
-#define MAX_SURFACE_DIM 5000
+#define MAX_SURFACE_DIM 3500
+#define MAX_CACHE_BYTES (80 * 1024 * 1024)
 
 /* DATADIR is normally defined by -DDATADIR=... at build time.
    This fallback lets clang-based tools parse the file without flags. */
@@ -33,7 +36,7 @@ typedef struct {
 } RestoreState;
 
 typedef struct TabDataStruct {
-    PopplerDocument *doc;
+    PdfrDoc *doc;
     int n_pages;
     int cur_page;
     GtkWidget *drawing;
@@ -64,11 +67,12 @@ typedef struct TabDataStruct {
     double drag_start_y;        /* cursor Y at drag start in widget coords */
     double drag_scroll_x;       /* h_scrollbar value at drag start */
     double drag_scroll_y;       /* vadjustment value at drag start */
-    double *cached_page_widths;  /* raw page widths from poppler_page_get_size */
-    double *cached_page_heights; /* raw page heights from poppler_page_get_size */
+    double *cached_page_widths;  /* raw page widths from pdfr_page_size */
+    double *cached_page_heights; /* raw page heights from pdfr_page_size */
     double max_page_h;           /* tallest page height (scaled) for row view sizing */
     cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
-    GList **page_links;     /* array[n_pages]: GList of PopplerLinkMapping*, NULL = not loaded */
+    int total_cache_bytes;        /* sum of pixel-buffer bytes across all cached surfaces */
+    PdfrLink **page_links;     /* array[n_pages]: head of PerPageLink list, NULL = not loaded */
     int page_links_n;       /* size of page_links array (== n_pages) */
     GdkCursorType last_cursor_type; /* last cursor set on drawing area (to avoid redundant X11 calls) */
     gint64 last_cursor_check;       /* monotonic time of last link cursor check (for throttling) */
@@ -164,7 +168,7 @@ enum {
 typedef struct {
     int page;
     int n_matches;
-    PopplerRectangle rects[SEARCH_MAX_PER_PAGE];
+    PdfrRect rects[SEARCH_MAX_PER_PAGE];
 } SearchPageResult;
 
 static SearchPageResult search_page_results[SEARCH_MAX_PAGES];
@@ -437,7 +441,7 @@ static void update_file_info_labels(TabData *tab) {
     g_object_unref(gf);
 
     if (tab->doc) {
-        int n_pages = poppler_document_get_n_pages(tab->doc);
+        int n_pages = pdfr_count_pages(tab->doc);
         gchar *pages_text = g_strdup_printf("Pages: %d", n_pages);
         gtk_label_set_text(GTK_LABEL(file_info_pages_label), pages_text);
         g_free(pages_text);
@@ -592,21 +596,22 @@ static void destroy_tab_data(gpointer data) {
         g_source_remove(tab->h_scrollbar_timer_id);
         tab->h_scrollbar_timer_id = 0;
     }
+    /* Free link mappings while doc is still alive */
+    if (tab->page_links) {
+        for (int i = 0; i < tab->page_links_n; i++) {
+            if (tab->page_links[i])
+                pdfr_free_links(tab->doc, tab->page_links[i]);
+        }
+        g_free(tab->page_links);
+    }
     if (tab->doc) {
-        g_object_unref(tab->doc);
+        pdfr_close(tab->doc);
     }
     g_free(tab->current_file);
     invalidate_page_cache(tab);
     g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
-    if (tab->page_links) {
-        for (int i = 0; i < tab->page_links_n; i++) {
-            if (tab->page_links[i])
-                poppler_page_free_link_mapping(tab->page_links[i]);
-        }
-        g_free(tab->page_links);
-    }
     g_free(tab);
 }
 
@@ -1106,6 +1111,21 @@ static double get_page_height_ppi(TabData *tab, int page_idx) {
     return ph * scale;
 }
 
+/* Return pixel-buffer byte count for a cached surface (0 if NULL). */
+static inline int surface_byte_size(cairo_surface_t *s) {
+    if (!s) return 0;
+    return cairo_image_surface_get_width(s) * cairo_image_surface_get_height(s) * 4;
+}
+
+/* Destroy a single cached surface and update the tab's byte counter. */
+static void cache_evict_idx(TabData *tab, int idx) {
+    if (!tab || idx < 0 || !tab->page_cache || !tab->page_cache[idx]) return;
+    tab->total_cache_bytes -= surface_byte_size(tab->page_cache[idx]);
+    cairo_surface_destroy(tab->page_cache[idx]);
+    MEM_SURFACE_DESTROYED();
+    tab->page_cache[idx] = NULL;
+}
+
 static void cache_page_dimensions(TabData *tab) {
     if (!tab || !tab->doc || tab->n_pages <= 0) {
         if (tab) {
@@ -1127,11 +1147,11 @@ static void cache_page_dimensions(TabData *tab) {
     tab->cached_page_widths = g_malloc(sizeof(double) * tab->n_pages);
     tab->cached_page_heights = g_malloc(sizeof(double) * tab->n_pages);
     for (int i = 0; i < tab->n_pages; ++i) {
-        PopplerPage *page = poppler_document_get_page(tab->doc, i);
+        PdfrPage *page = pdfr_load_page(tab->doc, i);
         double pw = 0, ph = 0;
         if (page) {
-            poppler_page_get_size(page, &pw, &ph);
-            g_object_unref(page);
+            pdfr_page_size(tab->doc, page, &pw, &ph);
+            pdfr_free_page(tab->doc, page);
         }
         tab->cached_page_widths[i] = pw > 0 ? pw : 1.0;
         tab->cached_page_heights[i] = ph > 0 ? ph : 1.0;
@@ -1140,39 +1160,28 @@ static void cache_page_dimensions(TabData *tab) {
 
 static void invalidate_page_cache(TabData *tab) {
     if (!tab || !tab->page_cache) return;
-    for (int i = 0; i < tab->n_pages; ++i) {
-        if (tab->page_cache[i]) {
-            cairo_surface_destroy(tab->page_cache[i]);
-            tab->page_cache[i] = NULL;
-        }
-    }
+    for (int i = 0; i < tab->n_pages; ++i)
+        cache_evict_idx(tab, i);
 }
 
 static gboolean ensure_tab_doc_loaded(TabData *tab) {
     if (!tab || !tab->current_file) return FALSE;
     if (tab->doc) return TRUE;
 
-    GError *error = NULL;
-    char *uri = g_filename_to_uri(tab->current_file, NULL, &error);
-    if (!uri) {
-        g_warning("Failed to convert filename to URI: %s", error->message);
-        g_clear_error(&error);
-        return FALSE;
-    }
-
-    PopplerDocument *doc = poppler_document_new_from_file(uri, NULL, &error);
-    g_free(uri);
+    char *open_error = NULL;
+    PdfrDoc *doc = pdfr_open(tab->current_file, &open_error);
     if (!doc) {
-        g_warning("Failed to reopen PDF: %s", error->message);
-        g_clear_error(&error);
+        g_warning("Failed to reopen PDF: %s", open_error ? open_error : "unknown error");
+        free(open_error);
         return FALSE;
     }
+    free(open_error);
 
     if (tab->doc) {
-        g_object_unref(tab->doc);
+        pdfr_close(tab->doc);
     }
     tab->doc = doc;
-    tab->n_pages = poppler_document_get_n_pages(doc);
+    tab->n_pages = pdfr_count_pages(doc);
     cache_page_dimensions(tab);
     build_continuous_view(tab);
     queue_draw(tab);
@@ -2304,45 +2313,31 @@ static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data) {
     }
 }
 
-static void populate_toc_treeview_recursive(PopplerIndexIter *iter, GtkTreeIter *parent, PopplerDocument *doc) {
-    do {
-        PopplerAction *action = poppler_index_iter_get_action(iter);
-        if (action && action->type == POPPLER_ACTION_GOTO_DEST) {
-            const char *title = action->goto_dest.title;
-            int page = 0;
-            char *named_dest = NULL;
+static void populate_toc_treeview_recursive(PdfrOutline *entry, GtkTreeIter *parent) {
+    for (PdfrOutline *cur = entry; cur; cur = cur->next) {
+        int page = cur->page;
+        char *named_dest = NULL;
 
-            if (action->goto_dest.dest) {
-                if (action->goto_dest.dest->page_num > 0) {
-                    page = action->goto_dest.dest->page_num;
-                } else if (action->goto_dest.dest->type == POPPLER_DEST_NAMED &&
-                           action->goto_dest.dest->named_dest) {
-                    named_dest = g_strdup(action->goto_dest.dest->named_dest);
-                    PopplerDest *resolved = poppler_document_find_dest(doc, named_dest);
-                    if (resolved) {
-                        page = resolved->page_num;
-                        poppler_dest_free(resolved);
-                    }
-                }
-            }
-
-            GtkTreeIter child;
-            gtk_tree_store_append(toc_tree_store, &child, parent);
-            gtk_tree_store_set(toc_tree_store, &child,
-                              TOC_COL_LABEL, title ? title : "(Untitled)",
-                              TOC_COL_PAGE, page,
-                              TOC_COL_NAMED_DEST, named_dest,
-                              -1);
-            g_free(named_dest);
-
-            PopplerIndexIter *child_iter = poppler_index_iter_get_child(iter);
-            if (child_iter) {
-                populate_toc_treeview_recursive(child_iter, &child, doc);
-                poppler_index_iter_free(child_iter);
+        if (page <= 0) {
+            /* Try to resolve named dest if page unresolved */
+            if (cur->title && strlen(cur->title) > 0) {
+                /* No named dest stored in outline; leave page as 0 */
             }
         }
-        if (action) poppler_action_free(action);
-    } while (poppler_index_iter_next(iter));
+
+        GtkTreeIter child;
+        gtk_tree_store_append(toc_tree_store, &child, parent);
+        gtk_tree_store_set(toc_tree_store, &child,
+                          TOC_COL_LABEL, cur->title ? cur->title : "(Untitled)",
+                          TOC_COL_PAGE, page,
+                          TOC_COL_NAMED_DEST, named_dest,
+                          -1);
+        g_free(named_dest);
+
+        if (cur->down) {
+            populate_toc_treeview_recursive(cur->down, &child);
+        }
+    }
 }
 
 static void populate_toc_treeview_for_tab(TabData *tab) {
@@ -2352,11 +2347,11 @@ static void populate_toc_treeview_for_tab(TabData *tab) {
     if (!tab->doc) ensure_tab_doc_loaded(tab);
     if (!tab->doc) return;
 
-    PopplerIndexIter *root_iter = poppler_index_iter_new(tab->doc);
-    if (!root_iter) return;
+    PdfrOutline *outline = pdfr_load_outline(tab->doc);
+    if (!outline) return;
 
-    populate_toc_treeview_recursive(root_iter, NULL, tab->doc);
-    poppler_index_iter_free(root_iter);
+    populate_toc_treeview_recursive(outline, NULL);
+    pdfr_free_outline(tab->doc, outline);
 }
 
 void populate_toc_treeview(void) {
@@ -2473,11 +2468,8 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
     if (page == 0 && named_dest) {
         TabData *tab = get_current_left_tab();
         if (tab && ensure_tab_doc_loaded(tab)) {
-            PopplerDest *resolved = poppler_document_find_dest(tab->doc, named_dest);
-            if (resolved && resolved->page_num > 0) {
-                page = resolved->page_num;
-            }
-            if (resolved) poppler_dest_free(resolved);
+            int resolved = pdfr_resolve_named_dest(tab->doc, named_dest);
+            if (resolved > 0) page = resolved;
         }
     }
 
@@ -2795,30 +2787,23 @@ static void perform_file_info_search(const char *text) {
     if (!tab || !ensure_tab_doc_loaded(tab)) return;
     if (!tab->doc) return;
 
-    int n_pages = poppler_document_get_n_pages(tab->doc);
+    int n_pages = pdfr_count_pages(tab->doc);
     if (n_pages <= 0) return;
 
     for (int i = 0; i < n_pages && search_page_results_n < SEARCH_MAX_PAGES; i++) {
-        PopplerPage *page = poppler_document_get_page(tab->doc, i);
+        PdfrPage *page = pdfr_load_page(tab->doc, i);
         if (!page) continue;
 
-        GList *matches = poppler_page_find_text(page, text);
-        int n_matches = 0;
-        if (matches) {
-            n_matches = g_list_length(matches);
-            if (n_matches > SEARCH_MAX_PER_PAGE) n_matches = SEARCH_MAX_PER_PAGE;
+        PdfrRect matches[SEARCH_MAX_PER_PAGE];
+        int n_matches = pdfr_search_page(tab->doc, page, text, matches, SEARCH_MAX_PER_PAGE);
+
+        if (n_matches > 0) {
             SearchPageResult *r = &search_page_results[search_page_results_n];
             r->page = i + 1;
             r->n_matches = n_matches;
-            GList *iter = matches;
-            for (int m = 0; m < n_matches && iter; m++, iter = iter->next) {
-                r->rects[m] = *(PopplerRectangle *)iter->data;
-            }
+            memcpy(r->rects, matches, sizeof(PdfrRect) * n_matches);
             search_page_results_n++;
-        }
-        g_list_free_full(matches, (GDestroyNotify)poppler_rectangle_free);
 
-        if (n_matches > 0) {
             GtkTreeIter tree_iter;
             const char *plural = n_matches == 1 ? "" : "es";
             gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n_matches, plural);
@@ -2830,7 +2815,7 @@ static void perform_file_info_search(const char *text) {
             g_free(label);
         }
 
-        g_object_unref(page);
+        pdfr_free_page(tab->doc, page);
     }
 
     if (search_page_results_n == 0) {
@@ -3009,7 +2994,7 @@ static void on_right_file_info_clicked(GtkButton *button, gpointer user_data) {
             g_object_unref(gf);
 
             if (tab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(tab->doc));
+                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(tab->doc));
                 gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
@@ -3488,18 +3473,18 @@ static void ensure_page_links_loaded(TabData *tab, int page) {
     if (!tab || !tab->doc) return;
     if (!tab->page_links) {
         tab->page_links_n = tab->n_pages;
-        tab->page_links = g_new0(GList*, tab->n_pages);
+        tab->page_links = g_new0(PdfrLink*, tab->n_pages);
     }
     if (page >= 0 && page < tab->page_links_n && !tab->page_links[page]) {
-        PopplerPage *ppage = poppler_document_get_page(tab->doc, page);
+        PdfrPage *ppage = pdfr_load_page(tab->doc, page);
         if (ppage) {
-            tab->page_links[page] = poppler_page_get_link_mapping(ppage);
-            g_object_unref(ppage);
+            tab->page_links[page] = pdfr_load_links(tab->doc, ppage);
+            pdfr_free_page(tab->doc, ppage);
         }
     }
 }
 
-/* Convert widget coordinates to page index and page-relative Poppler-space (points, bottom-left origin).
+/* Convert widget coordinates to page index and page-relative PDF-space (points, bottom-left origin).
    Returns 0-based page index, or -1 if no page at (wx, wy). */
 static int widget_to_page_coords(TabData *tab, double wx, double wy,
                                   double *out_px, double *out_py) {
@@ -3575,38 +3560,32 @@ static int widget_to_page_coords(TabData *tab, double wx, double wy,
     return -1;
 }
 
-/* Check if there is a clickable link at the given page-relative Poppler coordinates */
+/* Check if there is a clickable link at the given page-relative coordinates */
 static gboolean has_link_at(TabData *tab, int page, double px, double py) {
     if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
-    GList *iter = tab->page_links[page];
-    while (iter) {
-        PopplerLinkMapping *mapping = iter->data;
-        if (mapping) {
-            PopplerRectangle *a = &mapping->area;
-            if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2)
-                return TRUE;
-        }
-        iter = iter->next;
+    PdfrLink *link = tab->page_links[page];
+    while (link) {
+        PdfrRect *a = &link->rect;
+        if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2)
+            return TRUE;
+        link = link->next;
     }
     return FALSE;
 }
 
-/* Activate the link at the given page-relative Poppler coordinates (if any) */
+/* Activate the link at the given page-relative coordinates (if any) */
 static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
     if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
-    GList *iter = tab->page_links[page];
-    while (iter) {
-        PopplerLinkMapping *mapping = iter->data;
-        if (!mapping) { iter = iter->next; continue; }
-        PopplerRectangle *a = &mapping->area;
+    PdfrLink *link = tab->page_links[page];
+    while (link) {
+        PdfrRect *a = &link->rect;
         if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2) {
-            if (!mapping->action) { iter = iter->next; continue; }
-            switch (mapping->action->type) {
-                case POPPLER_ACTION_URI:
-                    if (mapping->action->uri.uri) {
+            switch (link->type) {
+                case PDF_LINK_URI:
+                    if (link->uri) {
                         GError *err = NULL;
                         gtk_show_uri_on_window(GTK_WINDOW(window),
-                            mapping->action->uri.uri, GDK_CURRENT_TIME, &err);
+                            link->uri, GDK_CURRENT_TIME, &err);
                         if (err) {
                             g_warning("Failed to open URI: %s", err->message);
                             g_clear_error(&err);
@@ -3614,37 +3593,20 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                         return TRUE;
                     }
                     break;
-                case POPPLER_ACTION_GOTO_DEST:
-                    if (mapping->action->goto_dest.dest) {
-                        if (mapping->action->goto_dest.dest->page_num > 0) {
-                            int dest = mapping->action->goto_dest.dest->page_num - 1;
-                            if (dest >= 0 && dest < tab->n_pages) {
-                                tab->cur_page = dest;
-                                scroll_to_page(tab, dest);
-                                update_document_model_from_tab(tab);
-                                return TRUE;
-                            }
-                        } else if (mapping->action->goto_dest.dest->type == POPPLER_DEST_NAMED &&
-                                   mapping->action->goto_dest.dest->named_dest) {
-                            PopplerDest *resolved = poppler_document_find_dest(tab->doc,
-                                mapping->action->goto_dest.dest->named_dest);
-                            if (resolved && resolved->page_num > 0) {
-                                int dest = resolved->page_num - 1;
-                                if (dest >= 0 && dest < tab->n_pages) {
-                                    tab->cur_page = dest;
-                                    scroll_to_page(tab, dest);
-                                    update_document_model_from_tab(tab);
-                                    poppler_dest_free(resolved);
-                                    return TRUE;
-                                }
-                            }
-                            if (resolved) poppler_dest_free(resolved);
+                case PDF_LINK_GOTO:
+                    if (link->page_num > 0) {
+                        int dest = link->page_num - 1;
+                        if (dest >= 0 && dest < tab->n_pages) {
+                            tab->cur_page = dest;
+                            scroll_to_page(tab, dest);
+                            update_document_model_from_tab(tab);
+                            return TRUE;
                         }
                     }
                     break;
-                case POPPLER_ACTION_NAMED:
-                    if (mapping->action->named.named_dest) {
-                        const char *name = mapping->action->named.named_dest;
+                case PDF_LINK_NAMED:
+                    if (link->named_dest) {
+                        const char *name = link->named_dest;
                         if (g_strcmp0(name, "FirstPage") == 0) {
                             tab->cur_page = 0;
                             scroll_to_page(tab, 0);
@@ -3668,8 +3630,18 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                             update_document_model_from_tab(tab);
                             return TRUE;
                         } else if (g_strcmp0(name, "GoBack") == 0 || g_strcmp0(name, "GoForward") == 0) {
-                            /* Silently ignore navigation history actions */
                             return TRUE;
+                        } else {
+                            int resolved = pdfr_resolve_named_dest(tab->doc, name);
+                            if (resolved > 0) {
+                                int dest = resolved - 1;
+                                if (dest >= 0 && dest < tab->n_pages) {
+                                    tab->cur_page = dest;
+                                    scroll_to_page(tab, dest);
+                                    update_document_model_from_tab(tab);
+                                    return TRUE;
+                                }
+                            }
                         }
                     }
                     break;
@@ -3677,7 +3649,7 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                     break;
             }
         }
-        iter = iter->next;
+        link = link->next;
     }
     return FALSE;
 }
@@ -3836,6 +3808,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
         return FALSE;
     }
 
+    MEM_INIT_DRAW();
+
     /* continuous mode: draw multiple pages vertically inside this drawing area
        Render only pages intersecting the current clip extents to save work. */
     double clip_x1, clip_y1, clip_x2, clip_y2;
@@ -3858,7 +3832,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
             /* skip if page is outside clip */
             if (!(off_y + page_h < clip_y1 || off_y > clip_y2)) {
-                PopplerPage *page = poppler_document_get_page(tab->doc, i);
+                PdfrPage *page = pdfr_load_page(tab->doc, i);
                 if (!page) { y += page_h + spacing; continue; }
 
                 /* draw background rectangle */
@@ -3875,10 +3849,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
                         int ch = cairo_image_surface_get_height(tab->page_cache[i]);
-                        if (cw != iw || ch != ih) {
-                            cairo_surface_destroy(tab->page_cache[i]);
-                            tab->page_cache[i] = NULL;
-                        }
+                        if (cw != iw || ch != ih)
+                            cache_evict_idx(tab, i);
                     }
                     if (tab->page_cache[i]) {
                         cairo_set_source_surface(cr, tab->page_cache[i], off_x, off_y);
@@ -3891,12 +3863,21 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_set_font_options(picr, fo);
                         cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                         cairo_scale(picr, scale, scale);
-                        poppler_page_render(page, picr);
+                        pdfr_render(tab->doc, page, picr);
                         cairo_destroy(picr);
-                        tab->page_cache[i] = pimg;
-                        cairo_set_source_surface(cr, tab->page_cache[i], off_x, off_y);
+                        cairo_set_source_surface(cr, pimg, off_x, off_y);
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
+                        /* Cache only if within byte budget */
+                        int new_bytes = iw * ih * 4;
+                        MEM_SURFACE_CREATED(new_bytes);
+                        if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                            tab->page_cache[i] = pimg;
+                            tab->total_cache_bytes += new_bytes;
+                        } else {
+                            cairo_surface_destroy(pimg);
+                            MEM_SURFACE_DESTROYED();
+                        }
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
@@ -3908,7 +3889,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_save(cr);
                         cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
                         for (int m = 0; m < sr->n_matches; m++) {
-                            PopplerRectangle *r = &sr->rects[m];
+                            PdfrRect *r = &sr->rects[m];
                             cairo_rectangle(cr,
                                 off_x + r->x1 * scale,
                                 off_y + (ph_pts - r->y2) * scale,
@@ -3919,7 +3900,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_restore(cr);
                     }
                 }
-                g_object_unref(page);
+                pdfr_free_page(tab->doc, page);
             }
 
             y += page_h + spacing;
@@ -3959,7 +3940,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
             /* draw left page if visible */
             if (page_h1 > 0 && !(y + page_h1 < clip_y1 || y > clip_y2)) {
-                PopplerPage *p1 = poppler_document_get_page(tab->doc, i);
+                PdfrPage *p1 = pdfr_load_page(tab->doc, i);
                 if (p1) {
                     cairo_save(cr);
                     cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
@@ -3974,10 +3955,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         if (tab->page_cache[i]) {
                             int cw = cairo_image_surface_get_width(tab->page_cache[i]);
                             int ch = cairo_image_surface_get_height(tab->page_cache[i]);
-                            if (cw != iw1 || ch != ih1) {
-                                cairo_surface_destroy(tab->page_cache[i]);
-                                tab->page_cache[i] = NULL;
-                            }
+                            if (cw != iw1 || ch != ih1)
+                                cache_evict_idx(tab, i);
                         }
                         if (tab->page_cache[i]) {
                             cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
@@ -3990,14 +3969,22 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_set_font_options(picr, fo2);
                             cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                             cairo_scale(picr, scale, scale);
-                            poppler_page_render(p1, picr);
+                            pdfr_render(tab->doc, p1, picr);
                             cairo_destroy(picr);
-                            tab->page_cache[i] = pimg;
-                            cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
+                            cairo_set_source_surface(cr, pimg, left_x, y);
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
+                            int new_bytes = iw1 * ih1 * 4;
+                            MEM_SURFACE_CREATED(new_bytes);
+                            if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                                tab->page_cache[i] = pimg;
+                                tab->total_cache_bytes += new_bytes;
+                        } else {
+                            cairo_surface_destroy(pimg);
+                            MEM_SURFACE_DESTROYED();
                         }
-                        if (first_visible == -1) first_visible = i;
+                    }
+                    if (first_visible == -1) first_visible = i;
                         last_visible = i;
                     }
                     if (search_page_results_n > 0) {
@@ -4007,7 +3994,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_save(cr);
                             cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
                             for (int m = 0; m < sr->n_matches; m++) {
-                                PopplerRectangle *r = &sr->rects[m];
+                                PdfrRect *r = &sr->rects[m];
                                 cairo_rectangle(cr,
                                     left_x + r->x1 * scale,
                                     y + (ph_pts - r->y2) * scale,
@@ -4018,13 +4005,13 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_restore(cr);
                         }
                     }
-                    g_object_unref(p1);
+                    pdfr_free_page(tab->doc, p1);
                 }
             }
 
             /* draw right page if visible */
             if (page_h2 > 0 && !(y + page_h2 < clip_y1 || y > clip_y2)) {
-                PopplerPage *p2 = poppler_document_get_page(tab->doc, i + 1);
+                PdfrPage *p2 = pdfr_load_page(tab->doc, i + 1);
                 if (p2) {
                     cairo_save(cr);
                     cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
@@ -4039,10 +4026,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         if (tab->page_cache[i + 1]) {
                             int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
                             int ch = cairo_image_surface_get_height(tab->page_cache[i + 1]);
-                            if (cw != iw2 || ch != ih2) {
-                                cairo_surface_destroy(tab->page_cache[i + 1]);
-                                tab->page_cache[i + 1] = NULL;
-                            }
+                            if (cw != iw2 || ch != ih2)
+                                cache_evict_idx(tab, i + 1);
                         }
                         if (tab->page_cache[i + 1]) {
                             cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
@@ -4055,24 +4040,32 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_set_font_options(picr, fo2);
                             cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                             cairo_scale(picr, scale, scale);
-                            poppler_page_render(p2, picr);
+                            pdfr_render(tab->doc, p2, picr);
                             cairo_destroy(picr);
-                            tab->page_cache[i + 1] = pimg;
-                            cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
+                            cairo_set_source_surface(cr, pimg, right_x, y);
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
-                        }
-                        if (first_visible == -1) first_visible = i + 1;
-                        last_visible = i + 1;
+                            int new_bytes = iw2 * ih2 * 4;
+                            MEM_SURFACE_CREATED(new_bytes);
+                            if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                                tab->page_cache[i + 1] = pimg;
+                                tab->total_cache_bytes += new_bytes;
+                            } else {
+                                cairo_surface_destroy(pimg);
+                                MEM_SURFACE_DESTROYED();
+                            }
                     }
-                    if (search_page_results_n > 0) {
-                        SearchPageResult *sr = find_search_result_for_page(i + 2);
+                    if (first_visible == -1) first_visible = i;
+                    last_visible = i;
+                }
+                if (search_page_results_n > 0) {
+                        SearchPageResult *sr = find_search_result_for_page(i + 1);
                         if (sr) {
-                            double ph_pts = tab->cached_page_heights[i + 1];
+                            double ph_pts = tab->cached_page_heights[i];
                             cairo_save(cr);
                             cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
                             for (int m = 0; m < sr->n_matches; m++) {
-                                PopplerRectangle *r = &sr->rects[m];
+                                PdfrRect *r = &sr->rects[m];
                                 cairo_rectangle(cr,
                                     right_x + r->x1 * scale,
                                     y + (ph_pts - r->y2) * scale,
@@ -4083,7 +4076,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_restore(cr);
                         }
                     }
-                    g_object_unref(p2);
+                    pdfr_free_page(tab->doc, p2);
                 }
             }
 
@@ -4110,7 +4103,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             double off_y = tab->max_page_h > viewport_h ? 0.0 : (alloc.height - page_h) / 2.0;
             if (dev_x + page_w > 0 && dev_x < alloc.width &&
                 off_y + page_h > 0 && off_y < alloc.height) {
-                PopplerPage *page = poppler_document_get_page(tab->doc, i);
+                PdfrPage *page = pdfr_load_page(tab->doc, i);
                 if (!page) { x += page_w + spacing; continue; }
                 cairo_save(cr);
                 cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
@@ -4125,10 +4118,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
                         int ch = cairo_image_surface_get_height(tab->page_cache[i]);
-                        if (cw != iwh || ch != ihh) {
-                            cairo_surface_destroy(tab->page_cache[i]);
-                            tab->page_cache[i] = NULL;
-                        }
+                        if (cw != iwh || ch != ihh)
+                            cache_evict_idx(tab, i);
                     }
                     if (tab->page_cache[i]) {
                         cairo_set_source_surface(cr, tab->page_cache[i], dev_x, off_y);
@@ -4141,12 +4132,20 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_set_font_options(picr, foh);
                         cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
                         cairo_scale(picr, scale, scale);
-                        poppler_page_render(page, picr);
+                        pdfr_render(tab->doc, page, picr);
                         cairo_destroy(picr);
-                        tab->page_cache[i] = pimg;
-                        cairo_set_source_surface(cr, tab->page_cache[i], dev_x, off_y);
+                        cairo_set_source_surface(cr, pimg, dev_x, off_y);
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
+                        int new_bytes = iwh * ihh * 4;
+                        MEM_SURFACE_CREATED(new_bytes);
+                        if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                            tab->page_cache[i] = pimg;
+                            tab->total_cache_bytes += new_bytes;
+                        } else {
+                            cairo_surface_destroy(pimg);
+                            MEM_SURFACE_DESTROYED();
+                        }
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
@@ -4158,7 +4157,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_save(cr);
                         cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
                         for (int m = 0; m < sr->n_matches; m++) {
-                            PopplerRectangle *r = &sr->rects[m];
+                            PdfrRect *r = &sr->rects[m];
                             cairo_rectangle(cr,
                                 dev_x + r->x1 * scale,
                                 off_y + (ph_pts - r->y2) * scale,
@@ -4169,7 +4168,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_restore(cr);
                     }
                 }
-                g_object_unref(page);
+                pdfr_free_page(tab->doc, page);
             }
             x += page_w + spacing;
         }
@@ -4180,13 +4179,12 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     if (first_visible >= 0 && last_visible >= 0) {
         int margin = 2;
         for (int i = 0; i < tab->n_pages; ++i) {
-            if (tab->page_cache[i] && (i < first_visible - margin || i > last_visible + margin)) {
-                cairo_surface_destroy(tab->page_cache[i]);
-                tab->page_cache[i] = NULL;
-            }
+            if (tab->page_cache[i] && (i < first_visible - margin || i > last_visible + margin))
+                cache_evict_idx(tab, i);
         }
     }
 
+    MEM_REPORT_DRAW();
     return FALSE;
 }
 
@@ -4418,28 +4416,20 @@ static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
 
 static void load_file_into_tab(TabData *tab, const char *filename) {
     if (!tab || !filename) return;
-    GError *error = NULL;
-    char *uri = g_filename_to_uri(filename, NULL, &error);
-    if (!uri) {
-        g_warning("Failed to convert filename to URI: %s", error->message);
-        g_clear_error(&error);
-        return;
-    }
-
-    PopplerDocument *doc = poppler_document_new_from_file(uri, NULL, &error);
-    g_free(uri);
-
+    char *open_error = NULL;
+    PdfrDoc *doc = pdfr_open(filename, &open_error);
     if (!doc) {
-        g_warning("Failed to open PDF: %s", error->message);
-        g_clear_error(&error);
+        g_warning("Failed to open PDF: %s", open_error ? open_error : "unknown error");
+        free(open_error);
         return;
     }
+    free(open_error);
 
     if (tab->doc)
-        g_object_unref(tab->doc);
+        pdfr_close(tab->doc);
 
     tab->doc = doc;
-    tab->n_pages = poppler_document_get_n_pages(doc);
+    tab->n_pages = pdfr_count_pages(doc);
     cache_page_dimensions(tab);
     tab->cur_page = 0;
     tab->zoom = 96.0;
@@ -4516,7 +4506,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
             g_object_unref(gf);
 
             if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
                 gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
@@ -4846,7 +4836,7 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
             g_object_unref(gf);
 
             if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
                 gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
@@ -4933,13 +4923,25 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                 g_source_remove(t->zoom_scroll_source_id);
                 t->zoom_scroll_source_id = 0;
             }
-            g_object_unref(t->doc);
+            /* Free link mappings while the doc is still alive */
+            if (t->page_links) {
+                for (int j = 0; j < t->page_links_n; j++) {
+                    if (t->page_links[j])
+                        pdfr_free_links(t->doc, t->page_links[j]);
+                }
+                g_free(t->page_links);
+                t->page_links = NULL;
+                t->page_links_n = 0;
+            }
+            pdfr_close(t->doc);
             t->doc = NULL;
             g_free(t->cached_page_widths);
             g_free(t->cached_page_heights);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
             invalidate_page_cache(t);
+            g_free(t->page_cache);
+            t->page_cache = NULL;
         }
     }
 
@@ -5005,13 +5007,29 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
         if (t && t != tab && t->doc) {
             cancel_tab_restore(t);
             cancel_doc_model_debounce(t);
-            g_object_unref(t->doc);
+            if (t->zoom_scroll_source_id) {
+                g_source_remove(t->zoom_scroll_source_id);
+                t->zoom_scroll_source_id = 0;
+            }
+            /* Free link mappings while the doc is still alive */
+            if (t->page_links) {
+                for (int j = 0; j < t->page_links_n; j++) {
+                    if (t->page_links[j])
+                        pdfr_free_links(t->doc, t->page_links[j]);
+                }
+                g_free(t->page_links);
+                t->page_links = NULL;
+                t->page_links_n = 0;
+            }
+            pdfr_close(t->doc);
             t->doc = NULL;
             g_free(t->cached_page_widths);
             g_free(t->cached_page_heights);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
             invalidate_page_cache(t);
+            g_free(t->page_cache);
+            t->page_cache = NULL;
         }
     }
 
@@ -5059,7 +5077,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
             g_object_unref(gf);
 
             if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
                 gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
@@ -5199,7 +5217,7 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
             g_object_unref(gf);
 
             if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", poppler_document_get_n_pages(rtab->doc));
+                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
                 gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {

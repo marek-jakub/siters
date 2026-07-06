@@ -1,6 +1,6 @@
 # Siters
 
-Siters is a .pdf file viewer. It's a minimalist and opinionated application, written with GNU/Linux users in mind. It uses GTK+3 and Poppler (poppler-glib).
+Siters is a .pdf file viewer. It's a minimalist and opinionated application, written with GNU/Linux users in mind. It uses GTK+3 and MuPDF.
 
 ## Table of Contents
 

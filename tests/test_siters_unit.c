@@ -4,6 +4,7 @@
 #include <setjmp.h> /* IWYU pragma: keep — required by cmocka.h for jmp_buf */
 #include <cmocka.h>
 #include <gtk/gtk.h>
+#include "pdf.h"
 
 /* Mock control variables for gtk_widget_get_allocation */
 static int mock_alloc_width = 1000;
@@ -230,25 +231,30 @@ static void test_create_main_window_initialization_sequence(void **state) {
 static void setup_tab_with_link(TabData *tab) {
     memset(tab, 0, sizeof(*tab));
     tab->page_links_n = 1;
-    tab->page_links = g_malloc0(sizeof(GList *));
-    PopplerLinkMapping *m = g_malloc0(sizeof(PopplerLinkMapping));
-    m->area.x1 = 100.0;
-    m->area.y1 = 200.0;
-    m->area.x2 = 300.0;
-    m->area.y2 = 400.0;
-    m->action = NULL;
-    tab->page_links[0] = g_list_append(NULL, m);
+    tab->page_links = g_malloc0(sizeof(PdfrLink *));
+    PdfrLink *m = g_malloc0(sizeof(PdfrLink));
+    m->rect.x1 = 100.0;
+    m->rect.y1 = 200.0;
+    m->rect.x2 = 300.0;
+    m->rect.y2 = 400.0;
+    m->type = PDF_LINK_UNKNOWN;
+    m->next = NULL;
+    m->uri = NULL;
+    m->named_dest = NULL;
+    tab->page_links[0] = m;
 }
 
 static void teardown_tab_with_link(TabData *tab) {
     if (tab->page_links) {
         if (tab->page_links[0]) {
-            GList *iter = tab->page_links[0];
-            while (iter) {
-                if (iter->data) g_free(iter->data);
-                iter = iter->next;
+            PdfrLink *cur = tab->page_links[0];
+            while (cur) {
+                PdfrLink *next = cur->next;
+                free(cur->uri);
+                free(cur->named_dest);
+                free(cur);
+                cur = next;
             }
-            g_list_free(tab->page_links[0]);
         }
         g_free(tab->page_links);
         tab->page_links = NULL;

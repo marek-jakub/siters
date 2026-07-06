@@ -1,22 +1,33 @@
-# Makefile for building and running tests for Siters
+# Makefile for building and running tests for Siters (MuPDF backend)
 # Usage: make -f Makefile.tests target
 
 CC=gcc
 DATADIR ?= $(shell pwd)
-CFLAGS=-Wall -Wextra -Werror -g -DDATADIR=\"$(DATADIR)\" -Iinclude -Iinclude/json-glib -Isrc `pkg-config --cflags gtk+-3.0 poppler-glib cmocka`
-LIBS=`pkg-config --libs gtk+-3.0 poppler-glib cmocka` -lm -L/usr/lib/x86_64-linux-gnu -l:libjson-glib-1.0.so.0
+
+PKG_CFLAGS := $(shell pkg-config --cflags gtk+-3.0 cmocka)
+PKG_LIBS := $(shell pkg-config --libs gtk+-3.0 cmocka)
+MUPDF_CFLAGS := $(shell pkg-config --cflags mupdf)
+MUPDF_LIBS   := $(shell pkg-config --libs --static mupdf)
+
+ORDERED_LIBS = $(MUPDF_LIBS) $(PKG_LIBS)
+
+CFLAGS=-Wall -Wextra -Werror -g -DDATADIR=\"$(DATADIR)\" \
+       -Iinclude -Iinclude/json-glib -Isrc \
+       $(PKG_CFLAGS) $(MUPDF_CFLAGS)
+LIBS=$(ORDERED_LIBS) -L/usr/lib/x86_64-linux-gnu -l:libjson-glib-1.0.so.0
 
 # Main application
-SITERS_SRC=src/main.c src/siters.c src/sessions_model.c src/session_model.c src/document_model.c
+SITERS_SRC=src/main.c src/siters.c src/sessions_model.c src/session_model.c \
+           src/document_model.c src/pdf_mupdf.c
 SITERS_TARGET=siters
 
 # Unit tests
-UNIT_TEST_SRC=tests/test_siters_unit.c src/sessions_model.c src/session_model.c src/document_model.c
+UNIT_TEST_SRC=tests/test_siters_unit.c src/sessions_model.c src/session_model.c \
+              src/document_model.c src/pdf_mupdf.c
 UNIT_TEST_TARGET=test_siters_unit
 
 # GUI tests
 GUI_TEST_SRC=tests/test_siters_gui.py
-GUI_TEST_TARGET=test_siters_gui.py
 
 .PHONY: all build-app build-unit-tests run-unit-tests run-gui-tests clean help
 
@@ -66,8 +77,8 @@ clean:
 	rm -f *.o
 
 help:
-	@echo "Siters Test Suite"
-	@echo "=================="
+	@echo "Siters Test Suite (MuPDF backend)"
+	@echo "=================================="
 	@echo ""
 	@echo "Available targets:"
 	@echo "  make -f Makefile.tests build-app        - Build the main application"
@@ -80,9 +91,4 @@ help:
 	@echo "Dependencies:"
 	@echo "  - CMocka: pkg-config cmocka"
 	@echo "  - GTK+3: pkg-config gtk+-3.0"
-	@echo "  - Poppler-glib: pkg-config poppler-glib"
-	@echo "  - Dogtail: pip install dogtail python3-pyatspi"
-	@echo ""
-	@echo "System packages (Ubuntu/Debian):"
-	@echo "  sudo apt install cmake pkg-config build-essential libcmocka-dev libgtk-3-dev libpoppler-glib-dev"
-	@echo ""
+	@echo "  - MuPDF dev libs: set MUPDF_DIR (default /tmp/opencode/mupdf)"
