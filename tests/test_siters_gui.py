@@ -463,6 +463,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Helper to get session names — tries AT-SPI tree, falls back to config file
             def get_session_names_from_tree():
                 names = []
+                cells = []
                 tree = find_sessions_tree()
                 if tree:
                     # Try "table cell" first, then "cell" as fallback
