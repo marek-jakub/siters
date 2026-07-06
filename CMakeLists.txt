@@ -7,11 +7,20 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Find required packages
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED gtk+-3.0)
-pkg_check_modules(POPPLER REQUIRED poppler-glib)
 pkg_check_modules(CMOCKA REQUIRED cmocka)
 
+# MuPDF static libs need --static so pkg-config emits all transitive deps
+pkg_check_modules(MUPDF REQUIRED mupdf)
+execute_process(
+    COMMAND pkg-config --libs --static mupdf
+    OUTPUT_VARIABLE MUPDF_STATIC_LIBS
+    OUTPUT_STRIP_TRAILING_WHITESPACE
+)
+separate_arguments(MUPDF_STATIC_LIBS NATIVE_COMMAND "${MUPDF_STATIC_LIBS}")
+
 # Include directories
-include_directories(include include/json-glib ${GTK_INCLUDE_DIRS} ${POPPLER_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
+include_directories(include include/json-glib src
+    ${GTK_INCLUDE_DIRS} ${MUPDF_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
 # Data directory — default to source root for development, override with -DDATADIR=... for install
 include(GNUInstallDirs)
@@ -21,17 +30,20 @@ endif()
 add_definitions(-DDATADIR="${DATADIR}")
 
 # Main application
-add_executable(siters 
+add_executable(siters
     src/main.c
     src/siters.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
+    src/pdf_mupdf.c
 )
 
-target_link_libraries(siters 
+# MuPDF static libs must appear before GTK libs so GNU ld can resolve
+# symbols (e.g. harfbuzz references inside mupdf-third).
+target_link_libraries(siters
+    ${MUPDF_STATIC_LIBS}
     ${GTK_LIBRARIES}
-    ${POPPLER_LIBRARIES}
     m
     /usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0
 )
@@ -40,19 +52,19 @@ target_link_libraries(siters
 enable_testing()
 
 # CMocka unit tests
-# Unit test executable
 add_executable(test_siters_unit
     tests/test_siters_unit.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
+    src/pdf_mupdf.c
 )
 
 target_include_directories(test_siters_unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 target_link_libraries(test_siters_unit
+    ${MUPDF_STATIC_LIBS}
     ${GTK_LIBRARIES}
-    ${POPPLER_LIBRARIES}
     ${CMOCKA_LIBRARIES}
     m
     /usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0
