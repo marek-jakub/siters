@@ -23,6 +23,7 @@ import sys
 import tempfile
 import time
 import unittest
+
 try:
     from dogtail import config  # type: ignore[import-untyped]
     from dogtail.tree import root  # type: ignore[import-untyped]
@@ -42,7 +43,7 @@ logging.disable(logging.INFO)
 class SitersGUITestCase(unittest.TestCase):
     """Base test case for Siters GUI tests with setup/teardown."""
 
-    def __init__(self, methodName: str = 'runTest') -> None:
+    def __init__(self, methodName: str = "runTest") -> None:
         super().__init__(methodName)
         self.app = None
 
@@ -134,16 +135,16 @@ class TestSitersBasicOperation(SitersGUITestCase):
             "Sessions",
             "Table of contents",
             "Settings",
+            "File information",
             "Open file",
             "Close file",
-            "Page up",
-            "Page down",
+            "Page backward",
+            "Page forward",
             "Zoom in",
             "Zoom out",
             "Page column",
             "Page double column",
             "Page row",
-            "Toggle horizontal scroll",
             "Toggle title bar visibility",
             "Helper files",
             "Close",
@@ -447,9 +448,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     roles_to_try = ["tree table", "table", "tree", "tree view"]
                     for role in roles_to_try:
                         try:
-                            result = siters_app.findChild(
-                                lambda x: x.roleName == role
-                            )
+                            result = siters_app.findChild(lambda x: x.roleName == role)
                             if result:
                                 return result
                         except Exception:
@@ -458,7 +457,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     return None
                 except Exception:
                     return None
-
 
             # Helper to get session names — tries AT-SPI tree, falls back to config file
             def get_session_names_from_tree():
@@ -486,7 +484,10 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 if not names:
                     try:
                         import json
-                        cfg_dir = os.path.join(os.environ.get("SITERS_CONFIG_DIR", ""), "siters")
+
+                        cfg_dir = os.path.join(
+                            os.environ.get("SITERS_CONFIG_DIR", ""), "siters"
+                        )
                         cfg_file = os.path.join(cfg_dir, "siters.json")
                         if os.path.exists(cfg_file):
                             with open(cfg_file) as f:
@@ -502,7 +503,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         all_kids = tree.findChildren(lambda x: True)
                         print(
                             f"DEBUG: Tree has {len(all_kids)} children: "
-                            + ", ".join(f"{c.roleName}='{c.name}'" for c in all_kids[:20])
+                            + ", ".join(
+                                f"{c.roleName}='{c.name}'" for c in all_kids[:20]
+                            )
                         )
                     except Exception:
                         pass
@@ -999,9 +1002,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
         if os.path.exists(config_file):
             os.remove(config_file)
 
-        self._write_json_config(
-            "TestSession", ["Default", "TestSession"], config_dir
-        )
+        self._write_json_config("TestSession", ["Default", "TestSession"], config_dir)
 
         # Restart the app after writing the test config file so it reloads from disk
         try:

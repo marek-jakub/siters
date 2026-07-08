@@ -6039,22 +6039,22 @@ GtkWidget* create_main_window(void) {
     GtkWidget *separator_b = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(middle_box), separator_b, FALSE, FALSE, 5);
 
-    /* Page up button*/
+    /* Page backward button*/
     GtkWidget *page_up_icon = create_toolbar_icon("page-up");
     GtkWidget *page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_up_btn), page_up_icon);
     g_object_set_data_full(G_OBJECT(page_up_btn), "icon-name", g_strdup("page-up"), g_free);
-    gtk_widget_set_tooltip_text(page_up_btn, "Page up");
+    gtk_widget_set_tooltip_text(page_up_btn, "Page backward");
     atk_object_set_name(gtk_widget_get_accessible(page_up_btn), "Page backward");
     g_signal_connect(page_up_btn, "clicked", G_CALLBACK(on_page_up_left), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), page_up_btn, FALSE, FALSE, 1);
 
-    /* Page down button*/
+    /* Page forward button*/
     GtkWidget *page_down_icon = create_toolbar_icon("page-down");
     GtkWidget *page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(page_down_btn), page_down_icon);
     g_object_set_data_full(G_OBJECT(page_down_btn), "icon-name", g_strdup("page-down"), g_free);
-    gtk_widget_set_tooltip_text(page_down_btn, "Page down");
+    gtk_widget_set_tooltip_text(page_down_btn, "Page forward");
     atk_object_set_name(gtk_widget_get_accessible(page_down_btn), "Page forward");
     g_signal_connect(page_down_btn, "clicked", G_CALLBACK(on_page_down_left), NULL);
     gtk_box_pack_start(GTK_BOX(middle_box), page_down_btn, FALSE, FALSE, 1);
@@ -6341,22 +6341,22 @@ GtkWidget* create_main_window(void) {
     GtkWidget *right_sep_a = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_a, FALSE, FALSE, 5);
 
-    /* Right toolbar - Page up */
+    /* Right toolbar - Page backward */
     GtkWidget *right_page_up_icon = create_toolbar_icon("page-up");
     GtkWidget *right_page_up_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_up_btn), right_page_up_icon);
     g_object_set_data_full(G_OBJECT(right_page_up_btn), "icon-name", g_strdup("page-up"), g_free);
-    gtk_widget_set_tooltip_text(right_page_up_btn, "Page up");
+    gtk_widget_set_tooltip_text(right_page_up_btn, "Page backward");
     atk_object_set_name(gtk_widget_get_accessible(right_page_up_btn), "Page backward");
     g_signal_connect(right_page_up_btn, "clicked", G_CALLBACK(on_page_up_right), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_up_btn, FALSE, FALSE, 1);
 
-    /* Right toolbar - Page down */
+    /* Right toolbar - Page forward */
     GtkWidget *right_page_down_icon = create_toolbar_icon("page-down");
     GtkWidget *right_page_down_btn = gtk_button_new();
     gtk_button_set_image(GTK_BUTTON(right_page_down_btn), right_page_down_icon);
     g_object_set_data_full(G_OBJECT(right_page_down_btn), "icon-name", g_strdup("page-down"), g_free);
-    gtk_widget_set_tooltip_text(right_page_down_btn, "Page down");
+    gtk_widget_set_tooltip_text(right_page_down_btn, "Page forward");
     atk_object_set_name(gtk_widget_get_accessible(right_page_down_btn), "Page forward");
     g_signal_connect(right_page_down_btn, "clicked", G_CALLBACK(on_page_down_right), NULL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_page_down_btn, FALSE, FALSE, 1);
