@@ -18,6 +18,38 @@ execute_process(
 )
 separate_arguments(MUPDF_STATIC_LIBS NATIVE_COMMAND "${MUPDF_STATIC_LIBS}")
 
+# MuPDF's pkg-config --static lists -lgumbo and -lmujs as shared libs,
+# but neither libgumbo2 nor libmujs3 are available on Debian 12 (MX Linux 23).
+# Replace them with static versions to eliminate runtime NEEDED entries.
+find_library(GUMBO_STATIC_LIB libgumbo.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+find_library(MUJS_STATIC_LIB libmujs.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+if(GUMBO_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -lgumbo)
+    list(APPEND MUPDF_STATIC_LIBS ${GUMBO_STATIC_LIB})
+endif()
+if(MUJS_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -lmujs)
+    list(APPEND MUPDF_STATIC_LIBS ${MUJS_STATIC_LIB})
+endif()
+find_library(JPEG_STATIC_LIB libjpeg.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+if(JPEG_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -ljpeg)
+    list(APPEND MUPDF_STATIC_LIBS ${JPEG_STATIC_LIB})
+endif()
+
+# Statically link jbig2dec and openjp2 to avoid header/library version mismatches
+# between the build system (Ubuntu) and target system (Debian 12 / MX Linux).
+find_library(JBIG2DEC_STATIC_LIB libjbig2dec.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+if(JBIG2DEC_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -ljbig2dec)
+    list(APPEND MUPDF_STATIC_LIBS ${JBIG2DEC_STATIC_LIB})
+endif()
+find_library(OPENJP2_STATIC_LIB libopenjp2.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+if(OPENJP2_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -lopenjp2)
+    list(APPEND MUPDF_STATIC_LIBS ${OPENJP2_STATIC_LIB})
+endif()
+
 # Include directories
 include_directories(include include/json-glib src
     ${GTK_INCLUDE_DIRS} ${MUPDF_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
@@ -37,6 +69,8 @@ add_executable(siters
     src/session_model.c
     src/document_model.c
     src/pdf_mupdf.c
+    src/glibc_compat.c
+    src/log.c
 )
 
 # MuPDF static libs must appear before GTK libs so GNU ld can resolve
@@ -46,6 +80,13 @@ target_link_libraries(siters
     ${GTK_LIBRARIES}
     m
     /usr/lib/x86_64-linux-gnu/libjson-glib-1.0.so.0
+)
+
+# Wrap GLIBC_2.38 math symbols (fmod/fmodf) with our own implementations
+# for compatibility with Debian 12 (glibc 2.36).
+target_link_options(siters PRIVATE
+    -Wl,--wrap=fmodf
+    -Wl,--wrap=fmod
 )
 
 # Enable testing
@@ -58,6 +99,8 @@ add_executable(test_siters_unit
     src/session_model.c
     src/document_model.c
     src/pdf_mupdf.c
+    src/glibc_compat.c
+    src/log.c
 )
 
 target_include_directories(test_siters_unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -72,6 +115,8 @@ target_link_libraries(test_siters_unit
 
 # Add linker flags for function wrapping
 target_link_options(test_siters_unit PRIVATE
+    -Wl,--wrap=fmodf
+    -Wl,--wrap=fmod
     -Wl,--wrap=gtk_window_new
     -Wl,--wrap=gtk_window_set_title
     -Wl,--wrap=gtk_window_set_default_size

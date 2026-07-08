@@ -1,4 +1,5 @@
 #include "pdf.h"
+#include "log.h"
 #include <mupdf/fitz.h>
 #include <string.h>
 #include <stdlib.h>
@@ -27,14 +28,16 @@ static PdfrRect fz_quad_to_pdfr_rect(fz_quad q) {
     return pr;
 }
 
-/* ---- Internal: suppress MuPDF diagnostics ---- */
+/* ---- Internal: MuPDF diagnostics --- */
 
-static void silent_warning(void *user, const char *message) {
-    (void)user; (void)message;
+static void log_warning(void *user, const char *message) {
+    (void)user;
+    LOG_WARN("MuPDF: %s", message);
 }
 
-static void silent_error(void *user, const char *message) {
-    (void)user; (void)message;
+static void log_error(void *user, const char *message) {
+    (void)user;
+    LOG_ERROR("MuPDF: %s", message);
 }
 
 /* ---- Document lifecycle ---- */
@@ -50,8 +53,8 @@ PdfrDoc *pdfr_open(const char *path, char **error) {
         if (error) *error = strdup("Failed to create MuPDF context");
         return NULL;
     }
-    fz_set_warning_callback(ctx, silent_warning, NULL);
-    fz_set_error_callback(ctx, silent_error, NULL);
+    fz_set_warning_callback(ctx, log_warning, NULL);
+    fz_set_error_callback(ctx, log_error, NULL);
     fz_register_document_handlers(ctx);
 
     PdfrDoc *pd = calloc(1, sizeof(PdfrDoc));
@@ -82,7 +85,9 @@ int pdfr_count_pages(PdfrDoc *doc) {
     fz_try(doc->ctx) {
         n = fz_count_pages(doc->ctx, doc->doc);
     }
-    fz_catch(doc->ctx) {}
+    fz_catch(doc->ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    }
     return n;
 }
 
@@ -91,7 +96,9 @@ void pdfr_close(PdfrDoc *doc) {
     fz_try(doc->ctx) {
         fz_drop_document(doc->ctx, doc->doc);
     }
-    fz_catch(doc->ctx) { }
+    fz_catch(doc->ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    }
     fz_drop_context(doc->ctx);
     free(doc);
 }
@@ -112,6 +119,7 @@ PdfrPage *pdfr_load_page(PdfrDoc *doc, int page_idx) {
         }
     }
     fz_catch(doc->ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
         free(pd);
         pd = NULL;
     }
@@ -127,6 +135,7 @@ void pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h, double *
         if (y0) *y0 = r.y0;
     }
     fz_catch(doc->ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
         *w = *h = 0;
         if (x0) *x0 = 0;
         if (y0) *y0 = 0;
@@ -138,7 +147,9 @@ void pdfr_free_page(PdfrDoc *doc, PdfrPage *page) {
     fz_try(doc->ctx) {
         fz_drop_page(doc->ctx, page->page);
     }
-    fz_catch(doc->ctx) { }
+    fz_catch(doc->ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    }
     free(page);
 }
 
@@ -148,9 +159,15 @@ void pdfr_render(PdfrDoc *doc, PdfrPage *page, cairo_t *cr) {
     fz_context *ctx = doc->ctx;
 
     cairo_surface_t *surface = cairo_get_target(cr);
-    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS ||
-        cairo_image_surface_get_format(surface) != CAIRO_FORMAT_ARGB32)
+    if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
+        LOG_WARN("Cairo surface in invalid state: %s",
+                 cairo_status_to_string(cairo_surface_status(surface)));
         return;
+    }
+    if (cairo_image_surface_get_format(surface) != CAIRO_FORMAT_ARGB32) {
+        LOG_WARN("Cairo surface format is not ARGB32");
+        return;
+    }
 
     int w = cairo_image_surface_get_width(surface);
     int h = cairo_image_surface_get_height(surface);
@@ -193,7 +210,7 @@ void pdfr_render(PdfrDoc *doc, PdfrPage *page, cairo_t *cr) {
         cairo_surface_mark_dirty_rectangle(surface, 0, 0, copy_w, copy_h);
     }
     fz_catch(ctx) {
-        /* fallback: nothing drawn */
+        LOG_ERROR("MuPDF render failed: %s", fz_caught_message(ctx));
     }
 }
 
@@ -228,6 +245,7 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
                         }
                     }
                     fz_catch(ctx) {
+                        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
                         link->page_num = atoi(l->uri + 6);
                     }
                 } else if (strncmp(l->uri, "#nameddest=", 11) == 0) {
@@ -244,7 +262,9 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
                             link->y = ld.y;
                         }
                     }
-                    fz_catch(ctx) { }
+                    fz_catch(ctx) {
+                        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+                    }
                 } else if (strchr(l->uri, ':') != NULL) {
                     link->type = PDF_LINK_URI;
                     link->uri = strdup(l->uri);
@@ -264,7 +284,9 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
                             link->y = ld.y;
                         }
                     }
-                    fz_catch(ctx) { }
+                    fz_catch(ctx) {
+                        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+                    }
                 }
             } else {
                 link->type = PDF_LINK_UNKNOWN;
@@ -276,6 +298,7 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
         fz_drop_link(ctx, links);
     }
     fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
     }
     return head;
 }
@@ -309,7 +332,9 @@ int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, doubl
         if (out_x) *out_x = xp;
         if (out_y) *out_y = yp;
     }
-    fz_catch(ctx) { }
+    fz_catch(ctx) {
+        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+    }
     return page;
 }
 
@@ -325,7 +350,9 @@ int pdfr_search_page(PdfrDoc *doc, PdfrPage *page,
     fz_try(ctx) {
         n = fz_search_page(ctx, page->page, text, &hit_mark, quads, max_matches);
     }
-    fz_catch(ctx) { }
+    fz_catch(ctx) {
+        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+    }
 
     if (n > max_matches) n = max_matches;
     for (int i = 0; i < n; i++) {
@@ -375,6 +402,7 @@ PdfrOutline *pdfr_load_outline(PdfrDoc *doc) {
         root = fz_load_outline(ctx, doc->doc);
     }
     fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
         return NULL;
     }
 

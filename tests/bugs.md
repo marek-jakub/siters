@@ -36,6 +36,7 @@ The switch was done in two phases:
 11. [TOC Clicking Does Nothing on Some PDFs (Named Destinations)](#11-toc-clicking-does-nothing-on-some-pdfs-named-destinations)
 12. [Blank Pages After Scrolling (MuPDF Error Stack Overflow)](#12-blank-pages-after-scrolling-mupdf-error-stack-overflow)
 13. [Link Hotspots Upside Down on MuPDF 1.23+](#13-link-hotspots-upside-down-on-mupdf-123)
+14. [Blank JBIG2 PDFs on Debian 12 / MX Linux](#14-blank-jbig2-pdfs-on-debian-12--mx-linux)
 
 ---
 
@@ -382,7 +383,58 @@ The same fix was applied in three locations:
 
 Unit tests in `test_siters_unit.c` were also updated to use y-down coordinates for the link rect data, matching the new convention.
 
-**Files changed:**
+ **Files changed:**
 - `src/siters.c:3564-3604` (has_link_at, activate_link_at, debug_page_links)
 - `tests/test_siters_unit.c:270-284` (inside/outside rectangle tests)
 ```
+
+---
+
+## 14. Blank JBIG2 PDFs on Debian 12 / MX Linux (jbig2dec Version Mismatch)
+
+**Bug:** PDF files using JBIG2 image compression rendered completely blank on Debian 12 / MX Linux 23 — pages showed the background color but no text, images, or graphics. The same PDFs rendered correctly on Ubuntu / Linux Mint.
+
+**Root cause:**  
+The project statically links MuPDF's `libmupdf-third.a`, which was compiled against **jbig2dec 0.20** headers on the build system (Ubuntu 24.04). However, `-ljbig2dec` from `pkg-config --libs --static mupdf` resolved to the system's **shared** `libjbig2dec.so.0`, which on Debian 12 is version **0.19**. At runtime, `jbig2dec_new()` detected the mismatch and returned NULL, causing every `fz_new_pixmap_from_page()` call to throw `"cannot allocate jbig2 context"`. All rendering silently failed because the `fz_catch` in `pdfr_render()` was a no-op.
+
+The same class of bug applied to `libopenjp2.so.7` and `libjpeg.so.8` (which is provided as `libjpeg62-turbo` on Debian 12 — a different SONAME), and to `libgumbo.so.2` / `libmujs.so.3` which simply don't exist on Debian 12.
+
+The MuPDF warning read:
+```
+jbig2dec error: incompatible jbig2dec header (0.20) and library (0.19) versions (segment 4294967295)
+```
+
+**Solution:**  
+Replace every MuPDF private dependency (`-lgumbo`, `-lmujs`, `-ljpeg`, `-ljbig2dec`, `-lopenjp2`) with its static `.a` equivalent, using `find_library()` in CMake:
+
+```cmake
+find_library(JBIG2DEC_STATIC_LIB libjbig2dec.a PATHS /usr/lib/x86_64-linux-gnu ...)
+if(JBIG2DEC_STATIC_LIB)
+    list(REMOVE_ITEM MUPDF_STATIC_LIBS -ljbig2dec)
+    list(APPEND MUPDF_STATIC_LIBS ${JBIG2DEC_STATIC_LIB})
+endif()
+```
+
+Additionally, a logging infrastructure (`src/log.h`, `src/log.c`) was introduced that writes diagnostics to `/tmp/siters_<PID>.log`. The previously completely silent `silent_error`/`silent_warning` MuPDF callbacks were replaced with loggers, and every `fz_catch` block now records the exception text via `LOG_ERROR`/`LOG_WARN`. This was essential for identifying this bug — without it, the jbig2dec version error was invisible.
+
+The `fmod`/`fmodf` symbols (GLIBC\_2.38 on the build system vs GLIBC\_2.2.5 available on Debian 12) were also handled via `-Wl,--wrap` + a custom implementation using `truncf`/`trunc` (which are at GLIBC\_2.2.5).
+
+**Key code** (`CMakeLists.txt`):
+```cmake
+# Statically link MuPDF's private deps to avoid build-system vs target-system
+# library version mismatches.
+find_library(GUMBO_STATIC_LIB   libgumbo.a     PATHS ...)
+find_library(MUJS_STATIC_LIB    libmujs.a      PATHS ...)
+find_library(JPEG_STATIC_LIB    libjpeg.a      PATHS ...)
+find_library(JBIG2DEC_STATIC_LIB libjbig2dec.a PATHS ...)
+find_library(OPENJP2_STATIC_LIB libopenjp2.a   PATHS ...)
+```
+
+**Files changed:**
+- `CMakeLists.txt` — static linking of gumbo, mujs, jpeg, jbig2dec, openjp2; fmod/fmodf glibc compat
+- `src/log.h` — new logging header
+- `src/log.c` — new logging implementation
+- `src/pdf_mupdf.c` — log_error/log_warning callbacks, LOG_ERROR in all fz_catch blocks
+- `src/siters.c` — LOG_ERROR on pdfr_load_page failure
+- `src/glibc_compat.c` — new: fmod/fmodf wrappers for GLIBC 2.36 compat
+- `debian/rules` — patched libc6 and libjpeg8 dependency in control file

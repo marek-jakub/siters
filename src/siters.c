@@ -3,6 +3,7 @@
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 #include "pdf.h"
+#include "log.h"
 #include <math.h>
 #include "siters.h"
 #include "sessions_model.h"
@@ -357,6 +358,7 @@ static GtkWidget* create_toolbar_icon(const char *name) {
     gchar *svg_content;
     gsize length;
     if (!g_file_get_contents(path, &svg_content, &length, NULL)) {
+        LOG_WARN("Failed to read icon SVG %s", path);
         g_free(path);
         return gtk_image_new();
     }
@@ -378,7 +380,8 @@ static GtkWidget* create_toolbar_icon(const char *name) {
 
     GBytes *bytes = g_bytes_new_take(svg_content, length);
     GInputStream *stream = g_memory_input_stream_new_from_bytes(bytes);
-    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream_at_scale(stream, 20, 20, TRUE, NULL, NULL);
+    GError *pixbuf_err = NULL;
+    GdkPixbuf *pixbuf = gdk_pixbuf_new_from_stream_at_scale(stream, 20, 20, TRUE, NULL, &pixbuf_err);
     g_object_unref(stream);
     g_bytes_unref(bytes);
 
@@ -387,6 +390,8 @@ static GtkWidget* create_toolbar_icon(const char *name) {
         image = gtk_image_new_from_pixbuf(pixbuf);
         g_object_unref(pixbuf);
     } else {
+        LOG_WARN("Failed to render icon pixbuf: %s", pixbuf_err->message);
+        g_clear_error(&pixbuf_err);
         image = gtk_image_new();
     }
     return image;
@@ -561,7 +566,11 @@ static void apply_dark_css(gboolean apply) {
                 "paned > separator, separator { background: #2F2F34; }\n"
                 "menu menuitem:hover { background: #3584e4; }\n"
                 "dialog .background { background: #2e2e2e; }\n";
-            gtk_css_provider_load_from_data(dark_css_provider, css, -1, NULL);
+            GError *css_err = NULL;
+            if (!gtk_css_provider_load_from_data(dark_css_provider, css, -1, &css_err)) {
+                LOG_ERROR("Failed to load dark theme CSS: %s", css_err->message);
+                g_clear_error(&css_err);
+            }
         }
         gtk_style_context_add_provider_for_screen(screen,
             GTK_STYLE_PROVIDER(dark_css_provider),
@@ -712,7 +721,10 @@ void save_state(void) {
     const gchar *cfg_override = g_getenv("SITERS_CONFIG_DIR");
     const gchar *config_dir = cfg_override ? cfg_override : g_get_user_config_dir();
     gchar *app_config_dir = g_build_filename(config_dir, "siters", NULL);
-    g_mkdir_with_parents(app_config_dir, 0755);
+    if (g_mkdir_with_parents(app_config_dir, 0755) != 0) {
+        LOG_ERROR("Failed to create config directory %s: %s",
+                  app_config_dir, g_strerror(errno));
+    }
 
     JsonBuilder *builder = json_builder_new();
     json_builder_begin_object(builder);
@@ -826,10 +838,18 @@ void save_state(void) {
     json_generator_set_pretty(gen, TRUE);
 
     gchar *json_str = json_generator_to_data(gen, NULL);
+    if (!json_str) {
+        LOG_ERROR("JSON serialization failed");
+    }
     gchar *config_file = g_build_filename(app_config_dir, "siters.json", NULL);
-    g_file_set_contents(config_file, json_str, -1, NULL);
-
-    g_free(json_str);
+    if (json_str) {
+        GError *fs_error = NULL;
+        if (!g_file_set_contents(config_file, json_str, -1, &fs_error)) {
+            LOG_ERROR("Failed to write state file %s: %s", config_file, fs_error->message);
+            g_clear_error(&fs_error);
+        }
+        g_free(json_str);
+    }
     g_free(config_file);
     g_free(app_config_dir);
     g_object_unref(gen);
@@ -1186,7 +1206,7 @@ static gboolean ensure_tab_doc_loaded(TabData *tab) {
     char *open_error = NULL;
     PdfrDoc *doc = pdfr_open(tab->current_file, &open_error);
     if (!doc) {
-        g_warning("Failed to reopen PDF: %s", open_error ? open_error : "unknown error");
+        LOG_ERROR("Failed to reopen PDF: %s", open_error ? open_error : "unknown error");
         free(open_error);
         return FALSE;
     }
@@ -3874,7 +3894,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             /* skip if page is outside clip */
             if (!(off_y + page_h < clip_y1 || off_y > clip_y2)) {
                 PdfrPage *page = pdfr_load_page(tab->doc, i);
-                if (!page) { y += page_h + spacing; continue; }
+                if (!page) { LOG_ERROR("Failed to load page %d", i); y += page_h + spacing; continue; }
 
                 /* draw background rectangle */
                 cairo_save(cr);
@@ -4460,7 +4480,7 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
     char *open_error = NULL;
     PdfrDoc *doc = pdfr_open(filename, &open_error);
     if (!doc) {
-        g_warning("Failed to open PDF: %s", open_error ? open_error : "unknown error");
+        LOG_ERROR("Failed to open PDF: %s", open_error ? open_error : "unknown error");
         free(open_error);
         return;
     }

@@ -3,6 +3,7 @@
 #include <glib.h>
 #include <string.h>
 #include "siters.h"
+#include "log.h"
 
 extern void load_state(void);
 
@@ -44,7 +45,8 @@ int main(int argc, char *argv[]) {
 
     /* Remove GTK scrolled window overshoot/undershoot indicators (dashed lines at edges) */
     GtkCssProvider *css_provider = gtk_css_provider_new();
-    gtk_css_provider_load_from_data(css_provider,
+    GError *css_err = NULL;
+    if (!gtk_css_provider_load_from_data(css_provider,
         "scrolledwindow overshoot, scrolledwindow undershoot { background: none; }\n"
         "#page-nav-overlay, #right-page-nav-overlay {\n"
         "    background: rgba(0, 0, 0, 0.6);\n"
@@ -63,7 +65,10 @@ int main(int argc, char *argv[]) {
         "    border: none;\n"
         "    border-radius: 4px;\n"
         "    color: black;\n"
-        "}\n", -1, NULL);
+        "}\n", -1, &css_err)) {
+        LOG_WARN("Failed to load app CSS: %s", css_err->message);
+        g_clear_error(&css_err);
+    }
     gtk_style_context_add_provider_for_screen(gdk_screen_get_default(),
         GTK_STYLE_PROVIDER(css_provider), GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     g_object_unref(css_provider);
