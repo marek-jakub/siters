@@ -35,6 +35,7 @@ The switch was done in two phases:
 10. [Dev Build and Installed .deb Share Config File](#10-dev-build-and-installed-deb-share-config-file)
 11. [TOC Clicking Does Nothing on Some PDFs (Named Destinations)](#11-toc-clicking-does-nothing-on-some-pdfs-named-destinations)
 12. [Blank Pages After Scrolling (MuPDF Error Stack Overflow)](#12-blank-pages-after-scrolling-mupdf-error-stack-overflow)
+13. [Link Hotspots Upside Down on MuPDF 1.23+](#13-link-hotspots-upside-down-on-mupdf-123)
 
 ---
 
@@ -346,4 +347,42 @@ Same pattern applied to `pdfr_open` (moved `PdfrDoc` allocation before `fz_try`)
 - `src/pdf_mupdf.c:80-87` (pdfr_count_pages)
 - `src/pdf_mupdf.c:105-119` (pdfr_load_page)
 - `src/pdf_mupdf.c:289-301` (pdfr_search_page — catch cleanup)
+```
+
+---
+
+## 13. Link Hotspots Upside Down on MuPDF 1.23+
+
+**Bug:** Clickable link areas (hotspots) in PDF documents were flipped vertically — clicking at the top of a link zone activated the link at the bottom of the zone, and vice versa. The visual page content was unaffected; only the hit-test mapping was wrong.
+
+**Root cause:**  
+In MuPDF 1.23+, `fz_load_links()` returns link rectangles in **device/page space** (y-down, origin at top-left) — the same coordinate system as the rendered page pixmap. However, the original code was written against the Poppler backend (which uses PDF user space, y-up) and retained an unnecessary y‑flip conversion:
+
+```c
+// BUGGY — treats link rects as PDF y-up, but they're already y-down
+double y_lo = ph - a->y2;   /* "top" in rendering space */
+double y_hi = ph - a->y1;   /* "bottom" in rendering space */
+if (px >= a->x1 && px <= a->x2 && py >= y_lo && py <= y_hi)
+```
+
+This flip (`ph - y`) inverted the y-axis a second time, making `(ph - y2)` the mirror of the correct position.
+
+**Solution:**  
+Compare link rect coordinates directly against the rendering-space point, since both are now in the same y-down system:
+
+```c
+// FIXED — link rects are already in device space (y-down, 0=top)
+if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2)
+```
+
+The same fix was applied in three locations:
+1. `has_link_at()` — hit-test for cursor feedback
+2. `activate_link_at()` — hit-test for click activation
+3. `debug_page_links()` — diagnostic print (cosmetic)
+
+Unit tests in `test_siters_unit.c` were also updated to use y-down coordinates for the link rect data, matching the new convention.
+
+**Files changed:**
+- `src/siters.c:3564-3604` (has_link_at, activate_link_at, debug_page_links)
+- `tests/test_siters_unit.c:270-284` (inside/outside rectangle tests)
 ```

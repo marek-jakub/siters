@@ -69,6 +69,8 @@ typedef struct TabDataStruct {
     double drag_scroll_y;       /* vadjustment value at drag start */
     double *cached_page_widths;  /* raw page widths from pdfr_page_size */
     double *cached_page_heights; /* raw page heights from pdfr_page_size */
+    double *cached_page_x0;      /* page bounds origin x0 from pdfr_page_size */
+    double *cached_page_y0;      /* page bounds origin y0 from pdfr_page_size */
     double max_page_h;           /* tallest page height (scaled) for row view sizing */
     cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
     int total_cache_bytes;        /* sum of pixel-buffer bytes across all cached surfaces */
@@ -283,7 +285,7 @@ static void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
 static void build_continuous_view(TabData *tab);
 static void invalidate_page_cache(TabData *tab);
-static void scroll_to_page(TabData *tab, int page);
+static void scroll_to_page(TabData *tab, int page, double target_y);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
 static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
@@ -612,6 +614,8 @@ static void destroy_tab_data(gpointer data) {
     g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
+    g_free(tab->cached_page_x0);
+    g_free(tab->cached_page_y0);
     g_free(tab);
 }
 
@@ -1136,6 +1140,10 @@ static void cache_page_dimensions(TabData *tab) {
             g_free(tab->cached_page_heights);
             tab->cached_page_widths = NULL;
             tab->cached_page_heights = NULL;
+            g_free(tab->cached_page_x0);
+            g_free(tab->cached_page_y0);
+            tab->cached_page_x0 = NULL;
+            tab->cached_page_y0 = NULL;
         }
         return;
     }
@@ -1143,18 +1151,25 @@ static void cache_page_dimensions(TabData *tab) {
     g_free(tab->page_cache);
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
+    g_free(tab->cached_page_x0);
+    g_free(tab->cached_page_y0);
     tab->page_cache = g_malloc0(sizeof(cairo_surface_t *) * tab->n_pages);
     tab->cached_page_widths = g_malloc(sizeof(double) * tab->n_pages);
     tab->cached_page_heights = g_malloc(sizeof(double) * tab->n_pages);
+    tab->cached_page_x0 = g_malloc0(sizeof(double) * tab->n_pages);
+    tab->cached_page_y0 = g_malloc0(sizeof(double) * tab->n_pages);
     for (int i = 0; i < tab->n_pages; ++i) {
         PdfrPage *page = pdfr_load_page(tab->doc, i);
-        double pw = 0, ph = 0;
+        double pw = 0, ph = 0, px0 = 0, py0 = 0;
         if (page) {
-            pdfr_page_size(tab->doc, page, &pw, &ph);
+            pdfr_page_size(tab->doc, page, &pw, &ph, &px0, &py0);
             pdfr_free_page(tab->doc, page);
         }
         tab->cached_page_widths[i] = pw > 0 ? pw : 1.0;
         tab->cached_page_heights[i] = ph > 0 ? ph : 1.0;
+        tab->cached_page_x0[i] = px0;
+        tab->cached_page_y0[i] = py0;
+
     }
 }
 
@@ -1507,10 +1522,8 @@ void populate_sessions_treeview(void) {
                             } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &child));
                         }
                         g_free(uri);
+                        }
                     }
-                }
-                g_free(name);
-                break;
             } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
         }
     }
@@ -2468,7 +2481,7 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
     if (page == 0 && named_dest) {
         TabData *tab = get_current_left_tab();
         if (tab && ensure_tab_doc_loaded(tab)) {
-            int resolved = pdfr_resolve_named_dest(tab->doc, named_dest);
+            int resolved = pdfr_resolve_named_dest(tab->doc, named_dest, NULL, NULL);
             if (resolved > 0) page = resolved;
         }
     }
@@ -2479,7 +2492,7 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
             cancel_doc_model_debounce(tab);
             last_toc_selected_page = page;
             tab->cur_page = page - 1;
-            scroll_to_page(tab, page - 1);
+            scroll_to_page(tab, page - 1, -1);
             update_document_model_from_tab(tab);
         }
     }
@@ -2864,7 +2877,7 @@ static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePat
         if (tab) {
             cancel_doc_model_debounce(tab);
             tab->cur_page = page - 1;
-            scroll_to_page(tab, page - 1);
+            scroll_to_page(tab, page - 1, -1);
             update_document_model_from_tab(tab);
         }
     }
@@ -3198,17 +3211,32 @@ static void queue_draw(TabData *tab) {
         gtk_widget_queue_draw(tab->pages_drawing);
 }
 
-static void scroll_to_page(TabData *tab, int page) {
+static void scroll_to_page(TabData *tab, int page, double target_y) {
     if (!tab || !tab->scrolled || !tab->pages_drawing || !tab->cached_page_widths) return;
     if (page < 0 || page >= tab->n_pages) return;
 
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
 
+    if (tab->layout_mode == 2) {
+        double x = spacing;
+        for (int i = 0; i < page; ++i) {
+            x += tab->cached_page_widths[i] * scale + spacing;
+        }
+        if (tab->h_scrollbar) {
+            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
+            gtk_adjustment_set_value(sadj, x);
+        }
+        return;
+    }
+
     double y = spacing;
     if (tab->layout_mode == 0) {
         for (int i = 0; i < page; ++i) {
             y += tab->cached_page_heights[i] * scale + spacing;
+        }
+        if (target_y >= 0) {
+            y += (tab->cached_page_heights[page] - target_y) * scale;
         }
     } else if (tab->layout_mode == 1) {
         int row = page / 2;
@@ -3222,16 +3250,9 @@ static void scroll_to_page(TabData *tab, int page) {
             }
             y += row_h + spacing;
         }
-    } else if (tab->layout_mode == 2) {
-        double x = spacing;
-        for (int i = 0; i < page; ++i) {
-            x += tab->cached_page_widths[i] * scale + spacing;
+        if (target_y >= 0) {
+            y += (tab->cached_page_heights[page] - target_y) * scale;
         }
-        if (tab->h_scrollbar) {
-            GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
-            gtk_adjustment_set_value(sadj, x);
-        }
-        return;
     }
 
     GtkAdjustment *vadj = gtk_scrolled_window_get_vadjustment(GTK_SCROLLED_WINDOW(tab->scrolled));
@@ -3417,7 +3438,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
     }
 
     if (tab->initial_scroll_pending) {
-        scroll_to_page(tab, tab->cur_page);
+        scroll_to_page(tab, tab->cur_page, -1);
         tab->initial_scroll_pending = FALSE;
     }
 }
@@ -3484,7 +3505,8 @@ static void ensure_page_links_loaded(TabData *tab, int page) {
     }
 }
 
-/* Convert widget coordinates to page index and page-relative PDF-space (points, bottom-left origin).
+/* Convert widget coordinates to page index and page-relative rendering-space
+   (points, y-down, 0 at top of page — matches MuPDF's pixmap orientation).
    Returns 0-based page index, or -1 if no page at (wx, wy). */
 static int widget_to_page_coords(TabData *tab, double wx, double wy,
                                   double *out_px, double *out_py) {
@@ -3502,7 +3524,7 @@ static int widget_to_page_coords(TabData *tab, double wx, double wy,
             double ox = (alloc.width - pw) / 2.0;
             if (wx >= ox && wx < ox + pw && wy >= y && wy < y + ph) {
                 if (out_px) *out_px = (wx - ox) / scale;
-                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - y) / scale;
+                if (out_py) *out_py = (wy - y) / scale;
                 return i;
             }
             y += ph + spacing;
@@ -3526,12 +3548,12 @@ static int widget_to_page_coords(TabData *tab, double wx, double wy,
             double rx2 = lx + pw1 + spacing;
             if (wx >= lx && wx < lx + pw1 && wy >= y && wy < y + ph1) {
                 if (out_px) *out_px = (wx - lx) / scale;
-                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - y) / scale;
+                if (out_py) *out_py = (wy - y) / scale;
                 return i;
             }
             if (pw2 > 0 && wx >= rx2 && wx < rx2 + pw2 && wy >= y && wy < y + ph2) {
                 if (out_px) *out_px = (wx - rx2) / scale;
-                if (out_py) *out_py = tab->cached_page_heights[i + 1] - (wy - y) / scale;
+                if (out_py) *out_py = (wy - y) / scale;
                 return i + 1;
             }
             y += rh + spacing;
@@ -3551,7 +3573,7 @@ static int widget_to_page_coords(TabData *tab, double wx, double wy,
             double oy = tab->max_page_h > viewport_h ? 0.0 : (alloc.height - ph) / 2.0;
             if (wx >= x && wx < x + pw && wy >= oy && wy < oy + ph) {
                 if (out_px) *out_px = (wx - x) / scale;
-                if (out_py) *out_py = tab->cached_page_heights[i] - (wy - oy) / scale;
+                if (out_py) *out_py = (wy - oy) / scale;
                 return i;
             }
             x += pw + spacing;
@@ -3560,25 +3582,33 @@ static int widget_to_page_coords(TabData *tab, double wx, double wy,
     return -1;
 }
 
-/* Check if there is a clickable link at the given page-relative coordinates */
+/* Check if there is a clickable link at the given page-relative coordinates.
+   px, py are in rendering space (y-down, 0 at top of page).
+   Link rects from MuPDF are already in page/device space (y-down, 0=top),
+   so we compare directly. */
 static gboolean has_link_at(TabData *tab, int page, double px, double py) {
     if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
     PdfrLink *link = tab->page_links[page];
     while (link) {
         PdfrRect *a = &link->rect;
-        if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2)
+        if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2) {
             return TRUE;
+        }
         link = link->next;
     }
     return FALSE;
 }
 
-/* Activate the link at the given page-relative coordinates (if any) */
+/* Debug helper — print link rects on a page for diagnostic purposes. */
+/* Activate the link at the given page-relative coordinates (if any).
+   px, py are in rendering space (y-down, 0 at top of page). */
 static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
     if (!tab || page < 0 || page >= tab->page_links_n || !tab->page_links) return FALSE;
     PdfrLink *link = tab->page_links[page];
     while (link) {
         PdfrRect *a = &link->rect;
+        /* Link rects from MuPDF are in page/device space (y-down, 0=top),
+           matching rendering space coordinates. */
         if (px >= a->x1 && px <= a->x2 && py >= a->y1 && py <= a->y2) {
             switch (link->type) {
                 case PDF_LINK_URI:
@@ -3597,10 +3627,10 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                     if (link->page_num > 0) {
                         int dest = link->page_num - 1;
                         if (dest >= 0 && dest < tab->n_pages) {
-                            tab->cur_page = dest;
-                            scroll_to_page(tab, dest);
-                            update_document_model_from_tab(tab);
-                            return TRUE;
+                             tab->cur_page = dest;
+                             scroll_to_page(tab, dest, link->y > 0 ? link->y : -1);
+                             update_document_model_from_tab(tab);
+                             return TRUE;
                         }
                     }
                     break;
@@ -3609,35 +3639,43 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
                         const char *name = link->named_dest;
                         if (g_strcmp0(name, "FirstPage") == 0) {
                             tab->cur_page = 0;
-                            scroll_to_page(tab, 0);
+                            scroll_to_page(tab, 0, -1);
                             update_document_model_from_tab(tab);
                             return TRUE;
                         } else if (g_strcmp0(name, "LastPage") == 0) {
                             tab->cur_page = tab->n_pages - 1;
-                            scroll_to_page(tab, tab->n_pages - 1);
+                            scroll_to_page(tab, tab->n_pages - 1, -1);
                             update_document_model_from_tab(tab);
                             return TRUE;
                         } else if (g_strcmp0(name, "NextPage") == 0) {
                             int p = MIN(tab->cur_page + 1, tab->n_pages - 1);
                             tab->cur_page = p;
-                            scroll_to_page(tab, p);
+                            scroll_to_page(tab, p, -1);
                             update_document_model_from_tab(tab);
                             return TRUE;
                         } else if (g_strcmp0(name, "PrevPage") == 0) {
                             int p = MAX(tab->cur_page - 1, 0);
                             tab->cur_page = p;
-                            scroll_to_page(tab, p);
+                            scroll_to_page(tab, p, -1);
                             update_document_model_from_tab(tab);
                             return TRUE;
                         } else if (g_strcmp0(name, "GoBack") == 0 || g_strcmp0(name, "GoForward") == 0) {
                             return TRUE;
                         } else {
-                            int resolved = pdfr_resolve_named_dest(tab->doc, name);
+                            int resolved;
+                            double ny = -1;
+                            if (link->page_num > 0) {
+                                resolved = link->page_num;
+                                ny = link->y;
+                            } else {
+                                double nx_discard;
+                                resolved = pdfr_resolve_named_dest(tab->doc, name, &nx_discard, &ny);
+                            }
                             if (resolved > 0) {
                                 int dest = resolved - 1;
                                 if (dest >= 0 && dest < tab->n_pages) {
                                     tab->cur_page = dest;
-                                    scroll_to_page(tab, dest);
+                                    scroll_to_page(tab, dest, ny > 0 ? ny : -1);
                                     update_document_model_from_tab(tab);
                                     return TRUE;
                                 }
@@ -3733,8 +3771,9 @@ static gboolean on_drawing_motion_notify(GtkWidget *widget, GdkEventMotion *even
         page = widget_to_page_coords(tab, event->x, event->y, &px, &py);
         if (page >= 0) {
             ensure_page_links_loaded(tab, page);
-            if (has_link_at(tab, page, px, py))
+            if (has_link_at(tab, page, px, py)) {
                 cursor_type = GDK_HAND2;
+            }
         }
     } else {
         /* Use current cursor type — it won't change between throttled checks */
@@ -4152,8 +4191,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 }
                 if (search_page_results_n > 0) {
                     SearchPageResult *sr = find_search_result_for_page(i + 1);
-                    if (sr) {
-                        double ph_pts = tab->cached_page_heights[i];
+                        if (sr) {
+                            double ph_pts = tab->cached_page_heights[i];
                         cairo_save(cr);
                         cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
                         for (int m = 0; m < sr->n_matches; m++) {
@@ -4349,7 +4388,7 @@ static void on_page_entry_activate(GtkEntry *entry, gpointer user_data) {
 
     int target_zero_based = requested_ui - 1;
     tab->cur_page = target_zero_based;
-    scroll_to_page(tab, target_zero_based);
+    scroll_to_page(tab, target_zero_based, -1);
 
     update_document_model_from_tab(tab);
 }
@@ -4409,7 +4448,7 @@ static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
 
     int target_zero_based = requested_ui - 1;
     tab->cur_page = target_zero_based;
-    scroll_to_page(tab, target_zero_based);
+    scroll_to_page(tab, target_zero_based, -1);
 
     update_document_model_from_tab(tab);
 }
@@ -4937,8 +4976,12 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             t->doc = NULL;
             g_free(t->cached_page_widths);
             g_free(t->cached_page_heights);
+            g_free(t->cached_page_x0);
+            g_free(t->cached_page_y0);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
+            t->cached_page_x0 = NULL;
+            t->cached_page_y0 = NULL;
             invalidate_page_cache(t);
             g_free(t->page_cache);
             t->page_cache = NULL;
@@ -4972,7 +5015,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                         if (saved_page < 1) saved_page = 1;
                         if (saved_page > tab->n_pages) saved_page = tab->n_pages;
                         tab->cur_page = saved_page - 1;
-                        scroll_to_page(tab, tab->cur_page);
+                        scroll_to_page(tab, tab->cur_page, -1);
                     }
                     g_free(key);
                     g_free(uri);
@@ -5025,8 +5068,12 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
             t->doc = NULL;
             g_free(t->cached_page_widths);
             g_free(t->cached_page_heights);
+            g_free(t->cached_page_x0);
+            g_free(t->cached_page_y0);
             t->cached_page_widths = NULL;
             t->cached_page_heights = NULL;
+            t->cached_page_x0 = NULL;
+            t->cached_page_y0 = NULL;
             invalidate_page_cache(t);
             g_free(t->page_cache);
             t->page_cache = NULL;
@@ -5431,7 +5478,7 @@ static void on_page_up_left(GtkButton *btn, gpointer user_data) {
     TabData *tab = get_current_left_tab();
     if (!tab || tab->n_pages <= 0 || tab->cur_page <= 0) return;
     tab->cur_page--;
-    scroll_to_page(tab, tab->cur_page);
+    scroll_to_page(tab, tab->cur_page, -1);
 }
 
 static void on_page_down_left(GtkButton *btn, gpointer user_data) {
@@ -5440,7 +5487,7 @@ static void on_page_down_left(GtkButton *btn, gpointer user_data) {
     TabData *tab = get_current_left_tab();
     if (!tab || tab->n_pages <= 0 || tab->cur_page >= tab->n_pages - 1) return;
     tab->cur_page++;
-    scroll_to_page(tab, tab->cur_page);
+    scroll_to_page(tab, tab->cur_page, -1);
 }
 
 static void on_page_up_right(GtkButton *btn, gpointer user_data) {
@@ -5449,7 +5496,7 @@ static void on_page_up_right(GtkButton *btn, gpointer user_data) {
     TabData *tab = get_current_right_tab();
     if (!tab || tab->n_pages <= 0 || tab->cur_page <= 0) return;
     tab->cur_page--;
-    scroll_to_page(tab, tab->cur_page);
+    scroll_to_page(tab, tab->cur_page, -1);
 }
 
 static void on_page_down_right(GtkButton *btn, gpointer user_data) {
@@ -5458,7 +5505,7 @@ static void on_page_down_right(GtkButton *btn, gpointer user_data) {
     TabData *tab = get_current_right_tab();
     if (!tab || tab->n_pages <= 0 || tab->cur_page >= tab->n_pages - 1) return;
     tab->cur_page++;
-    scroll_to_page(tab, tab->cur_page);
+    scroll_to_page(tab, tab->cur_page, -1);
 }
 
 static void apply_layout_to_tab(TabData *tab, int layout) {

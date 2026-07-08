@@ -30,6 +30,7 @@ typedef struct PdfrLink {
     PdfrRect        rect;
     PdfrLinkType    type;
     int            page_num;     /* for PDF_LINK_GOTO (1-based) */
+    double         x, y;         /* target position within page (PDF points), -1 if unspecified */
     char          *named_dest;   /* for PDF_LINK_NAMED */
     char          *uri;          /* for PDF_LINK_URI */
     struct PdfrLink *next;
@@ -53,7 +54,7 @@ void    pdfr_close(PdfrDoc *doc);
 /* --- Page lifecycle --- */
 
 PdfrPage *pdfr_load_page(PdfrDoc *doc, int page_idx);
-void     pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h);
+void     pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h, double *x0, double *y0);
 void     pdfr_free_page(PdfrDoc *doc, PdfrPage *page);
 
 /* --- Rendering --- */
@@ -68,7 +69,7 @@ void pdfr_render(PdfrDoc *doc, PdfrPage *page, cairo_t *cr);
 
 PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page);
 void     pdfr_free_links(PdfrDoc *doc, PdfrLink *links);
-int      pdfr_resolve_named_dest(PdfrDoc *doc, const char *name);
+int      pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, double *out_y);
 
 /* --- Search --- */
 

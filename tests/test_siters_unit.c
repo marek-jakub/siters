@@ -232,6 +232,9 @@ static void setup_tab_with_link(TabData *tab) {
     memset(tab, 0, sizeof(*tab));
     tab->page_links_n = 1;
     tab->page_links = g_malloc0(sizeof(PdfrLink *));
+    tab->n_pages = 1;
+    tab->cached_page_heights = g_malloc(sizeof(double));
+    tab->cached_page_heights[0] = 800.0;
     PdfrLink *m = g_malloc0(sizeof(PdfrLink));
     m->rect.x1 = 100.0;
     m->rect.y1 = 200.0;
@@ -260,14 +263,17 @@ static void teardown_tab_with_link(TabData *tab) {
         tab->page_links = NULL;
     }
     tab->page_links_n = 0;
+    g_free(tab->cached_page_heights);
+    tab->cached_page_heights = NULL;
 }
 
 static void test_has_link_at_inside_rectangle(void **state) {
     (void)state;
     TabData tab;
     setup_tab_with_link(&tab);
-    /* Link rectangle: x=[100,300], y=[200,400] */
-    assert_true(has_link_at(&tab, 0, 150.0, 250.0));
+    /* Link rect in device/page space (y-down, 0=top): x=[100,300], y=[200,400]
+       y1=200 is top, y2=400 is bottom. */
+    assert_true(has_link_at(&tab, 0, 150.0, 350.0));
     assert_true(has_link_at(&tab, 0, 100.0, 200.0));
     assert_true(has_link_at(&tab, 0, 300.0, 400.0));
     assert_true(has_link_at(&tab, 0, 200.0, 300.0));
@@ -278,11 +284,11 @@ static void test_has_link_at_outside_rectangle(void **state) {
     (void)state;
     TabData tab;
     setup_tab_with_link(&tab);
-    /* Outside rectangle */
-    assert_false(has_link_at(&tab, 0, 50.0, 250.0));
-    assert_false(has_link_at(&tab, 0, 350.0, 250.0));
-    assert_false(has_link_at(&tab, 0, 150.0, 100.0));
-    assert_false(has_link_at(&tab, 0, 150.0, 500.0));
+    /* Outside rectangle in rendering space (y-down): y range=[200,400] */
+    assert_false(has_link_at(&tab, 0, 50.0, 350.0));   /* left of x */
+    assert_false(has_link_at(&tab, 0, 350.0, 350.0));   /* right of x */
+    assert_false(has_link_at(&tab, 0, 150.0, 150.0));   /* above (smaller y in y-down) */
+    assert_false(has_link_at(&tab, 0, 150.0, 500.0));   /* below (larger y in y-down) */
     teardown_tab_with_link(&tab);
 }
 
@@ -311,6 +317,8 @@ static void setup_tab_single_page(TabData *tab) {
     tab->zoom = 72.0;  /* get_ppi_scale → 72/72 = 1.0 */
     tab->cached_page_widths = g_malloc(sizeof(double));
     tab->cached_page_heights = g_malloc(sizeof(double));
+    tab->cached_page_x0 = g_malloc0(sizeof(double));
+    tab->cached_page_y0 = g_malloc0(sizeof(double));
     tab->cached_page_widths[0] = 600.0;
     tab->cached_page_heights[0] = 800.0;
     tab->pages_drawing = (GtkWidget *)0x1;  /* non-NULL dummy */
@@ -321,8 +329,12 @@ static void setup_tab_single_page(TabData *tab) {
 static void teardown_tab_single_page(TabData *tab) {
     g_free(tab->cached_page_widths);
     g_free(tab->cached_page_heights);
+    g_free(tab->cached_page_x0);
+    g_free(tab->cached_page_y0);
     tab->cached_page_widths = NULL;
     tab->cached_page_heights = NULL;
+    tab->cached_page_x0 = NULL;
+    tab->cached_page_y0 = NULL;
     tab->pages_drawing = NULL;
 }
 
@@ -339,8 +351,8 @@ static void test_widget_to_page_coords_inside_page(void **state) {
     assert_int_equal(page, 0);
     /* px = (500-200)/1 = 300 */
     assert_true(fabs(px - 300.0) < 0.001);
-    /* py = 800 - (400-6)/1 = 406 */
-    assert_true(fabs(py - 406.0) < 0.001);
+    /* py = (400-6)/1 = 394 (y-down, 0=top, no inversion) */
+    assert_true(fabs(py - 394.0) < 0.001);
 
     teardown_tab_single_page(&tab);
 }

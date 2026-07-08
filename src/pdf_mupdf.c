@@ -118,14 +118,18 @@ PdfrPage *pdfr_load_page(PdfrDoc *doc, int page_idx) {
     return pd;
 }
 
-void pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h) {
+void pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h, double *x0, double *y0) {
     fz_try(doc->ctx) {
         fz_rect r = fz_bound_page(doc->ctx, page->page);
         *w = r.x1 - r.x0;
         *h = r.y1 - r.y0;
+        if (x0) *x0 = r.x0;
+        if (y0) *y0 = r.y0;
     }
     fz_catch(doc->ctx) {
         *w = *h = 0;
+        if (x0) *x0 = 0;
+        if (y0) *y0 = 0;
     }
 }
 
@@ -204,22 +208,63 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
         for (fz_link *l = links; l; l = l->next) {
             PdfrLink *link = calloc(1, sizeof(PdfrLink));
             link->rect = fz_rect_to_pdf(l->rect);
+            link->x = -1;
+            link->y = -1;
             link->next = NULL;
 
             if (l->uri) {
                 if (strncmp(l->uri, "#page=", 6) == 0) {
                     link->type = PDF_LINK_GOTO;
-                    link->page_num = atoi(l->uri + 6);
+                    /* Use fz_resolve_link_dest for authoritative page number
+                       (handles page labels, indirect page refs, etc.).
+                       Fall back to raw atoi if resolution fails. */
+                    fz_try(ctx) {
+                        fz_link_dest ld = fz_resolve_link_dest(ctx, doc->doc, l->uri);
+                        int abs_page = fz_page_number_from_location(ctx, doc->doc, ld.loc);
+                        link->page_num = abs_page + 1; /* 0-based → 1-based */
+                        if (ld.type == FZ_LINK_DEST_XYZ && isfinite(ld.zoom)) {
+                            link->x = ld.x;
+                            link->y = ld.y;
+                        }
+                    }
+                    fz_catch(ctx) {
+                        link->page_num = atoi(l->uri + 6);
+                    }
                 } else if (strncmp(l->uri, "#nameddest=", 11) == 0) {
                     link->type = PDF_LINK_NAMED;
                     link->named_dest = strdup(l->uri + 11);
+                    /* Resolve page number at load time (consistent with GOTO links) */
+                    fz_try(ctx) {
+                        fz_link_dest ld = fz_resolve_link_dest(ctx, doc->doc, l->uri);
+                        int abs_page = fz_page_number_from_location(ctx, doc->doc, ld.loc);
+                        if (abs_page >= 0)
+                            link->page_num = abs_page + 1; /* 0-based → 1-based */
+                        if (ld.type == FZ_LINK_DEST_XYZ && isfinite(ld.zoom)) {
+                            link->x = ld.x;
+                            link->y = ld.y;
+                        }
+                    }
+                    fz_catch(ctx) { }
                 } else if (strchr(l->uri, ':') != NULL) {
                     link->type = PDF_LINK_URI;
                     link->uri = strdup(l->uri);
                 } else {
                     /* Internal link with unknown format; try as named dest */
                     link->type = PDF_LINK_NAMED;
-                    link->named_dest = strdup(l->uri);
+                    const char *s = l->uri;
+                    if (*s == '#') s++;
+                    link->named_dest = strdup(s);
+                    fz_try(ctx) {
+                        fz_link_dest ld = fz_resolve_link_dest(ctx, doc->doc, l->uri);
+                        int abs_page = fz_page_number_from_location(ctx, doc->doc, ld.loc);
+                        if (abs_page >= 0)
+                            link->page_num = abs_page + 1;
+                        if (ld.type == FZ_LINK_DEST_XYZ && isfinite(ld.zoom)) {
+                            link->x = ld.x;
+                            link->y = ld.y;
+                        }
+                    }
+                    fz_catch(ctx) { }
                 }
             } else {
                 link->type = PDF_LINK_UNKNOWN;
@@ -246,7 +291,7 @@ void pdfr_free_links(PdfrDoc *doc, PdfrLink *links) {
     }
 }
 
-int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name) {
+int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, double *out_y) {
     fz_context *ctx = doc->ctx;
     /* Build a URI of the form #nameddest=... and resolve it */
     char uri[1024];
@@ -254,10 +299,15 @@ int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name) {
     if (n >= (int)sizeof(uri)) return 0;
 
     int page = 0;
+    if (out_x) *out_x = -1;
+    if (out_y) *out_y = -1;
     fz_try(ctx) {
         float xp, yp;
         fz_location loc = fz_resolve_link(ctx, doc->doc, uri, &xp, &yp);
-        page = loc.page + 1; /* Convert to 1-based */
+        int abs_page = fz_page_number_from_location(ctx, doc->doc, loc);
+        page = abs_page + 1; /* Convert to 1-based */
+        if (out_x) *out_x = xp;
+        if (out_y) *out_y = yp;
     }
     fz_catch(ctx) { }
     return page;
@@ -286,7 +336,7 @@ int pdfr_search_page(PdfrDoc *doc, PdfrPage *page,
 
 /* ---- Outline (TOC) ---- */
 
-static PdfrOutline *build_outline_tree(fz_context *ctx, fz_outline *entry) {
+static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_outline *entry) {
     if (!entry) return NULL;
 
     PdfrOutline *head = NULL, *tail = NULL;
@@ -296,19 +346,19 @@ static PdfrOutline *build_outline_tree(fz_context *ctx, fz_outline *entry) {
         node->title = cur->title ? strdup(cur->title) : strdup("");
 
         if (cur->page.page >= 0) {
-            /* fz_outline uses 0-based pages in .page, but URI might contain
-               the actual page reference. Use the URI if available for more
-               precision. */
-            if (cur->uri && strncmp(cur->uri, "#page=", 6) == 0) {
-                node->page = atoi(cur->uri + 6); /* 1-based in URI */
+            /* Convert fz_location (chapter + page-within-chapter) to
+               absolute 0-based page number, then store as 1-based. */
+            int abs_page = fz_page_number_from_location(ctx, doc, cur->page);
+            if (abs_page >= 0) {
+                node->page = abs_page + 1; /* 0-based → 1-based */
             } else {
-                node->page = cur->page.page + 1; /* convert to 1-based */
+                node->page = 0;
             }
         } else {
             node->page = 0;
         }
 
-        node->down = build_outline_tree(ctx, cur->down);
+        node->down = build_outline_tree(ctx, doc, cur->down);
         node->next = NULL;
 
         if (tail) { tail->next = node; tail = node; }
@@ -330,7 +380,7 @@ PdfrOutline *pdfr_load_outline(PdfrDoc *doc) {
 
     if (!root) return NULL;
 
-    PdfrOutline *outline = build_outline_tree(ctx, root);
+    PdfrOutline *outline = build_outline_tree(ctx, doc->doc, root);
     fz_drop_outline(ctx, root);
     return outline;
 }
