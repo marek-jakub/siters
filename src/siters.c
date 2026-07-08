@@ -1524,6 +1524,8 @@ void populate_sessions_treeview(void) {
                         g_free(uri);
                         }
                     }
+                g_free(name);
+                break;
             } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
         }
     }
