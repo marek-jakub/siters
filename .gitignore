@@ -54,8 +54,16 @@ dkms.conf
 # debug information files
 *.dwo
 
-# build directory
+# build directories
 build/
+obj-*/
+cmake-build-*/
+
+# CMake artifacts (in-source build guard)
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+CTestTestfile.cmake
 
 # log files generated during builds
 *.log

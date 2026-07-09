@@ -50,6 +50,7 @@ typedef struct PdfrOutline {
 PdfrDoc *pdfr_open(const char *path, char **error);
 int     pdfr_count_pages(PdfrDoc *doc);
 void    pdfr_close(PdfrDoc *doc);
+void    pdfr_shutdown(void);
 
 /* --- Page lifecycle --- */
 
@@ -73,9 +74,10 @@ int      pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, 
 
 /* --- Search --- */
 
-/* Search for 'text' on a page.  Fills at most max_matches rectangles and
-   returns the number of matches found (may exceed max_matches). */
-int pdfr_search_page(PdfrDoc *doc, PdfrPage *page,
+/* Search for 'text' on a page by page index (0-based).
+   Fills at most max_matches rectangles and returns the number of matches
+   found (may exceed max_matches). */
+int pdfr_search_page(PdfrDoc *doc, int page_idx,
                     const char *text, PdfrRect *matches, int max_matches);
 
 /* --- Outline (TOC) --- */

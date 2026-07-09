@@ -4,6 +4,7 @@
 #include <string.h>
 #include "siters.h"
 #include "log.h"
+#include "pdf.h"
 
 extern void load_state(void);
 
@@ -82,5 +83,6 @@ int main(int argc, char *argv[]) {
     hide_right_pane();
 
     gtk_main();
+    pdfr_shutdown();
     return 0;
 }

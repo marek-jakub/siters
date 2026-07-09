@@ -1,31 +1,42 @@
-CC = gcc
+BUILD_DIR ?= build
+CMAKE ?= cmake
+INSTALL_PREFIX ?= /usr/local
+DATADIR ?= $(INSTALL_PREFIX)/share/siters
 
-DATADIR ?= $(CURDIR)
+.PHONY: all build test test-unit clean install help
 
-PKG_CFLAGS := $(shell pkg-config --cflags gtk+-3.0)
-PKG_LIBS   := $(shell pkg-config --libs gtk+-3.0)
-MUPDF_CFLAGS := $(shell pkg-config --cflags mupdf)
-MUPDF_LIBS   := $(shell pkg-config --libs --static mupdf)
+all: build
 
-# MuPDF static lib may reference symbols in GTK libs (harfbuzz)
-# those must appear after -lmupdf so GNU ld can resolve them.
-ORDERED_LIBS = $(MUPDF_LIBS) $(PKG_LIBS)
+build:
+	@mkdir -p $(BUILD_DIR)
+	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Release -DDATADIR=$(DATADIR)
+	$(CMAKE) --build $(BUILD_DIR) -j$$(nproc)
 
-CFLAGS = $(PKG_CFLAGS) $(MUPDF_CFLAGS) \
-         -DDATADIR=\"$(DATADIR)\" \
-         -Iinclude -Iinclude/json-glib \
-         -I/usr/include/glib-2.0 -I/usr/lib/x86_64-linux-gnu/glib-2.0/include
-LIBS   = $(ORDERED_LIBS) -L/usr/lib/x86_64-linux-gnu -l:libjson-glib-1.0.so.0
+test-unit:
+	@mkdir -p $(BUILD_DIR)
+	$(CMAKE) -S . -B $(BUILD_DIR) -DCMAKE_BUILD_TYPE=Debug -DDATADIR=$(DATADIR)
+	$(CMAKE) --build $(BUILD_DIR) -j$$(nproc)
+	cd $(BUILD_DIR) && ctest --output-on-failure
 
-TARGET = siters
-SRC = src/main.c src/siters.c src/sessions_model.c src/session_model.c \
-      src/document_model.c src/pdf_mupdf.c
+test: test-unit
 
-all:
-	$(CC) $(CFLAGS) -o $(TARGET) $(SRC) $(LIBS)
-
-memdebug: CFLAGS += -DMEM_DEBUG
-memdebug: all
+install: build
+	$(CMAKE) --install $(BUILD_DIR) --prefix $(INSTALL_PREFIX)
 
 clean:
-	rm -f $(TARGET)
+	rm -rf $(BUILD_DIR)
+
+help:
+	@echo "Siters build system (CMake wrapper)"
+	@echo ""
+	@echo "Usage:"
+	@echo "  make              - Build the application (Release)"
+	@echo "  make test         - Build and run unit tests"
+	@echo "  make install      - Build and install to prefix"
+	@echo "  make clean        - Remove build directory"
+	@echo ""
+	@echo "Variables:"
+	@echo "  BUILD_DIR=$(BUILD_DIR)"
+	@echo "  INSTALL_PREFIX=$(INSTALL_PREFIX)"
+	@echo "  DATADIR=$(DATADIR)"
+	@echo "  CMAKE=$(CMAKE)"

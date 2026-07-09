@@ -1,4 +1,4 @@
-# Top 10 Harshest Bugs & Solutions
+# Top 15 Harshest Bugs & Solutions
 
 > **Note:** The original Poppler backend was abandoned in favour of MuPDF during the life of this project.  
 > See [Why Poppler Was Abandoned](#why-poppler-was-abandoned) below.
@@ -37,6 +37,8 @@ The switch was done in two phases:
 12. [Blank Pages After Scrolling (MuPDF Error Stack Overflow)](#12-blank-pages-after-scrolling-mupdf-error-stack-overflow)
 13. [Link Hotspots Upside Down on MuPDF 1.23+](#13-link-hotspots-upside-down-on-mupdf-123)
 14. [Blank JBIG2 PDFs on Debian 12 / MX Linux](#14-blank-jbig2-pdfs-on-debian-12--mx-linux)
+
+15. [Search Crashes on Tab Switch (Segfault / Stack Smashing)](#15-search-crashes-on-tab-switch-segfault--stack-smashing)
 
 ---
 
@@ -438,3 +440,37 @@ find_library(OPENJP2_STATIC_LIB libopenjp2.a   PATHS ...)
 - `src/siters.c` — LOG_ERROR on pdfr_load_page failure
 - `src/glibc_compat.c` — new: fmod/fmodf wrappers for GLIBC 2.36 compat
 - `debian/rules` — patched libc6 and libjpeg8 dependency in control file
+
+---
+
+## 15. Search Crashes on Tab Switch / Search Initiation (SEGV in `fz_search_page`)
+
+**Bug:** Searching any document caused a deterministic SEGV with write access at address `0x000100000001` inside MuPDF's `fz_search_page`. The crash occurred immediately on pressing Enter or clicking the Search button — no tab switch needed. The same address `0x000100000001` appeared consistently across multiple attempts, regardless of document or search term.
+
+```
+AddressSanitizer: SEGV on unknown address 0x000100000001 (pc … in do_search pdf_mupdf.c:368)
+```
+
+The old (`perform_file_info_search`) and the first rewrite (batched idle with `pdfr_load_page` + `pdfr_search_page`) both crashed the same way. The draw path also showed stale search results after tab switch because the results were never cleared.
+
+**Root cause:** Three issues:
+
+1. **Corrupted `fz_page*` via `PdfrPage` intermediary** — `pdfr_search_page` took a `PdfrPage*`, extracted `page->page` (the `fz_page*`), and passed it to `fz_search_page`. The `PdfrPage` object was allocated via `pdfr_load_page` (which calls `fz_load_page` inside `fz_try`/`fz_catch`). MuPDF's `setjmp`/`longjmp` error handling could corrupt the `PdfrPage` struct (missing `fz_var()` for intermediate pointers), or the `fz_page*` itself could be invalid after certain MuPDF internal errors. The address `0x000100000001` matched a freed/reused page object where the `fz_page*` had been overwritten with an offset value.
+
+2. **Batached idle callback with stale `TabData`** — The progressive-search callback returned `TRUE` to re-schedule itself across main-loop iterations. Between iterations, a tab switch or new search would free the old search data. Although the old idle source was removed via `g_source_remove`, the removed source could still be between the check and its next dispatch on some GLib versions. The callback then accessed `tab->search_text` and `tab->doc` which had been freed.
+
+3. **Stale results on tab switch** — The results tree view and `search_no_results_label` were global widgets. When switching tabs, the old tab's results remained visible. `update_file_info_labels` cleared the search entry text but did not clear the results store or cancel the search.
+
+**Solution — full rewrite:**
+
+1. **`pdfr_search_page` rewritten to use `fz_search_page_number`** — Changed signature from `(PdfrDoc *doc, PdfrPage *page, …)` to `(PdfrDoc *doc, int page_idx, …)`. Uses `fz_search_page_number(ctx, doc->doc, page_idx, …)` which loads the page internally via MuPDF's own page-number lookup, eliminating the `PdfrPage` intermediary entirely. Stack-allocates the `fz_quad quads[100]` buffer instead of `calloc`. Removed the `do_search` wrapper function.
+
+2. **Single-pass idle callback** — `search_idle` searches ALL pages in one idle invocation and returns `FALSE`. No batching, no re-scheduling, no `search_next_page` field. Each loop iteration checks `tab->search_cancelled && tab->doc` so cancellation during the loop is immediate.
+
+3. **Clear on tab switch** — `search_clear()` is called from `update_file_info_labels()`, which is invoked on every tab switch (both left and right notebooks), document open, and sidebar toggle. This clears the results tree view, hides the "No results" label, and cancels/frees the current tab's search data.
+
+**Key files:**
+- `include/pdf.h` — `pdfr_search_page` signature changed to `(doc, page_idx, text, matches, max_matches)`
+- `src/pdf_mupdf.c` — `pdfr_search_page` rewritten to use `fz_search_page_number` + stack quads
+- `src/siters.c` — single-pass idle callback, `search_clear()` in `update_file_info_labels`
+- `tests/bugs.md` — this entry

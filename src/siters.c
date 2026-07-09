@@ -25,6 +25,8 @@
 /* Forward declaration and struct definitions for tab management */
 typedef struct TabDataStruct TabData;
 
+
+
 /* State tracking for deferred, layout-aware restore */
 typedef struct {
     TabData *tab;
@@ -79,6 +81,14 @@ typedef struct TabDataStruct {
     int page_links_n;       /* size of page_links array (== n_pages) */
     GdkCursorType last_cursor_type; /* last cursor set on drawing area (to avoid redundant X11 calls) */
     gint64 last_cursor_check;       /* monotonic time of last link cursor check (for throttling) */
+
+    /* Search state */
+    struct { int page; int n_matches; PdfrRect *rects; } *search_results;
+    int search_results_n;
+    int search_results_cap;
+    char *search_text;
+    gboolean search_cancelled;
+    guint search_idle_id;
 } TabData;
 
 typedef enum {
@@ -151,12 +161,11 @@ static GtkWidget *file_info_name_label;
 static GtkWidget *file_info_path_label;
 static GtkWidget *file_info_size_label;
 static GtkWidget *file_info_pages_label;
-static GtkWidget *file_info_search_entry;
-static GtkWidget *file_info_search_btn;
-static GtkWidget *file_info_search_results_view;
-static GtkListStore *file_info_search_results_store;
-static GtkWidget *file_info_search_no_results;
-static GtkWidget *file_info_search_overflow_label;
+static GtkWidget *search_entry;
+static GtkWidget *search_btn;
+static GtkWidget *search_results_view;
+static GtkListStore *search_results_store;
+static GtkWidget *search_no_results_label;
 
 enum {
     SEARCH_COL_PAGE = 0,
@@ -164,18 +173,6 @@ enum {
     SEARCH_COL_LABEL,
     SEARCH_COL_NCOL
 };
-
-#define SEARCH_MAX_PER_PAGE 10
-#define SEARCH_MAX_PAGES 200
-
-typedef struct {
-    int page;
-    int n_matches;
-    PdfrRect rects[SEARCH_MAX_PER_PAGE];
-} SearchPageResult;
-
-static SearchPageResult search_page_results[SEARCH_MAX_PAGES];
-static int search_page_results_n = 0;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -310,11 +307,14 @@ static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
-static void clear_file_info_search_results(void);
-static SearchPageResult* find_search_result_for_page(int page_1based);
-static void on_file_info_search_activated(GtkEntry *entry, gpointer user_data);
-static void on_file_info_search_clicked(GtkButton *btn, gpointer user_data);
-static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data);
+static void search_clear(void);
+static void search_cancel(TabData *tab);
+static void search_free(TabData *tab);
+static gboolean search_idle(gpointer user_data);
+static void on_search_activated(GtkEntry *entry, gpointer user_data);
+static void on_search_clicked(GtkButton *btn, gpointer user_data);
+static void on_search_row_activated(GtkTreeView *tv, GtkTreePath *path, GtkTreeViewColumn *col, gpointer user_data);
+static void search_highlight_page(TabData *tab, cairo_t *cr, int page_1based, double ox, double oy, double sc);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -409,9 +409,9 @@ static gchar* format_file_size(goffset size) {
 }
 
 static void update_file_info_labels(TabData *tab) {
-    clear_file_info_search_results();
-    if (file_info_search_entry) {
-        gtk_entry_set_text(GTK_ENTRY(file_info_search_entry), "");
+    search_clear();
+    if (search_entry) {
+        gtk_entry_set_text(GTK_ENTRY(search_entry), "");
     }
     if (!tab || !tab->current_file) {
         gtk_label_set_text(GTK_LABEL(file_info_name_label), "Name: (no file)");
@@ -615,8 +615,11 @@ static void destroy_tab_data(gpointer data) {
         }
         g_free(tab->page_links);
     }
+    search_cancel(tab);
+    search_free(tab);
     if (tab->doc) {
         pdfr_close(tab->doc);
+        tab->doc = NULL;
     }
     g_free(tab->current_file);
     invalidate_page_cache(tab);
@@ -2787,113 +2790,123 @@ static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
     current_sidebar_mode = SIDEBAR_SETTINGS;
 }
 
-static SearchPageResult* find_search_result_for_page(int page_1based) {
-    for (int i = 0; i < search_page_results_n; i++) {
-        if (search_page_results[i].page == page_1based)
-            return &search_page_results[i];
+/* Search implementation */
+#define SEARCH_MAX_PER_PAGE 50
+
+static void search_cancel(TabData *tab) {
+    if (!tab) return;
+    tab->search_cancelled = TRUE;
+    if (tab->search_idle_id) {
+        g_source_remove(tab->search_idle_id);
+        tab->search_idle_id = 0;
     }
-    return NULL;
 }
 
-static void clear_file_info_search_results(void) {
-    search_page_results_n = 0;
-    if (file_info_search_results_store) {
-        gtk_list_store_clear(file_info_search_results_store);
-    }
-    if (file_info_search_no_results) {
-        gtk_widget_hide(file_info_search_no_results);
-    }
-    if (file_info_search_overflow_label) {
-        gtk_widget_hide(file_info_search_overflow_label);
-    }
+static void search_free(TabData *tab) {
+    if (!tab) return;
+    for (int i = 0; i < tab->search_results_n; i++)
+        free(tab->search_results[i].rects);
+    g_free(tab->search_results);
+    tab->search_results = NULL;
+    tab->search_results_n = 0;
+    tab->search_results_cap = 0;
+    g_free(tab->search_text);
+    tab->search_text = NULL;
+}
+
+static void search_clear(void) {
     TabData *tab = get_current_left_tab();
+    if (tab) {
+        search_cancel(tab);
+        search_free(tab);
+    }
+    if (search_results_store)
+        gtk_list_store_clear(search_results_store);
+    if (search_no_results_label)
+        gtk_widget_hide(search_no_results_label);
     if (tab) queue_draw(tab);
 }
 
-static void perform_file_info_search(const char *text) {
-    clear_file_info_search_results();
-    if (!text || !*text) {
-        TabData *tab = get_current_left_tab();
-        if (tab) queue_draw(tab);
-        return;
-    }
+static gboolean search_idle(gpointer user_data) {
+    TabData *tab = (TabData *)user_data;
+    tab->search_idle_id = 0;
 
-    TabData *tab = get_current_left_tab();
-    if (!tab || !ensure_tab_doc_loaded(tab)) return;
-    if (!tab->doc) return;
+    if (!tab || tab->search_cancelled || !tab->doc)
+        return FALSE;
 
+    gboolean found = FALSE;
     int n_pages = pdfr_count_pages(tab->doc);
-    if (n_pages <= 0) return;
+    PdfrRect rects_buf[SEARCH_MAX_PER_PAGE];
 
-    for (int i = 0; i < n_pages && search_page_results_n < SEARCH_MAX_PAGES; i++) {
-        PdfrPage *page = pdfr_load_page(tab->doc, i);
-        if (!page) continue;
+    for (int i = 0; i < n_pages && !tab->search_cancelled && tab->doc; i++) {
+        int n = pdfr_search_page(tab->doc, i, tab->search_text, rects_buf, SEARCH_MAX_PER_PAGE);
 
-        PdfrRect matches[SEARCH_MAX_PER_PAGE];
-        int n_matches = pdfr_search_page(tab->doc, page, text, matches, SEARCH_MAX_PER_PAGE);
+        if (tab->search_cancelled || !tab->doc)
+            return FALSE;
 
-        if (n_matches > 0) {
-            SearchPageResult *r = &search_page_results[search_page_results_n];
-            r->page = i + 1;
-            r->n_matches = n_matches;
-            memcpy(r->rects, matches, sizeof(PdfrRect) * n_matches);
-            search_page_results_n++;
+        if (n <= 0) continue;
 
-            GtkTreeIter tree_iter;
-            const char *plural = n_matches == 1 ? "" : "es";
-            gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n_matches, plural);
-            gtk_list_store_append(file_info_search_results_store, &tree_iter);
-            gtk_list_store_set(file_info_search_results_store, &tree_iter,
-                               SEARCH_COL_PAGE, i + 1,
-                               SEARCH_COL_COUNT, n_matches,
-                               SEARCH_COL_LABEL, label, -1);
-            g_free(label);
+        if (tab->search_results_n >= tab->search_results_cap) {
+            int new_cap = tab->search_results_cap ? tab->search_results_cap * 2 : 32;
+            void *tmp = g_realloc(tab->search_results, new_cap * sizeof(*tab->search_results));
+            if (!tmp) return FALSE;
+            tab->search_results = tmp;
+            tab->search_results_cap = new_cap;
         }
+        tab->search_results[tab->search_results_n].page = i + 1;
+        tab->search_results[tab->search_results_n].n_matches = n;
+        tab->search_results[tab->search_results_n].rects = g_memdup2(rects_buf, sizeof(PdfrRect) * n);
+        tab->search_results_n++;
+        found = TRUE;
 
-        pdfr_free_page(tab->doc, page);
+        const char *plural = n == 1 ? "" : "es";
+        gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n, plural);
+        GtkTreeIter ti;
+        gtk_list_store_append(search_results_store, &ti);
+        gtk_list_store_set(search_results_store, &ti,
+            SEARCH_COL_PAGE, i + 1,
+            SEARCH_COL_COUNT, n,
+            SEARCH_COL_LABEL, label, -1);
+        g_free(label);
     }
 
-    if (search_page_results_n == 0) {
-        gtk_widget_show(file_info_search_no_results);
-    }
-
-    if (search_page_results_n >= SEARCH_MAX_PAGES) {
-        gchar *overflow = g_strdup_printf("Results limited to %d pages", SEARCH_MAX_PAGES);
-        gtk_label_set_text(GTK_LABEL(file_info_search_overflow_label), overflow);
-        g_free(overflow);
-        gtk_widget_show(file_info_search_overflow_label);
-    } else {
-        gtk_widget_hide(file_info_search_overflow_label);
-    }
+    if (!found && tab->search_text && *tab->search_text)
+        gtk_widget_show(search_no_results_label);
 
     queue_draw(tab);
+    return FALSE;
 }
 
-static void on_file_info_search_activated(GtkEntry *entry, gpointer user_data) {
-    (void)user_data;
-    const char *text = gtk_entry_get_text(entry);
-    perform_file_info_search(text);
+static void search_start(const char *text) {
+    TabData *tab = get_current_left_tab();
+    if (!text || !*text) {
+        if (tab) { search_clear(); queue_draw(tab); }
+        return;
+    }
+    search_clear();
+    tab = get_current_left_tab();
+    if (!tab || !ensure_tab_doc_loaded(tab) || !tab->doc) return;
+    tab->search_text = g_strdup(text);
+    tab->search_cancelled = FALSE;
+    tab->search_idle_id = g_idle_add(search_idle, tab);
 }
 
-static void on_file_info_search_clicked(GtkButton *btn, gpointer user_data) {
-    (void)btn;
+static void on_search_activated(GtkEntry *entry, gpointer user_data) {
     (void)user_data;
-    const char *text = gtk_entry_get_text(GTK_ENTRY(file_info_search_entry));
-    perform_file_info_search(text);
+    search_start(gtk_entry_get_text(entry));
 }
 
-static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkTreeViewColumn *column, gpointer user_data) {
-    (void)tree_view;
-    (void)column;
-    (void)user_data;
+static void on_search_clicked(GtkButton *btn, gpointer user_data) {
+    (void)btn; (void)user_data;
+    search_start(gtk_entry_get_text(GTK_ENTRY(search_entry)));
+}
 
-    GtkTreeModel *model = GTK_TREE_MODEL(file_info_search_results_store);
+static void on_search_row_activated(GtkTreeView *tv, GtkTreePath *path, GtkTreeViewColumn *col, gpointer user_data) {
+    (void)tv; (void)col; (void)user_data;
     GtkTreeIter iter;
-    if (!gtk_tree_model_get_iter(model, &iter, path)) return;
-
+    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(search_results_store), &iter, path)) return;
     int page = 0;
-    gtk_tree_model_get(model, &iter, SEARCH_COL_PAGE, &page, -1);
-
+    gtk_tree_model_get(GTK_TREE_MODEL(search_results_store), &iter, SEARCH_COL_PAGE, &page, -1);
     if (page > 0) {
         TabData *tab = get_current_left_tab();
         if (tab) {
@@ -2902,6 +2915,23 @@ static void on_file_info_search_row_activated(GtkTreeView *tree_view, GtkTreePat
             scroll_to_page(tab, page - 1, -1);
             update_document_model_from_tab(tab);
         }
+    }
+}
+
+static void search_highlight_page(TabData *tab, cairo_t *cr, int page_1based, double ox, double oy, double sc) {
+    if (!tab || tab->search_results_n <= 0) return;
+    for (int i = 0; i < tab->search_results_n; i++) {
+        if (tab->search_results[i].page != page_1based) continue;
+        cairo_save(cr);
+        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
+        for (int m = 0; m < tab->search_results[i].n_matches; m++) {
+            PdfrRect *r = &tab->search_results[i].rects[m];
+            cairo_rectangle(cr, ox + r->x1 * sc, oy + r->y1 * sc,
+                            (r->x2 - r->x1) * sc, (r->y2 - r->y1) * sc);
+        }
+        cairo_fill(cr);
+        cairo_restore(cr);
+        break;
     }
 }
 
@@ -2948,8 +2978,7 @@ static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data) 
 
     update_file_info_labels(get_current_left_tab());
     gtk_widget_show_all(file_info_container);
-    gtk_widget_hide(file_info_search_no_results);
-    gtk_widget_hide(file_info_search_overflow_label);
+    gtk_widget_hide(search_no_results_label);
 
     gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
     gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
@@ -3943,24 +3972,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
-                if (search_page_results_n > 0) {
-                    SearchPageResult *sr = find_search_result_for_page(i + 1);
-                    if (sr) {
-                        double ph_pts = tab->cached_page_heights[i];
-                        cairo_save(cr);
-                        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
-                        for (int m = 0; m < sr->n_matches; m++) {
-                            PdfrRect *r = &sr->rects[m];
-                            cairo_rectangle(cr,
-                                off_x + r->x1 * scale,
-                                off_y + (ph_pts - r->y2) * scale,
-                                (r->x2 - r->x1) * scale,
-                                (r->y2 - r->y1) * scale);
-                        }
-                        cairo_fill(cr);
-                        cairo_restore(cr);
-                    }
-                }
+                search_highlight_page(tab, cr, i + 1, off_x, off_y, scale);
                 pdfr_free_page(tab->doc, page);
             }
 
@@ -4048,24 +4060,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (first_visible == -1) first_visible = i;
                         last_visible = i;
                     }
-                    if (search_page_results_n > 0) {
-                        SearchPageResult *sr = find_search_result_for_page(i + 1);
-                        if (sr) {
-                            double ph_pts = tab->cached_page_heights[i];
-                            cairo_save(cr);
-                            cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
-                            for (int m = 0; m < sr->n_matches; m++) {
-                                PdfrRect *r = &sr->rects[m];
-                                cairo_rectangle(cr,
-                                    left_x + r->x1 * scale,
-                                    y + (ph_pts - r->y2) * scale,
-                                    (r->x2 - r->x1) * scale,
-                                    (r->y2 - r->y1) * scale);
-                            }
-                            cairo_fill(cr);
-                            cairo_restore(cr);
-                        }
-                    }
+                    search_highlight_page(tab, cr, i + 1, left_x, y, scale);
                     pdfr_free_page(tab->doc, p1);
                 }
             }
@@ -4119,24 +4114,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
-                if (search_page_results_n > 0) {
-                        SearchPageResult *sr = find_search_result_for_page(i + 1);
-                        if (sr) {
-                            double ph_pts = tab->cached_page_heights[i];
-                            cairo_save(cr);
-                            cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
-                            for (int m = 0; m < sr->n_matches; m++) {
-                                PdfrRect *r = &sr->rects[m];
-                                cairo_rectangle(cr,
-                                    right_x + r->x1 * scale,
-                                    y + (ph_pts - r->y2) * scale,
-                                    (r->x2 - r->x1) * scale,
-                                    (r->y2 - r->y1) * scale);
-                            }
-                            cairo_fill(cr);
-                            cairo_restore(cr);
-                        }
-                    }
+                search_highlight_page(tab, cr, i + 2, right_x, y, scale);
                     pdfr_free_page(tab->doc, p2);
                 }
             }
@@ -4211,24 +4189,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
-                if (search_page_results_n > 0) {
-                    SearchPageResult *sr = find_search_result_for_page(i + 1);
-                        if (sr) {
-                            double ph_pts = tab->cached_page_heights[i];
-                        cairo_save(cr);
-                        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
-                        for (int m = 0; m < sr->n_matches; m++) {
-                            PdfrRect *r = &sr->rects[m];
-                            cairo_rectangle(cr,
-                                dev_x + r->x1 * scale,
-                                off_y + (ph_pts - r->y2) * scale,
-                                (r->x2 - r->x1) * scale,
-                                (r->y2 - r->y1) * scale);
-                        }
-                        cairo_fill(cr);
-                        cairo_restore(cr);
-                    }
-                }
+                search_highlight_page(tab, cr, i + 1, dev_x, off_y, scale);
                 pdfr_free_page(tab->doc, page);
             }
             x += page_w + spacing;
@@ -4980,11 +4941,12 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
         if (t && t != tab && t->doc) {
             cancel_tab_restore(t);
             cancel_doc_model_debounce(t);
+            search_cancel(t);
+            search_free(t);
             if (t->zoom_scroll_source_id) {
                 g_source_remove(t->zoom_scroll_source_id);
                 t->zoom_scroll_source_id = 0;
             }
-            /* Free link mappings while the doc is still alive */
             if (t->page_links) {
                 for (int j = 0; j < t->page_links_n; j++) {
                     if (t->page_links[j])
@@ -5012,7 +4974,6 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     update_last_read_for_notebook(notebook, page, page_num);
 
-    /* Load current tab's doc if needed */
     if (tab) ensure_tab_doc_loaded(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
@@ -5072,11 +5033,12 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
         if (t && t != tab && t->doc) {
             cancel_tab_restore(t);
             cancel_doc_model_debounce(t);
+            search_cancel(t);
+            search_free(t);
             if (t->zoom_scroll_source_id) {
                 g_source_remove(t->zoom_scroll_source_id);
                 t->zoom_scroll_source_id = 0;
             }
-            /* Free link mappings while the doc is still alive */
             if (t->page_links) {
                 for (int j = 0; j < t->page_links_n; j++) {
                     if (t->page_links[j])
@@ -5935,46 +5897,40 @@ GtkWidget* create_main_window(void) {
 
     /* Search entry + button row */
     GtkWidget *search_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    file_info_search_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(file_info_search_entry), "Search text...");
-    gtk_box_pack_start(GTK_BOX(search_hbox), file_info_search_entry, TRUE, TRUE, 0);
-    g_signal_connect(file_info_search_entry, "activate", G_CALLBACK(on_file_info_search_activated), NULL);
+    search_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(search_entry), "Search text...");
+    gtk_box_pack_start(GTK_BOX(search_hbox), search_entry, TRUE, TRUE, 0);
+    g_signal_connect(search_entry, "activate", G_CALLBACK(on_search_activated), NULL);
 
-    file_info_search_btn = gtk_button_new_with_label("Search");
-    gtk_box_pack_start(GTK_BOX(search_hbox), file_info_search_btn, FALSE, FALSE, 0);
-    g_signal_connect(file_info_search_btn, "clicked", G_CALLBACK(on_file_info_search_clicked), NULL);
+    search_btn = gtk_button_new_with_label("Search");
+    gtk_box_pack_start(GTK_BOX(search_hbox), search_btn, FALSE, FALSE, 0);
+    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_search_clicked), NULL);
 
     gtk_box_pack_start(GTK_BOX(file_info_container), search_hbox, FALSE, FALSE, 0);
 
     /* Results tree view */
-    file_info_search_results_store = gtk_list_store_new(SEARCH_COL_NCOL, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
-    file_info_search_results_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(file_info_search_results_store));
-    g_object_unref(file_info_search_results_store);
+    search_results_store = gtk_list_store_new(SEARCH_COL_NCOL, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
+    search_results_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(search_results_store));
+    g_object_unref(search_results_store);
 
-    GtkCellRenderer *sr = gtk_cell_renderer_text_new();
-    GtkTreeViewColumn *sc = gtk_tree_view_column_new_with_attributes("Page", sr, "text", SEARCH_COL_LABEL, NULL);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(file_info_search_results_view), sc);
-
-    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(file_info_search_results_view), TRUE);
-    g_signal_connect(file_info_search_results_view, "row-activated", G_CALLBACK(on_file_info_search_row_activated), NULL);
+    GtkCellRenderer *search_renderer = gtk_cell_renderer_text_new();
+    GtkTreeViewColumn *search_col = gtk_tree_view_column_new_with_attributes("Page", search_renderer,
+        "text", SEARCH_COL_LABEL, NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(search_results_view), search_col);
+    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(search_results_view), TRUE);
+    g_signal_connect(search_results_view, "row-activated", G_CALLBACK(on_search_row_activated), NULL);
 
     GtkWidget *search_scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(search_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(search_scrolled), 80);
-    gtk_container_add(GTK_CONTAINER(search_scrolled), file_info_search_results_view);
+    gtk_container_add(GTK_CONTAINER(search_scrolled), search_results_view);
     gtk_box_pack_start(GTK_BOX(file_info_container), search_scrolled, TRUE, TRUE, 0);
 
     /* No results label */
-    file_info_search_no_results = gtk_label_new("No results found");
-    gtk_widget_set_halign(file_info_search_no_results, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_search_no_results, FALSE, FALSE, 0);
-    gtk_widget_hide(file_info_search_no_results);
-
-    /* Overflow label */
-    file_info_search_overflow_label = gtk_label_new(NULL);
-    gtk_widget_set_halign(file_info_search_overflow_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_search_overflow_label, FALSE, FALSE, 0);
-    gtk_widget_hide(file_info_search_overflow_label);
+    search_no_results_label = gtk_label_new("No results found");
+    gtk_widget_set_halign(search_no_results_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(file_info_container), search_no_results_label, FALSE, FALSE, 0);
+    gtk_widget_hide(search_no_results_label);
 
     gtk_widget_set_size_request(file_info_container, 300, -1);
     gtk_box_pack_start(GTK_BOX(sidebar), file_info_container, TRUE, TRUE, 0);

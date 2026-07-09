@@ -5,6 +5,7 @@
 #include <stdlib.h>
 #include <math.h>
 #include <cairo.h>
+#include <stdio.h>
 
 #define MAX_STORE_BYTES (256 * 1024 * 1024)
 
@@ -40,31 +41,42 @@ static void log_error(void *user, const char *message) {
     LOG_ERROR("MuPDF: %s", message);
 }
 
+/* ---- Global MuPDF context ---- */
+
+static fz_context *gctx = NULL;
+
+static fz_context *pdfr_get_context(void) {
+    if (!gctx) {
+        gctx = fz_new_context(NULL, NULL, MAX_STORE_BYTES);
+        fz_set_warning_callback(gctx, log_warning, NULL);
+        fz_set_error_callback(gctx, log_error, NULL);
+        fz_register_document_handlers(gctx);
+    }
+    return gctx;
+}
+
+void pdfr_shutdown(void) {
+    if (gctx) {
+        fz_drop_context(gctx);
+        gctx = NULL;
+    }
+}
+
 /* ---- Document lifecycle ---- */
 
 struct PdfrDoc {
-    fz_context *ctx;
     fz_document *doc;
 };
 
 PdfrDoc *pdfr_open(const char *path, char **error) {
-    fz_context *ctx = fz_new_context(NULL, NULL, MAX_STORE_BYTES);
-    if (!ctx) {
-        if (error) *error = strdup("Failed to create MuPDF context");
-        return NULL;
-    }
-    fz_set_warning_callback(ctx, log_warning, NULL);
-    fz_set_error_callback(ctx, log_error, NULL);
-    fz_register_document_handlers(ctx);
+    fz_context *ctx = pdfr_get_context();
 
     PdfrDoc *pd = calloc(1, sizeof(PdfrDoc));
-    pd->ctx = ctx;
 
     fz_try(ctx) {
         pd->doc = fz_open_document(ctx, path);
     }
     fz_catch(ctx) {
-        fz_drop_context(ctx);
         free(pd);
         if (error) *error = strdup("Failed to open document with MuPDF");
         return NULL;
@@ -81,25 +93,27 @@ PdfrDoc *pdfr_open(const char *path, char **error) {
 }
 
 int pdfr_count_pages(PdfrDoc *doc) {
+    fz_context *ctx = pdfr_get_context();
     int n = 0;
-    fz_try(doc->ctx) {
-        n = fz_count_pages(doc->ctx, doc->doc);
+    fz_var(n);
+    fz_try(ctx) {
+        n = fz_count_pages(ctx, doc->doc);
     }
-    fz_catch(doc->ctx) {
-        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
     }
     return n;
 }
 
 void pdfr_close(PdfrDoc *doc) {
     if (!doc) return;
-    fz_try(doc->ctx) {
-        fz_drop_document(doc->ctx, doc->doc);
+    fz_context *ctx = pdfr_get_context();
+    fz_try(ctx) {
+        fz_drop_document(ctx, doc->doc);
     }
-    fz_catch(doc->ctx) {
-        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
     }
-    fz_drop_context(doc->ctx);
     free(doc);
 }
 
@@ -110,16 +124,18 @@ struct PdfrPage {
 };
 
 PdfrPage *pdfr_load_page(PdfrDoc *doc, int page_idx) {
+    fz_context *ctx = pdfr_get_context();
     PdfrPage *pd = NULL;
-    fz_try(doc->ctx) {
-        fz_page *page = fz_load_page(doc->ctx, doc->doc, page_idx);
+    fz_var(pd);
+    fz_try(ctx) {
+        fz_page *page = fz_load_page(ctx, doc->doc, page_idx);
         if (page) {
             pd = calloc(1, sizeof(PdfrPage));
             pd->page = page;
         }
     }
-    fz_catch(doc->ctx) {
-        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
         free(pd);
         pd = NULL;
     }
@@ -127,15 +143,17 @@ PdfrPage *pdfr_load_page(PdfrDoc *doc, int page_idx) {
 }
 
 void pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h, double *x0, double *y0) {
-    fz_try(doc->ctx) {
-        fz_rect r = fz_bound_page(doc->ctx, page->page);
+    (void)doc;
+    fz_context *ctx = pdfr_get_context();
+    fz_try(ctx) {
+        fz_rect r = fz_bound_page(ctx, page->page);
         *w = r.x1 - r.x0;
         *h = r.y1 - r.y0;
         if (x0) *x0 = r.x0;
         if (y0) *y0 = r.y0;
     }
-    fz_catch(doc->ctx) {
-        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
         *w = *h = 0;
         if (x0) *x0 = 0;
         if (y0) *y0 = 0;
@@ -143,12 +161,14 @@ void pdfr_page_size(PdfrDoc *doc, PdfrPage *page, double *w, double *h, double *
 }
 
 void pdfr_free_page(PdfrDoc *doc, PdfrPage *page) {
+    (void)doc;
     if (!page) return;
-    fz_try(doc->ctx) {
-        fz_drop_page(doc->ctx, page->page);
+    fz_context *ctx = pdfr_get_context();
+    fz_try(ctx) {
+        fz_drop_page(ctx, page->page);
     }
-    fz_catch(doc->ctx) {
-        LOG_ERROR("MuPDF: %s", fz_caught_message(doc->ctx));
+    fz_catch(ctx) {
+        LOG_ERROR("MuPDF: %s", fz_caught_message(ctx));
     }
     free(page);
 }
@@ -156,7 +176,8 @@ void pdfr_free_page(PdfrDoc *doc, PdfrPage *page) {
 /* ---- Rendering ---- */
 
 void pdfr_render(PdfrDoc *doc, PdfrPage *page, cairo_t *cr) {
-    fz_context *ctx = doc->ctx;
+    (void)doc;
+    fz_context *ctx = pdfr_get_context();
 
     cairo_surface_t *surface = cairo_get_target(cr);
     if (cairo_surface_status(surface) != CAIRO_STATUS_SUCCESS) {
@@ -217,7 +238,8 @@ void pdfr_render(PdfrDoc *doc, PdfrPage *page, cairo_t *cr) {
 /* ---- Links ---- */
 
 PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
-    fz_context *ctx = doc->ctx;
+    (void)doc;
+    fz_context *ctx = pdfr_get_context();
     PdfrLink *head = NULL, *tail = NULL;
 
     fz_try(ctx) {
@@ -315,13 +337,14 @@ void pdfr_free_links(PdfrDoc *doc, PdfrLink *links) {
 }
 
 int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, double *out_y) {
-    fz_context *ctx = doc->ctx;
+    fz_context *ctx = pdfr_get_context();
     /* Build a URI of the form #nameddest=... and resolve it */
     char uri[1024];
     int n = snprintf(uri, sizeof(uri), "#nameddest=%s", name);
     if (n >= (int)sizeof(uri)) return 0;
 
     int page = 0;
+    fz_var(page);
     if (out_x) *out_x = -1;
     if (out_y) *out_y = -1;
     fz_try(ctx) {
@@ -334,30 +357,31 @@ int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, doubl
     }
     fz_catch(ctx) {
         LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+        page = 0;
     }
     return page;
 }
 
 /* ---- Search ---- */
 
-int pdfr_search_page(PdfrDoc *doc, PdfrPage *page,
+int pdfr_search_page(PdfrDoc *doc, int page_idx,
                     const char *text, PdfrRect *matches, int max_matches) {
-    fz_context *ctx = doc->ctx;
-    int hit_mark = 0;
+    if (!doc || !doc->doc || !text || max_matches <= 0) return 0;
+    fz_context *ctx = pdfr_get_context();
+    if (!ctx) return 0;
     fz_quad quads[100];
+    int hit_mark = 0;
     int n = 0;
-
+    fz_var(n);
     fz_try(ctx) {
-        n = fz_search_page(ctx, page->page, text, &hit_mark, quads, max_matches);
+        n = fz_search_page_number(ctx, doc->doc, page_idx, text, &hit_mark, quads, max_matches);
     }
     fz_catch(ctx) {
         LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
     }
-
     if (n > max_matches) n = max_matches;
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < n; i++)
         matches[i] = fz_quad_to_pdfr_rect(quads[i]);
-    }
     return n;
 }
 
@@ -395,8 +419,10 @@ static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_out
 }
 
 PdfrOutline *pdfr_load_outline(PdfrDoc *doc) {
-    fz_context *ctx = doc->ctx;
+    (void)doc;
+    fz_context *ctx = pdfr_get_context();
     fz_outline *root = NULL;
+    fz_var(root);
 
     fz_try(ctx) {
         root = fz_load_outline(ctx, doc->doc);
