@@ -66,6 +66,7 @@ void pdfr_shutdown(void) {
 
 struct PdfrDoc {
     fz_document *doc;
+    int n_pages;
 };
 
 PdfrDoc *pdfr_open(const char *path, char **error) {
@@ -88,11 +89,13 @@ PdfrDoc *pdfr_open(const char *path, char **error) {
         if (error) *error = strdup("Document has no accessible pages");
         return NULL;
     }
+    pd->n_pages = n;
 
     return pd;
 }
 
 int pdfr_count_pages(PdfrDoc *doc) {
+    if (doc->n_pages > 0) return doc->n_pages;
     fz_context *ctx = pdfr_get_context();
     int n = 0;
     fz_var(n);

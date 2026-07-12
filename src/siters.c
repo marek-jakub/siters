@@ -25,6 +25,11 @@
 /* Forward declaration and struct definitions for tab management */
 typedef struct TabDataStruct TabData;
 
+#define MAX_LOADED_DOCS  2
+#define DEFAULT_PAGE_W   595.0
+#define DEFAULT_PAGE_H   842.0
+#define LAZY_DIM_BATCH   50
+
 
 
 /* State tracking for deferred, layout-aware restore */
@@ -89,6 +94,8 @@ typedef struct TabDataStruct {
     char *search_text;
     gboolean search_cancelled;
     guint search_idle_id;
+    guint fill_dim_source_id;
+    int dim_fill_next;
 } TabData;
 
 typedef enum {
@@ -207,6 +214,8 @@ static GtkWidget *left_notebook;
 static GtkWidget *right_notebook;
 static gchar *current_selected_session = NULL;
 static gboolean is_restoring_session_tabs = FALSE;
+static TabData *loaded_queue_left[MAX_LOADED_DOCS] = {NULL, NULL};
+static TabData *loaded_queue_right[MAX_LOADED_DOCS] = {NULL, NULL};
 
 /* Page jump widget */
 static GtkWidget *page_entry = NULL;
@@ -242,6 +251,10 @@ static void on_page_down_right(GtkButton *btn, gpointer user_data);
 static void cancel_tab_restore(TabData *tab);
 static void cancel_doc_model_debounce(TabData *tab);
 static void destroy_tab_data(gpointer data);
+static void unload_tab_doc(TabData *tab);
+static void loaded_queue_update(TabData *tab);
+static void loaded_queue_remove(TabData *tab);
+static void evict_unqueued_docs(void);
 static void apply_layout_to_tab(TabData *tab, int layout);
 static void on_layout_left_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_layout_right_toggled(GtkToggleButton *btn, gpointer user_data);
@@ -289,6 +302,7 @@ static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpoi
 static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean restore_zoom_scroll_cb(gpointer user_data);
+static gboolean fill_dimensions_idle(gpointer user_data);
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
 static void on_open_file_clicked(GtkButton *button, gpointer user_data);
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
@@ -320,6 +334,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
 static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
+static void update_document_model_from_tab(TabData *tab);
 static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 
 /* Theme-aware icon color: dark theme uses yellow, light theme uses dark brown */
@@ -448,8 +463,7 @@ static void update_file_info_labels(TabData *tab) {
     g_object_unref(gf);
 
     if (tab->doc) {
-        int n_pages = pdfr_count_pages(tab->doc);
-        gchar *pages_text = g_strdup_printf("Pages: %d", n_pages);
+        gchar *pages_text = g_strdup_printf("Pages: %d", tab->n_pages);
         gtk_label_set_text(GTK_LABEL(file_info_pages_label), pages_text);
         g_free(pages_text);
     } else {
@@ -597,8 +611,13 @@ static void cancel_tab_restore(TabData *tab) {
 static void destroy_tab_data(gpointer data) {
     TabData *tab = data;
     if (!tab) return;
+    loaded_queue_remove(tab);
     cancel_tab_restore(tab);
     cancel_doc_model_debounce(tab);
+    if (tab->fill_dim_source_id) {
+        g_source_remove(tab->fill_dim_source_id);
+        tab->fill_dim_source_id = 0;
+    }
     if (tab->zoom_scroll_source_id) {
         g_source_remove(tab->zoom_scroll_source_id);
         tab->zoom_scroll_source_id = 0;
@@ -629,6 +648,109 @@ static void destroy_tab_data(gpointer data) {
     g_free(tab->cached_page_x0);
     g_free(tab->cached_page_y0);
     g_free(tab);
+}
+
+/* Unload doc from tab without destroying the tab itself.
+   Keeps current_file, layout_mode, zoom, cur_page etc. alive so
+   ensure_tab_doc_loaded can reopen later. */
+static void unload_tab_doc(TabData *tab) {
+    if (!tab) return;
+    cancel_tab_restore(tab);
+    cancel_doc_model_debounce(tab);
+    if (tab->fill_dim_source_id) {
+        g_source_remove(tab->fill_dim_source_id);
+        tab->fill_dim_source_id = 0;
+    }
+    if (tab->zoom_scroll_source_id) {
+        g_source_remove(tab->zoom_scroll_source_id);
+        tab->zoom_scroll_source_id = 0;
+    }
+    if (tab->h_scrollbar_timer_id) {
+        g_source_remove(tab->h_scrollbar_timer_id);
+        tab->h_scrollbar_timer_id = 0;
+    }
+    if (tab->page_links) {
+        for (int i = 0; i < tab->page_links_n; i++) {
+            if (tab->page_links[i])
+                pdfr_free_links(tab->doc, tab->page_links[i]);
+        }
+        g_free(tab->page_links);
+        tab->page_links = NULL;
+    }
+    search_cancel(tab);
+    search_free(tab);
+    if (tab->doc) {
+        pdfr_close(tab->doc);
+        tab->doc = NULL;
+    }
+    invalidate_page_cache(tab);
+    g_free(tab->page_cache);
+    tab->page_cache = NULL;
+    g_free(tab->cached_page_widths);
+    tab->cached_page_widths = NULL;
+    g_free(tab->cached_page_heights);
+    tab->cached_page_heights = NULL;
+    g_free(tab->cached_page_x0);
+    tab->cached_page_x0 = NULL;
+    g_free(tab->cached_page_y0);
+    tab->cached_page_y0 = NULL;
+}
+
+/* Add or promote tab to front of loaded queue */
+static void loaded_queue_update(TabData *tab) {
+    if (!tab) return;
+    TabData **q = tab->is_helper ? loaded_queue_right : loaded_queue_left;
+    if (q[0] == tab) return;
+    if (q[1] == tab) {
+        q[1] = q[0];
+        q[0] = tab;
+    } else {
+        q[1] = q[0];
+        q[0] = tab;
+    }
+}
+
+/* Remove a dead tab pointer from either queue */
+static void loaded_queue_remove(TabData *tab) {
+    if (!tab) return;
+    TabData *queues[] = {loaded_queue_left[0], loaded_queue_left[1],
+                         loaded_queue_right[0], loaded_queue_right[1]};
+    for (int i = 0; i < 4; i++) {
+        if (queues[i] == tab) {
+            if (i < 2)
+                loaded_queue_left[i] = NULL;
+            else
+                loaded_queue_right[i - 2] = NULL;
+        }
+    }
+}
+
+/* Evict docs from tabs not in their notebook's loaded queue */
+static void evict_unqueued_docs(void) {
+    if (left_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
+        for (int i = 0; i < n_pages; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), i);
+            TabData *t = g_object_get_data(G_OBJECT(page), "tab-data");
+            if (!t || !t->doc) continue;
+            if (t != loaded_queue_left[0] && t != loaded_queue_left[1]) {
+                update_document_model_from_tab(t);
+                unload_tab_doc(t);
+            }
+        }
+    }
+    if (right_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
+        for (int i = 0; i < n_pages; i++) {
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), i);
+            TabData *t = g_object_get_data(G_OBJECT(page), "tab-data");
+            if (!t || !t->doc) continue;
+            if (t != loaded_queue_right[0] && t != loaded_queue_right[1]) {
+                update_document_model_from_tab(t);
+                unload_tab_doc(t);
+            }
+        }
+    }
 }
 
 static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
@@ -1202,6 +1324,43 @@ static void invalidate_page_cache(TabData *tab) {
         cache_evict_idx(tab, i);
 }
 
+static gboolean fill_dimensions_idle(gpointer user_data) {
+    TabData *tab = (TabData *)user_data;
+    if (!tab || !tab->doc || !tab->cached_page_widths) {
+        if (tab) tab->fill_dim_source_id = 0;
+        return FALSE;
+    }
+
+    int end = tab->dim_fill_next + LAZY_DIM_BATCH;
+    if (end > tab->n_pages) end = tab->n_pages;
+
+    for (int i = tab->dim_fill_next; i < end; ++i) {
+        PdfrPage *page = pdfr_load_page(tab->doc, i);
+        double pw = 0, ph = 0, px0 = 0, py0 = 0;
+        if (page) {
+            pdfr_page_size(tab->doc, page, &pw, &ph, &px0, &py0);
+            pdfr_free_page(tab->doc, page);
+        }
+        if (pw > 0) tab->cached_page_widths[i] = pw;
+        if (ph > 0) tab->cached_page_heights[i] = ph;
+        tab->cached_page_x0[i] = px0;
+        tab->cached_page_y0[i] = py0;
+    }
+
+    tab->dim_fill_next = end;
+
+    if (end >= tab->n_pages) {
+        tab->fill_dim_source_id = 0;
+        build_continuous_view(tab);
+        queue_draw(tab);
+        return FALSE;
+    }
+
+    build_continuous_view(tab);
+    queue_draw(tab);
+    return TRUE;
+}
+
 static gboolean ensure_tab_doc_loaded(TabData *tab) {
     if (!tab || !tab->current_file) return FALSE;
     if (tab->doc) return TRUE;
@@ -1220,7 +1379,52 @@ static gboolean ensure_tab_doc_loaded(TabData *tab) {
     }
     tab->doc = doc;
     tab->n_pages = pdfr_count_pages(doc);
-    cache_page_dimensions(tab);
+
+    /* Allocate dimension arrays */
+    g_free(tab->cached_page_widths);
+    g_free(tab->cached_page_heights);
+    g_free(tab->cached_page_x0);
+    g_free(tab->cached_page_y0);
+
+    /* Free page cache — dimensions changed, so all cached surfaces are invalid */
+    invalidate_page_cache(tab);
+    g_free(tab->page_cache);
+
+    tab->cached_page_widths  = g_malloc(sizeof(double) * tab->n_pages);
+    tab->cached_page_heights = g_malloc(sizeof(double) * tab->n_pages);
+    tab->cached_page_x0      = g_malloc0(sizeof(double) * tab->n_pages);
+    tab->cached_page_y0      = g_malloc0(sizeof(double) * tab->n_pages);
+    tab->page_cache          = g_malloc0(sizeof(cairo_surface_t *) * tab->n_pages);
+
+    /* Fill first batch synchronously, rest with defaults */
+    int first = tab->n_pages < LAZY_DIM_BATCH ? tab->n_pages : LAZY_DIM_BATCH;
+    int i;
+    for (i = 0; i < first; ++i) {
+        PdfrPage *page = pdfr_load_page(tab->doc, i);
+        double pw = 0, ph = 0, px0 = 0, py0 = 0;
+        if (page) {
+            pdfr_page_size(tab->doc, page, &pw, &ph, &px0, &py0);
+            pdfr_free_page(tab->doc, page);
+        }
+        tab->cached_page_widths[i]  = pw > 0 ? pw : DEFAULT_PAGE_W;
+        tab->cached_page_heights[i] = ph > 0 ? ph : DEFAULT_PAGE_H;
+        tab->cached_page_x0[i]      = px0;
+        tab->cached_page_y0[i]      = py0;
+    }
+    for (i = first; i < tab->n_pages; ++i) {
+        tab->cached_page_widths[i]  = DEFAULT_PAGE_W;
+        tab->cached_page_heights[i] = DEFAULT_PAGE_H;
+        tab->cached_page_x0[i]      = 0.0;
+        tab->cached_page_y0[i]      = 0.0;
+    }
+
+    tab->dim_fill_next = first;
+
+    /* Schedule idle fill for remaining pages */
+    if (tab->n_pages > LAZY_DIM_BATCH) {
+        tab->fill_dim_source_id = g_idle_add(fill_dimensions_idle, tab);
+    }
+
     build_continuous_view(tab);
     queue_draw(tab);
     return TRUE;
@@ -4497,6 +4701,8 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
             sync_right_page_widget_from_tab(tab);
         }
     }
+    loaded_queue_update(tab);
+    evict_unqueued_docs();
     if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
     if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
     if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
@@ -4933,48 +5139,14 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
         if (t && t->doc) update_document_model_from_tab(t);
     }
 
-    /* Unload docs from all non-current tabs in this notebook to save RAM */
     TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
-    for (int i = 0; i < n_left; i++) {
-        GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
-        TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
-        if (t && t != tab && t->doc) {
-            cancel_tab_restore(t);
-            cancel_doc_model_debounce(t);
-            search_cancel(t);
-            search_free(t);
-            if (t->zoom_scroll_source_id) {
-                g_source_remove(t->zoom_scroll_source_id);
-                t->zoom_scroll_source_id = 0;
-            }
-            if (t->page_links) {
-                for (int j = 0; j < t->page_links_n; j++) {
-                    if (t->page_links[j])
-                        pdfr_free_links(t->doc, t->page_links[j]);
-                }
-                g_free(t->page_links);
-                t->page_links = NULL;
-                t->page_links_n = 0;
-            }
-            pdfr_close(t->doc);
-            t->doc = NULL;
-            g_free(t->cached_page_widths);
-            g_free(t->cached_page_heights);
-            g_free(t->cached_page_x0);
-            g_free(t->cached_page_y0);
-            t->cached_page_widths = NULL;
-            t->cached_page_heights = NULL;
-            t->cached_page_x0 = NULL;
-            t->cached_page_y0 = NULL;
-            invalidate_page_cache(t);
-            g_free(t->page_cache);
-            t->page_cache = NULL;
-        }
-    }
 
     update_last_read_for_notebook(notebook, page, page_num);
 
     if (tab) ensure_tab_doc_loaded(tab);
+
+    // Keep the queue in sync
+    if (tab) loaded_queue_update(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
@@ -5007,6 +5179,8 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
         }
     }
 
+    evict_unqueued_docs();
+
     sync_left_layout_buttons(tab);
     sync_page_widget_from_tab(tab);
     if (current_sidebar_mode == SIDEBAR_TOC) {
@@ -5024,55 +5198,30 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
     (void)user_data;
 
-    /* Unload docs from all non-current tabs in this notebook */
-    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+    /* Flush state for all right tabs with loaded docs before switching */
     int n_right = gtk_notebook_get_n_pages(notebook);
     for (int i = 0; i < n_right; i++) {
         GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
         TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
-        if (t && t != tab && t->doc) {
-            cancel_tab_restore(t);
-            cancel_doc_model_debounce(t);
-            search_cancel(t);
-            search_free(t);
-            if (t->zoom_scroll_source_id) {
-                g_source_remove(t->zoom_scroll_source_id);
-                t->zoom_scroll_source_id = 0;
-            }
-            if (t->page_links) {
-                for (int j = 0; j < t->page_links_n; j++) {
-                    if (t->page_links[j])
-                        pdfr_free_links(t->doc, t->page_links[j]);
-                }
-                g_free(t->page_links);
-                t->page_links = NULL;
-                t->page_links_n = 0;
-            }
-            pdfr_close(t->doc);
-            t->doc = NULL;
-            g_free(t->cached_page_widths);
-            g_free(t->cached_page_heights);
-            g_free(t->cached_page_x0);
-            g_free(t->cached_page_y0);
-            t->cached_page_widths = NULL;
-            t->cached_page_heights = NULL;
-            t->cached_page_x0 = NULL;
-            t->cached_page_y0 = NULL;
-            invalidate_page_cache(t);
-            g_free(t->page_cache);
-            t->page_cache = NULL;
-        }
+        if (t && t->doc) update_document_model_from_tab(t);
     }
+
+    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
 
     update_last_read_for_notebook(notebook, page, page_num);
 
     /* Load current tab's doc if needed */
     if (tab) ensure_tab_doc_loaded(tab);
 
+    // Keep the queue in sync
+    if (tab) loaded_queue_update(tab);
+
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
         restore_document_model_to_tab(tab);
     }
+
+    evict_unqueued_docs();
 
     sync_right_layout_buttons(tab);
     /* keep left widget tied to primary (left) document */
