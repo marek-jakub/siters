@@ -50,6 +50,7 @@ typedef struct PdfrOutline {
 PdfrDoc *pdfr_open(const char *path, char **error);
 int     pdfr_count_pages(PdfrDoc *doc);
 void    pdfr_close(PdfrDoc *doc);
+void    pdfr_purge_store(void);
 void    pdfr_shutdown(void);
 
 /* --- Page lifecycle --- */

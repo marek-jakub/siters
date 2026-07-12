@@ -62,6 +62,11 @@ void pdfr_shutdown(void) {
     }
 }
 
+void pdfr_purge_store(void) {
+    if (!gctx) return;
+    fz_empty_store(gctx);
+}
+
 /* ---- Document lifecycle ---- */
 
 struct PdfrDoc {

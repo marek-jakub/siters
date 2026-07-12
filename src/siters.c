@@ -92,6 +92,7 @@ typedef struct TabDataStruct {
     int search_results_cap;
     char *search_text;
     gboolean search_cancelled;
+    int search_page_idx;       /* next page to search (for batched idle) */
     guint search_idle_id;
 } TabData;
 
@@ -624,6 +625,7 @@ static void destroy_tab_data(gpointer data) {
     if (tab->doc) {
         pdfr_close(tab->doc);
         tab->doc = NULL;
+        pdfr_purge_store();
     }
     g_free(tab->current_file);
     invalidate_page_cache(tab);
@@ -2816,6 +2818,7 @@ static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
 
 /* Search implementation */
 #define SEARCH_MAX_PER_PAGE 50
+#define SEARCH_BATCH_SIZE 20
 
 static void search_cancel(TabData *tab) {
     if (!tab) return;
@@ -2858,15 +2861,17 @@ static gboolean search_idle(gpointer user_data) {
     if (!tab || tab->search_cancelled || !tab->doc)
         return FALSE;
 
-    gboolean found = FALSE;
     int n_pages = pdfr_count_pages(tab->doc);
     PdfrRect rects_buf[SEARCH_MAX_PER_PAGE];
+    int batch = 0;
 
-    for (int i = 0; i < n_pages && !tab->search_cancelled && tab->doc; i++) {
+    for (int i = tab->search_page_idx; i < n_pages && !tab->search_cancelled && tab->doc && batch < SEARCH_BATCH_SIZE; i++, batch++) {
         int n = pdfr_search_page(tab->doc, i, tab->search_text, rects_buf, SEARCH_MAX_PER_PAGE);
 
         if (tab->search_cancelled || !tab->doc)
             return FALSE;
+
+        tab->search_page_idx = i + 1;
 
         if (n <= 0) continue;
 
@@ -2881,7 +2886,6 @@ static gboolean search_idle(gpointer user_data) {
         tab->search_results[tab->search_results_n].n_matches = n;
         tab->search_results[tab->search_results_n].rects = g_memdup2(rects_buf, sizeof(PdfrRect) * n);
         tab->search_results_n++;
-        found = TRUE;
 
         const char *plural = n == 1 ? "" : "es";
         gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n, plural);
@@ -2894,13 +2898,21 @@ static gboolean search_idle(gpointer user_data) {
         g_free(label);
     }
 
+    /* More pages remain — re-schedule */
+    if (tab->search_page_idx < n_pages && !tab->search_cancelled && tab->doc) {
+        queue_draw(tab);
+        tab->search_idle_id = g_idle_add(search_idle, tab);
+        return FALSE;
+    }
+
+    /* Search complete — shrink allocation to actual count */
     if (tab->search_results_n > 0 && tab->search_results_n < tab->search_results_cap) {
         tab->search_results = g_realloc(tab->search_results,
             tab->search_results_n * sizeof(*tab->search_results));
         tab->search_results_cap = tab->search_results_n;
     }
 
-    if (!found && tab->search_text && *tab->search_text)
+    if (tab->search_results_n == 0 && tab->search_text && *tab->search_text)
         gtk_widget_show(search_no_results_label);
 
     queue_draw(tab);
@@ -2918,6 +2930,7 @@ static void search_start(const char *text) {
     if (!tab || !ensure_tab_doc_loaded(tab) || !tab->doc) return;
     tab->search_text = g_strdup(text);
     tab->search_cancelled = FALSE;
+    tab->search_page_idx = 0;
     tab->search_idle_id = g_idle_add(search_idle, tab);
 }
 
@@ -3952,9 +3965,6 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
             /* skip if page is outside clip */
             if (!(off_y + page_h < clip_y1 || off_y > clip_y2)) {
-                PdfrPage *page = pdfr_load_page(tab->doc, i);
-                if (!page) { LOG_ERROR("Failed to load page %d", i); y += page_h + spacing; continue; }
-
                 /* draw background rectangle */
                 cairo_save(cr);
                 cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
@@ -3977,33 +3987,36 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
                     } else {
-                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
-                        cairo_surface_set_device_scale(pimg, dsx, dsy);
-                        cairo_t *picr = cairo_create(pimg);
-                        cairo_set_font_options(picr, fo);
-                        cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
-                        cairo_scale(picr, scale, scale);
-                        pdfr_render(tab->doc, page, picr);
-                        cairo_destroy(picr);
-                        cairo_set_source_surface(cr, pimg, off_x, off_y);
-                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                        cairo_paint(cr);
-                        /* Cache only if within byte budget */
-                        int new_bytes = iw * ih * 4;
-                        MEM_SURFACE_CREATED(new_bytes);
-                        if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
-                            tab->page_cache[i] = pimg;
-                            tab->total_cache_bytes += new_bytes;
-                        } else {
-                            cairo_surface_destroy(pimg);
-                            MEM_SURFACE_DESTROYED();
+                        PdfrPage *page = pdfr_load_page(tab->doc, i);
+                        if (page) {
+                            cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw, ih);
+                            cairo_surface_set_device_scale(pimg, dsx, dsy);
+                            cairo_t *picr = cairo_create(pimg);
+                            cairo_set_font_options(picr, fo);
+                            cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                            cairo_scale(picr, scale, scale);
+                            pdfr_render(tab->doc, page, picr);
+                            cairo_destroy(picr);
+                            pdfr_free_page(tab->doc, page);
+                            cairo_set_source_surface(cr, pimg, off_x, off_y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                            /* Cache only if within byte budget */
+                            int new_bytes = iw * ih * 4;
+                            MEM_SURFACE_CREATED(new_bytes);
+                            if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                                tab->page_cache[i] = pimg;
+                                tab->total_cache_bytes += new_bytes;
+                            } else {
+                                cairo_surface_destroy(pimg);
+                                MEM_SURFACE_DESTROYED();
+                            }
                         }
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
                 search_highlight_page(tab, cr, i + 1, off_x, off_y, scale);
-                pdfr_free_page(tab->doc, page);
             }
 
             y += page_h + spacing;
@@ -4043,29 +4056,29 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
             /* draw left page if visible */
             if (page_h1 > 0 && !(y + page_h1 < clip_y1 || y > clip_y2)) {
-                PdfrPage *p1 = pdfr_load_page(tab->doc, i);
-                if (p1) {
-                    cairo_save(cr);
-                    cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
-                    cairo_rectangle(cr, left_x, y, page_w1, page_h1);
-                    cairo_fill(cr);
-                    cairo_restore(cr);
-                    int iw1 = (int)(tab->cached_page_widths[i] * scale * dsx2 + 0.5);
-                    int ih1 = (int)(tab->cached_page_heights[i] * scale * dsy2 + 0.5);
-                    if (iw1 > MAX_SURFACE_DIM) iw1 = MAX_SURFACE_DIM;
-                    if (ih1 > MAX_SURFACE_DIM) ih1 = MAX_SURFACE_DIM;
-                    if (iw1 > 0 && ih1 > 0) {
-                        if (tab->page_cache[i]) {
-                            int cw = cairo_image_surface_get_width(tab->page_cache[i]);
-                            int ch = cairo_image_surface_get_height(tab->page_cache[i]);
-                            if (cw != iw1 || ch != ih1)
-                                cache_evict_idx(tab, i);
-                        }
-                        if (tab->page_cache[i]) {
-                            cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
-                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                            cairo_paint(cr);
-                        } else {
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
+                cairo_rectangle(cr, left_x, y, page_w1, page_h1);
+                cairo_fill(cr);
+                cairo_restore(cr);
+                int iw1 = (int)(tab->cached_page_widths[i] * scale * dsx2 + 0.5);
+                int ih1 = (int)(tab->cached_page_heights[i] * scale * dsy2 + 0.5);
+                if (iw1 > MAX_SURFACE_DIM) iw1 = MAX_SURFACE_DIM;
+                if (ih1 > MAX_SURFACE_DIM) ih1 = MAX_SURFACE_DIM;
+                if (iw1 > 0 && ih1 > 0) {
+                    if (tab->page_cache[i]) {
+                        int cw = cairo_image_surface_get_width(tab->page_cache[i]);
+                        int ch = cairo_image_surface_get_height(tab->page_cache[i]);
+                        if (cw != iw1 || ch != ih1)
+                            cache_evict_idx(tab, i);
+                    }
+                    if (tab->page_cache[i]) {
+                        cairo_set_source_surface(cr, tab->page_cache[i], left_x, y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    } else {
+                        PdfrPage *p1 = pdfr_load_page(tab->doc, i);
+                        if (p1) {
                             cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw1, ih1);
                             cairo_surface_set_device_scale(pimg, dsx2, dsy2);
                             cairo_t *picr = cairo_create(pimg);
@@ -4074,6 +4087,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_scale(picr, scale, scale);
                             pdfr_render(tab->doc, p1, picr);
                             cairo_destroy(picr);
+                            pdfr_free_page(tab->doc, p1);
                             cairo_set_source_surface(cr, pimg, left_x, y);
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
@@ -4082,44 +4096,43 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
                                 tab->page_cache[i] = pimg;
                                 tab->total_cache_bytes += new_bytes;
-                        } else {
-                            cairo_surface_destroy(pimg);
-                            MEM_SURFACE_DESTROYED();
+                            } else {
+                                cairo_surface_destroy(pimg);
+                                MEM_SURFACE_DESTROYED();
+                            }
                         }
                     }
                     if (first_visible == -1) first_visible = i;
-                        last_visible = i;
-                    }
-                    search_highlight_page(tab, cr, i + 1, left_x, y, scale);
-                    pdfr_free_page(tab->doc, p1);
+                    last_visible = i;
                 }
+                search_highlight_page(tab, cr, i + 1, left_x, y, scale);
             }
 
             /* draw right page if visible */
             if (page_h2 > 0 && !(y + page_h2 < clip_y1 || y > clip_y2)) {
-                PdfrPage *p2 = pdfr_load_page(tab->doc, i + 1);
-                if (p2) {
-                    cairo_save(cr);
-                    cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
-                    cairo_rectangle(cr, right_x, y, page_w2, page_h2);
-                    cairo_fill(cr);
-                    cairo_restore(cr);
-                    int iw2 = (int)(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5);
-                    int ih2 = (int)(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5);
-                    if (iw2 > MAX_SURFACE_DIM) iw2 = MAX_SURFACE_DIM;
-                    if (ih2 > MAX_SURFACE_DIM) ih2 = MAX_SURFACE_DIM;
-                    if (iw2 > 0 && ih2 > 0) {
-                        if (tab->page_cache[i + 1]) {
-                            int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
-                            int ch = cairo_image_surface_get_height(tab->page_cache[i + 1]);
-                            if (cw != iw2 || ch != ih2)
-                                cache_evict_idx(tab, i + 1);
-                        }
-                        if (tab->page_cache[i + 1]) {
-                            cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
-                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                            cairo_paint(cr);
-                        } else {
+                cairo_save(cr);
+                cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
+                cairo_rectangle(cr, right_x, y, page_w2, page_h2);
+                cairo_fill(cr);
+                cairo_restore(cr);
+                int iw2 = (int)(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5);
+                int ih2 = (int)(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5);
+                if (iw2 > MAX_SURFACE_DIM) iw2 = MAX_SURFACE_DIM;
+                if (ih2 > MAX_SURFACE_DIM) ih2 = MAX_SURFACE_DIM;
+                if (iw2 > 0 && ih2 > 0) {
+                    if (tab->page_cache[i + 1]) {
+                        int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
+                        int ch = cairo_image_surface_get_height(tab->page_cache[i + 1]);
+                        if (cw != iw2 || ch != ih2)
+                            cache_evict_idx(tab, i + 1);
+                    }
+                    if (tab->page_cache[i + 1]) {
+                        cairo_set_source_surface(cr, tab->page_cache[i + 1], right_x, y);
+                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                        cairo_paint(cr);
+                    } else {
+                        PdfrPage *p2 = pdfr_load_page(tab->doc, i + 1);
+                        if (p2) {
                             cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iw2, ih2);
                             cairo_surface_set_device_scale(pimg, dsx2, dsy2);
                             cairo_t *picr = cairo_create(pimg);
@@ -4128,6 +4141,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                             cairo_scale(picr, scale, scale);
                             pdfr_render(tab->doc, p2, picr);
                             cairo_destroy(picr);
+                            pdfr_free_page(tab->doc, p2);
                             cairo_set_source_surface(cr, pimg, right_x, y);
                             cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                             cairo_paint(cr);
@@ -4140,13 +4154,12 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                                 cairo_surface_destroy(pimg);
                                 MEM_SURFACE_DESTROYED();
                             }
+                        }
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
                 search_highlight_page(tab, cr, i + 2, right_x, y, scale);
-                    pdfr_free_page(tab->doc, p2);
-                }
             }
 
             y += row_h + spacing;
@@ -4172,8 +4185,6 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
             double off_y = tab->max_page_h > viewport_h ? 0.0 : (alloc.height - page_h) / 2.0;
             if (dev_x + page_w > 0 && dev_x < alloc.width &&
                 off_y + page_h > 0 && off_y < alloc.height) {
-                PdfrPage *page = pdfr_load_page(tab->doc, i);
-                if (!page) { x += page_w + spacing; continue; }
                 cairo_save(cr);
                 cairo_set_source_rgba(cr, tab->page_color.red, tab->page_color.green, tab->page_color.blue, tab->page_color.alpha);
                 cairo_rectangle(cr, dev_x, off_y, page_w, page_h);
@@ -4195,32 +4206,35 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                         cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
                         cairo_paint(cr);
                     } else {
-                        cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iwh, ihh);
-                        cairo_surface_set_device_scale(pimg, dsxh, dsyh);
-                        cairo_t *picr = cairo_create(pimg);
-                        cairo_set_font_options(picr, foh);
-                        cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
-                        cairo_scale(picr, scale, scale);
-                        pdfr_render(tab->doc, page, picr);
-                        cairo_destroy(picr);
-                        cairo_set_source_surface(cr, pimg, dev_x, off_y);
-                        cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
-                        cairo_paint(cr);
-                        int new_bytes = iwh * ihh * 4;
-                        MEM_SURFACE_CREATED(new_bytes);
-                        if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
-                            tab->page_cache[i] = pimg;
-                            tab->total_cache_bytes += new_bytes;
-                        } else {
-                            cairo_surface_destroy(pimg);
-                            MEM_SURFACE_DESTROYED();
+                        PdfrPage *page = pdfr_load_page(tab->doc, i);
+                        if (page) {
+                            cairo_surface_t *pimg = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, iwh, ihh);
+                            cairo_surface_set_device_scale(pimg, dsxh, dsyh);
+                            cairo_t *picr = cairo_create(pimg);
+                            cairo_set_font_options(picr, foh);
+                            cairo_set_antialias(picr, CAIRO_ANTIALIAS_BEST);
+                            cairo_scale(picr, scale, scale);
+                            pdfr_render(tab->doc, page, picr);
+                            cairo_destroy(picr);
+                            pdfr_free_page(tab->doc, page);
+                            cairo_set_source_surface(cr, pimg, dev_x, off_y);
+                            cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_NEAREST);
+                            cairo_paint(cr);
+                            int new_bytes = iwh * ihh * 4;
+                            MEM_SURFACE_CREATED(new_bytes);
+                            if (tab->total_cache_bytes + new_bytes <= MAX_CACHE_BYTES) {
+                                tab->page_cache[i] = pimg;
+                                tab->total_cache_bytes += new_bytes;
+                            } else {
+                                cairo_surface_destroy(pimg);
+                                MEM_SURFACE_DESTROYED();
+                            }
                         }
                     }
                     if (first_visible == -1) first_visible = i;
                     last_visible = i;
                 }
                 search_highlight_page(tab, cr, i + 1, dev_x, off_y, scale);
-                pdfr_free_page(tab->doc, page);
             }
             x += page_w + spacing;
         }
@@ -4229,7 +4243,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 
     /* Prune cache: keep only pages within margin of the visible range */
     if (first_visible >= 0 && last_visible >= 0) {
-        int margin = 2;
+        int margin = 1;
         for (int i = 0; i < tab->n_pages; ++i) {
             if (tab->page_cache[i] && (i < first_visible - margin || i > last_visible + margin))
                 cache_evict_idx(tab, i);
@@ -5004,6 +5018,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             t->page_cache = NULL;
         }
     }
+    pdfr_purge_store();
 
     update_last_read_for_notebook(notebook, page, page_num);
 
@@ -5099,6 +5114,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
             t->page_cache = NULL;
         }
     }
+    pdfr_purge_store();
 
     update_last_read_for_notebook(notebook, page, page_num);
 
