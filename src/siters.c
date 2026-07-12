@@ -82,6 +82,10 @@ typedef struct TabDataStruct {
     GdkCursorType last_cursor_type; /* last cursor set on drawing area (to avoid redundant X11 calls) */
     gint64 last_cursor_check;       /* monotonic time of last link cursor check (for throttling) */
 
+    /* Heuristic page-from-scroll cache */
+    int last_known_page;
+    double last_known_page_start;
+
     /* Search state */
     struct { int page; int n_matches; PdfrRect *rects; } *search_results;
     int search_results_n;
@@ -1565,10 +1569,24 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
     double y = spacing;
     int visible_page = tab->n_pages - 1;
 
+    /* Heuristic: O(1) check if still on last known page */
+    if (tab->last_known_page >= 0 && tab->last_known_page < tab->n_pages) {
+        double page_len;
+        if (tab->layout_mode == 2) {
+            page_len = tab->cached_page_widths[tab->last_known_page] * scale;
+        } else {
+            page_len = get_page_height_ppi(tab, tab->last_known_page);
+        }
+        if (page_len > 0 && scroll_y >= tab->last_known_page_start && scroll_y < tab->last_known_page_start + page_len + spacing)
+            return tab->last_known_page;
+    }
+
     if (tab->layout_mode == 2) {
         for (int i = 0; i < tab->n_pages; ++i) {
             double page_w = tab->cached_page_widths[i] * scale;
             if (scroll_y >= y && scroll_y < y + page_w) {
+                tab->last_known_page = i;
+                tab->last_known_page_start = y;
                 return i;
             }
             y += page_w + spacing;
@@ -1585,6 +1603,8 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
             if (row_h < 1.0) row_h = 1.0;
             if (y + row_h > scroll_y) {
                 visible_page = i;
+                tab->last_known_page = visible_page;
+                tab->last_known_page_start = y;
                 break;
             }
             y += row_h + spacing;
@@ -1594,12 +1614,16 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
             double page_h = get_page_height_ppi(tab, i);
             if (page_h <= 0) continue;
             if (scroll_y >= y && scroll_y < y + page_h) {
+                tab->last_known_page = i;
+                tab->last_known_page_start = y;
                 return i;
             }
             y += page_h + spacing;
         }
     }
 
+    tab->last_known_page = visible_page;
+    tab->last_known_page_start = y;
     return visible_page;
 }
 
@@ -4555,6 +4579,8 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->scroll_doc_debounce_id = 0;
     tab->last_cursor_type = GDK_LEFT_PTR;
     tab->last_cursor_check = 0;
+    tab->last_known_page = -1;
+    tab->last_known_page_start = 0.0;
 
     if (!notebook || !GTK_IS_NOTEBOOK(notebook)) {
         g_free(tab);
@@ -4925,16 +4951,17 @@ static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
     (void)user_data;
 
+    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
+
     /* Flush state for all left tabs with loaded docs before switching */
     int n_left = gtk_notebook_get_n_pages(notebook);
     for (int i = 0; i < n_left; i++) {
         GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
         TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
-        if (t && t->doc) update_document_model_from_tab(t);
+        if (t && t != tab && t->doc) update_document_model_from_tab(t);
     }
 
     /* Unload docs from all non-current tabs in this notebook to save RAM */
-    TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
     for (int i = 0; i < n_left; i++) {
         GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
         TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
@@ -4993,7 +5020,10 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                         double saved_zoom = document_model_get_zoom(dm);
                         if (saved_zoom >= 10.0 && saved_zoom <= 500.0)
                             tab->zoom = saved_zoom;
-                        build_continuous_view(tab);
+                        if (tab->zoom != tab->last_zoom) {
+                            build_continuous_view(tab);
+                            tab->last_zoom = tab->zoom;
+                        }
                         int saved_page = document_model_get_current_page(dm);
                         if (saved_page < 1) saved_page = 1;
                         if (saved_page > tab->n_pages) saved_page = tab->n_pages;
