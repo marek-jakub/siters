@@ -7,7 +7,7 @@
 #include <cairo.h>
 #include <stdio.h>
 
-#define MAX_STORE_BYTES (256 * 1024 * 1024)
+#define MAX_STORE_BYTES (64 * 1024 * 1024)
 
 /* ---- internal helpers ---- */
 

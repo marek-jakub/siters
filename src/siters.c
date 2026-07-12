@@ -13,8 +13,8 @@
 #include "mem_debug.h"
 
 /* To limit RAM use as large zoom takes many MB of resources */
-#define MAX_SURFACE_DIM 3500
-#define MAX_CACHE_BYTES (80 * 1024 * 1024)
+#define MAX_SURFACE_DIM 2000
+#define MAX_CACHE_BYTES (40 * 1024 * 1024)
 
 /* DATADIR is normally defined by -DDATADIR=... at build time.
    This fallback lets clang-based tools parse the file without flags. */
@@ -2829,7 +2829,7 @@ static void search_cancel(TabData *tab) {
 static void search_free(TabData *tab) {
     if (!tab) return;
     for (int i = 0; i < tab->search_results_n; i++)
-        free(tab->search_results[i].rects);
+        g_free(tab->search_results[i].rects);
     g_free(tab->search_results);
     tab->search_results = NULL;
     tab->search_results_n = 0;
@@ -2892,6 +2892,12 @@ static gboolean search_idle(gpointer user_data) {
             SEARCH_COL_COUNT, n,
             SEARCH_COL_LABEL, label, -1);
         g_free(label);
+    }
+
+    if (tab->search_results_n > 0 && tab->search_results_n < tab->search_results_cap) {
+        tab->search_results = g_realloc(tab->search_results,
+            tab->search_results_n * sizeof(*tab->search_results));
+        tab->search_results_cap = tab->search_results_n;
     }
 
     if (!found && tab->search_text && *tab->search_text)
