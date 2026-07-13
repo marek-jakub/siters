@@ -5821,7 +5821,7 @@ GtkWidget* create_main_window(void) {
     gtk_container_set_border_width(GTK_CONTAINER(settings_container), 5);
     g_object_ref(settings_container);
 
-    GtkWidget *settings_title = gtk_label_new("Reader Preferences");
+    GtkWidget *settings_title = gtk_label_new("Siters Preferences");
     gtk_widget_set_halign(settings_title, GTK_ALIGN_START);
     PangoAttrList *sattr = pango_attr_list_new();
     pango_attr_list_insert(sattr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
@@ -5830,12 +5830,29 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_unref(sattr);
     gtk_box_pack_start(GTK_BOX(settings_container), settings_title, FALSE, FALSE, 0);
 
-    /* Tab bar position */
+    GtkWidget *version_label = gtk_label_new("Version 0.1.0-19");
+    gtk_widget_set_halign(version_label, GTK_ALIGN_START);
+    PangoAttrList *vattr = pango_attr_list_new();
+    pango_attr_list_insert(vattr, pango_attr_foreground_alpha_new(32768));
+    gtk_label_set_attributes(GTK_LABEL(version_label), vattr);
+    pango_attr_list_unref(vattr);
+    gtk_box_pack_start(GTK_BOX(settings_container), version_label, FALSE, FALSE, 0);
+
+    /* Tab section */
+    GtkWidget *tab_section_label = gtk_label_new("Tab");
+    gtk_widget_set_halign(tab_section_label, GTK_ALIGN_START);
+    PangoAttrList *ts_attr = pango_attr_list_new();
+    pango_attr_list_insert(ts_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    gtk_label_set_attributes(GTK_LABEL(tab_section_label), ts_attr);
+    pango_attr_list_unref(ts_attr);
+    gtk_box_pack_start(GTK_BOX(settings_container), tab_section_label, FALSE, FALSE, 0);
+
     GtkWidget *tabbar_label = gtk_label_new("Tab bar position:");
     gtk_widget_set_halign(tabbar_label, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(settings_container), tabbar_label, FALSE, FALSE, 0);
 
     tabbar_combo = gtk_combo_box_text_new();
+    gtk_widget_set_halign(tabbar_combo, GTK_ALIGN_START);
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "left", "Left");
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "top", "Top");
     gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "right", "Right");
@@ -5859,6 +5876,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(settings_container), tab_width_label, FALSE, FALSE, 0);
 
     tab_width_spin = gtk_spin_button_new_with_range(5, 50, 1);
+    gtk_widget_set_halign(tab_width_spin, GTK_ALIGN_START);
     if (sessions_model)
         gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), sessions_model_get_tab_width(sessions_model));
     else
@@ -5866,7 +5884,9 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(settings_container), tab_width_spin, FALSE, FALSE, 0);
     g_signal_connect(G_OBJECT(tab_width_spin), "value-changed", G_CALLBACK(on_tab_width_spin_changed), NULL);
 
-    /* Page colors */
+    gtk_box_pack_start(GTK_BOX(settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
+
+    /* Page Colors section */
     GtkWidget *color_title = gtk_label_new("Page Colors");
     gtk_widget_set_halign(color_title, GTK_ALIGN_START);
     PangoAttrList *cat = pango_attr_list_new();
@@ -5880,6 +5900,7 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(settings_container), left_color_label, FALSE, FALSE, 0);
 
     left_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_widget_set_halign(left_color_btn, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(settings_container), left_color_btn, FALSE, FALSE, 0);
     g_signal_connect(left_color_btn, "color-set", G_CALLBACK(on_left_color_set), NULL);
 
@@ -5888,11 +5909,23 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(settings_container), right_color_label, FALSE, FALSE, 0);
 
     right_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_widget_set_halign(right_color_btn, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(settings_container), right_color_btn, FALSE, FALSE, 0);
     g_signal_connect(right_color_btn, "color-set", G_CALLBACK(on_right_color_set), NULL);
 
-    /* Keep dark theme toggle */
+    gtk_box_pack_start(GTK_BOX(settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
+
+    /* Theme section */
+    GtkWidget *theme_section_label = gtk_label_new("Theme");
+    gtk_widget_set_halign(theme_section_label, GTK_ALIGN_START);
+    PangoAttrList *th_attr = pango_attr_list_new();
+    pango_attr_list_insert(th_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    gtk_label_set_attributes(GTK_LABEL(theme_section_label), th_attr);
+    pango_attr_list_unref(th_attr);
+    gtk_box_pack_start(GTK_BOX(settings_container), theme_section_label, FALSE, FALSE, 0);
+
     keep_dark_check = gtk_check_button_new_with_label("Keep dark theme");
+    gtk_widget_set_halign(keep_dark_check, GTK_ALIGN_START);
     gtk_box_pack_start(GTK_BOX(settings_container), keep_dark_check, FALSE, FALSE, 0);
     g_signal_connect(keep_dark_check, "toggled", G_CALLBACK(on_keep_dark_toggled), NULL);
 
