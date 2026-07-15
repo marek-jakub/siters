@@ -395,6 +395,97 @@ static void test_widget_to_page_coords_null_safety(void **state) {
 }
 
 /* ================================================================
+   Tests for search_free
+   ================================================================ */
+
+static void test_search_free_clears_results(void **state) {
+    (void)state;
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+
+    /* Simulate 3 pages of search results with rects (matches real usage) */
+    tab.search_results_cap = 32;
+    tab.search_results_n = 3;
+    tab.search_results = g_malloc0(sizeof(*tab.search_results) * tab.search_results_cap);
+    tab.search_text = g_strdup("test query");
+
+    for (int i = 0; i < 3; i++) {
+        tab.search_results[i].page = i + 1;
+        tab.search_results[i].n_matches = 5;
+        tab.search_results[i].rects = g_malloc0(sizeof(PdfrRect) * 5);
+    }
+
+    search_free(&tab);
+
+    assert_null(tab.search_results);
+    assert_int_equal(tab.search_results_n, 0);
+    assert_int_equal(tab.search_results_cap, 0);
+    assert_null(tab.search_text);
+}
+
+static void test_search_free_null_safety(void **state) {
+    (void)state;
+    /* Should not crash on NULL */
+    search_free(NULL);
+
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+    /* Empty tab (all zeroed) — should not crash */
+    search_free(&tab);
+}
+
+/* ================================================================
+   Tests for cache_evict_idx
+   ================================================================ */
+
+static void test_cache_evict_idx_removes_surface(void **state) {
+    (void)state;
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+
+    /* Create a real 100x100 cairo image surface */
+    cairo_surface_t *surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 100, 100);
+    cairo_surface_flush(surf);
+
+    int expected_bytes = 100 * 100 * 4;
+    tab.page_cache = g_malloc0(sizeof(cairo_surface_t *) * 4);
+    tab.page_cache[0] = surf;
+    tab.total_cache_bytes = expected_bytes;
+
+    cache_evict_idx(&tab, 0);
+
+    assert_null(tab.page_cache[0]);
+    assert_int_equal(tab.total_cache_bytes, 0);
+
+    g_free(tab.page_cache);
+    tab.page_cache = NULL;
+}
+
+static void test_cache_evict_idx_null_safety(void **state) {
+    (void)state;
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+
+    /* NULL tab — no crash */
+    cache_evict_idx(NULL, 0);
+
+    /* NULL page_cache array — no crash */
+    cache_evict_idx(&tab, 0);
+
+    /* Negative index — no crash */
+    tab.page_cache = g_malloc0(sizeof(cairo_surface_t *) * 2);
+    cache_evict_idx(&tab, -1);
+
+    /* NULL slot — no crash, bytes unchanged */
+    tab.total_cache_bytes = 999;
+    cache_evict_idx(&tab, 0);
+    assert_int_equal(tab.total_cache_bytes, 999);
+
+    g_free(tab.page_cache);
+    tab.page_cache = NULL;
+}
+
+/* ================================================================
    Main
    ================================================================ */
 
@@ -418,6 +509,12 @@ int main(void) {
         cmocka_unit_test(test_widget_to_page_coords_inside_page),
         cmocka_unit_test(test_widget_to_page_coords_outside_page),
         cmocka_unit_test(test_widget_to_page_coords_null_safety),
+        /* search_free */
+        cmocka_unit_test(test_search_free_clears_results),
+        cmocka_unit_test(test_search_free_null_safety),
+        /* cache_evict_idx */
+        cmocka_unit_test(test_cache_evict_idx_removes_surface),
+        cmocka_unit_test(test_cache_evict_idx_null_safety),
     };
 
     return cmocka_run_group_tests(tests, NULL, NULL);
