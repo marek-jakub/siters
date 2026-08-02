@@ -31,8 +31,20 @@ static PdfrRect fz_quad_to_pdfr_rect(fz_quad q) {
 
 /* ---- Internal: MuPDF diagnostics --- */
 
+static char last_warn[256] = {0};
+static int  warn_repeat    = 0;
+
 static void log_warning(void *user, const char *message) {
     (void)user;
+    if (strncmp(last_warn, message, sizeof(last_warn) - 1) == 0) {
+        warn_repeat++;
+        return;
+    }
+    if (warn_repeat > 0) {
+        LOG_WARN("MuPDF: ... repeated %d times...", warn_repeat);
+        warn_repeat = 0;
+    }
+    snprintf(last_warn, sizeof(last_warn), "%s", message);
     LOG_WARN("MuPDF: %s", message);
 }
 
