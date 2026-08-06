@@ -3693,6 +3693,78 @@ static gboolean has_link_at(TabData *tab, int page, double px, double py) {
     return FALSE;
 }
 
+/* Schemes considered safe to open without user confirmation. These are
+   standard network/mail links whose handlers present no local attack surface
+   comparable to launching arbitrary applications or opening local files. */
+static gboolean is_safe_link_scheme(const char *uri, char **scheme_out) {
+    *scheme_out = NULL;
+    const char *colon = strchr(uri, ':');
+    if (!colon || colon == uri) return FALSE;
+
+    char *scheme = g_ascii_strdown(uri, colon - uri);
+    if (!g_ascii_isalpha(scheme[0])) {
+        g_free(scheme);
+        return FALSE;
+    }
+    for (const char *p = scheme + 1; *p; p++) {
+        if (!g_ascii_isalnum(*p) && *p != '+' && *p != '-' && *p != '.') {
+            g_free(scheme);
+            return FALSE;
+        }
+    }
+
+    *scheme_out = scheme;
+    return g_str_equal(scheme, "http") || g_str_equal(scheme, "https") ||
+           g_str_equal(scheme, "mailto");
+}
+
+static gboolean confirm_unsafe_link(const char *uri, const char *scheme) {
+    GtkWidget *dialog = gtk_message_dialog_new(
+        GTK_WINDOW(window),
+        GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
+        GTK_MESSAGE_WARNING,
+        GTK_BUTTONS_YES_NO,
+        "This PDF contains a link using the \"%s\" scheme:\n\n%s\n\n"
+        "Opening it may launch another application or open a local file.\n"
+        "Do you want to open it anyway?",
+        scheme, uri);
+    gtk_window_set_title(GTK_WINDOW(dialog), "Confirm opening link");
+    gint response = gtk_dialog_run(GTK_DIALOG(dialog));
+    gtk_widget_destroy(dialog);
+    return response == GTK_RESPONSE_YES;
+}
+
+/* Open an external link extracted from a PDF. Well-known network schemes
+   (http/https/mailto) are opened directly; anything else — especially
+   file: and custom schemes — requires explicit user confirmation, since a
+   malicious PDF could otherwise force the launch of local handlers
+   (e.g. opening arbitrary files or running registered applications). */
+static gboolean open_external_link(const char *uri) {
+    if (!uri || !*uri) return FALSE;
+
+    char *scheme = NULL;
+    gboolean safe = is_safe_link_scheme(uri, &scheme);
+    if (!safe) {
+        if (!scheme) {
+            LOG_WARN("Refusing to open malformed link URI: %s", uri);
+            return TRUE;
+        }
+        if (!confirm_unsafe_link(uri, scheme)) {
+            g_free(scheme);
+            return TRUE; /* user declined — consume the click */
+        }
+    }
+    g_free(scheme);
+
+    GError *err = NULL;
+    gtk_show_uri_on_window(GTK_WINDOW(window), uri, GDK_CURRENT_TIME, &err);
+    if (err) {
+        g_warning("Failed to open URI: %s", err->message);
+        g_clear_error(&err);
+    }
+    return TRUE;
+}
+
 /* Debug helper — print link rects on a page for diagnostic purposes. */
 /* Activate the link at the given page-relative coordinates (if any).
    px, py are in rendering space (y-down, 0 at top of page). */
@@ -3707,14 +3779,7 @@ static gboolean activate_link_at(TabData *tab, int page, double px, double py) {
             switch (link->type) {
                 case PDF_LINK_URI:
                     if (link->uri) {
-                        GError *err = NULL;
-                        gtk_show_uri_on_window(GTK_WINDOW(window),
-                            link->uri, GDK_CURRENT_TIME, &err);
-                        if (err) {
-                            g_warning("Failed to open URI: %s", err->message);
-                            g_clear_error(&err);
-                        }
-                        return TRUE;
+                        return open_external_link(link->uri);
                     }
                     break;
                 case PDF_LINK_GOTO:
