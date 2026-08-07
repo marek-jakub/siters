@@ -11,7 +11,7 @@ MUPDF_LIBS   := $(shell pkg-config --libs --static mupdf)
 
 ORDERED_LIBS = $(MUPDF_LIBS) $(PKG_LIBS)
 
-CFLAGS=-Wall -Wextra -Werror -g -DDATADIR=\"$(DATADIR)\" \
+CFLAGS=-Wall -Wextra -Werror -g -O2 -DDATADIR=\"$(DATADIR)\" \
        -Iinclude -Iinclude/json-glib -Isrc \
        $(PKG_CFLAGS) $(MUPDF_CFLAGS)
 LIBS=$(ORDERED_LIBS)

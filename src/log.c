@@ -90,6 +90,17 @@ static void maybe_rotate_log(void)
     open_log();
 }
 
+/* Test hook: close the log file and reset byte accounting so a subsequent
+   siters_log() re-opens (and re-checks) the currently configured path. */
+void siters_log_reset(void)
+{
+    if (log_fp && log_fp != stderr) {
+        fclose(log_fp);
+    }
+    log_fp = NULL;
+    bytes_written = 0;
+}
+
 void siters_log(const char *file, int line, const char *level, const char *fmt, ...)
 {
     open_log();

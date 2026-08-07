@@ -267,10 +267,14 @@ PdfrLink *pdfr_load_links(PdfrDoc *doc, PdfrPage *page) {
     (void)doc;
     fz_context *ctx = pdfr_get_context();
     PdfrLink *head = NULL, *tail = NULL;
+    fz_link *links = NULL;
+    fz_link *l = NULL;
+    fz_var(links);
+    fz_var(l);
 
     fz_try(ctx) {
-        fz_link *links = fz_load_links(ctx, page->page);
-        for (fz_link *l = links; l; l = l->next) {
+        links = fz_load_links(ctx, page->page);
+        for (l = links; l; l = l->next) {
             PdfrLink *link = calloc(1, sizeof(PdfrLink));
             link->rect = fz_rect_to_pdf(l->rect);
             link->x = -1;
@@ -404,6 +408,7 @@ int pdfr_search_page(PdfrDoc *doc, int page_idx,
     int hit_mark = 0;
     int n = 0;
     fz_var(n);
+    fz_var(max_matches);
     fz_try(ctx) {
         n = fz_search_page_number(ctx, doc->doc, page_idx, text, &hit_mark, quads, max_matches);
     }
