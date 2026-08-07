@@ -1,6 +1,7 @@
 #include "pdf.h"
 #include "log.h"
 #include <mupdf/fitz.h>
+#include <mupdf/pdf.h>
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
@@ -8,6 +9,14 @@
 #include <stdio.h>
 
 #define MAX_STORE_BYTES (64 * 1024 * 1024)
+
+/* Cap outline nesting depth. PDFs may declare arbitrarily deep outline
+   hierarchies; recursing into them without a bound would blow the stack. */
+#define MAX_OUTLINE_DEPTH 32
+
+/* Step budget for the outline pre-scan walk. Trips on cyclic or absurdly
+   large outline structures so we can refuse to load them at all. */
+#define MAX_OUTLINE_NODES (1 << 20)
 
 /* ---- internal helpers ---- */
 
@@ -404,7 +413,8 @@ int pdfr_search_page(PdfrDoc *doc, int page_idx,
 
 /* ---- Outline (TOC) ---- */
 
-static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_outline *entry) {
+static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_outline *entry,
+                                       int depth) {
     if (!entry) return NULL;
 
     PdfrOutline *head = NULL, *tail = NULL;
@@ -426,7 +436,12 @@ static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_out
             node->page = 0;
         }
 
-        node->down = build_outline_tree(ctx, doc, cur->down);
+        if (cur->down && depth >= MAX_OUTLINE_DEPTH) {
+            LOG_WARN("Outline nesting exceeds %d levels; deeper entries dropped",
+                     MAX_OUTLINE_DEPTH);
+        } else {
+            node->down = build_outline_tree(ctx, doc, cur->down, depth + 1);
+        }
         node->next = NULL;
 
         if (tail) { tail->next = node; tail = node; }
@@ -435,8 +450,75 @@ static PdfrOutline *build_outline_tree(fz_context *ctx, fz_document *doc, fz_out
     return head;
 }
 
+/* Structural pre-scan of the PDF outline tree. Uses only iterative MuPDF
+   pdf_* helpers (never fz_load_outline, which recurses deep in the library
+   and overflows the stack on hostile outlines). Returns 1 if the outline is
+   shallow enough to load safely, 0 if it must be skipped. Also refuses
+   cyclic / absurdly large structures via a step budget. */
+static int pdfr_outline_is_sane(PdfrDoc *doc) {
+    fz_context *ctx = pdfr_get_context();
+    if (!ctx || !doc || !doc->doc) return 0;
+
+    pdf_document *pdf = pdf_specifics(ctx, doc->doc);
+    if (!pdf) return 1; /* not a PDF; leave to the regular path */
+
+    int sane = 0, too_deep = 0;
+    fz_var(sane);
+    fz_var(too_deep);
+
+    fz_try(ctx) {
+        pdf_obj *root = pdf_resolve_indirect_chain(ctx, pdf_dict_get(ctx, pdf_trailer(ctx, pdf), PDF_NAME(Root)));
+        pdf_obj *outlines = pdf_resolve_indirect_chain(ctx, pdf_dict_get(ctx, root, PDF_NAME(Outlines)));
+        pdf_obj *first = pdf_resolve_indirect_chain(ctx, pdf_dict_get(ctx, outlines, PDF_NAME(First)));
+        if (!pdf_is_dict(ctx, first)) {
+            sane = 1; /* no (or empty) outline: nothing to walk */
+            break;
+        }
+
+        pdf_obj *stack[MAX_OUTLINE_DEPTH + 2];
+        int top = -1;
+        long steps = 0;
+        pdf_obj *node = first;
+
+        while (node) {
+            if (++steps > MAX_OUTLINE_NODES) break; /* cycle / abuse */
+            if (!pdf_is_dict(ctx, node)) break;
+
+            pdf_obj *child = pdf_resolve_indirect_chain(ctx,
+                pdf_dict_get(ctx, node, PDF_NAME(First)));
+            if (pdf_is_dict(ctx, child)) {
+                if (top + 2 > MAX_OUTLINE_DEPTH) { too_deep = 1; break; }
+                stack[++top] = node;
+                node = child;
+                continue;
+            }
+
+            for (;;) {
+                pdf_obj *next = pdf_resolve_indirect_chain(ctx,
+                    pdf_dict_get(ctx, node, PDF_NAME(Next)));
+                if (pdf_is_dict(ctx, next)) { node = next; break; }
+                if (top < 0) { node = NULL; break; } /* walked everything */
+                node = stack[top--];
+            }
+        }
+
+        sane = !too_deep && (steps <= MAX_OUTLINE_NODES);
+    }
+    fz_catch(ctx) {
+        LOG_WARN("MuPDF: %s", fz_caught_message(ctx));
+        sane = 0;
+    }
+
+    if (!sane)
+        LOG_WARN("Outline too deep or malformed; not loading it");
+    return sane;
+}
+
 PdfrOutline *pdfr_load_outline(PdfrDoc *doc) {
     (void)doc;
+    if (!doc || !doc->doc) return NULL;
+    if (!pdfr_outline_is_sane(doc)) return NULL;
+
     fz_context *ctx = pdfr_get_context();
     fz_outline *root = NULL;
     fz_var(root);
@@ -451,7 +533,7 @@ PdfrOutline *pdfr_load_outline(PdfrDoc *doc) {
 
     if (!root) return NULL;
 
-    PdfrOutline *outline = build_outline_tree(ctx, doc->doc, root);
+    PdfrOutline *outline = build_outline_tree(ctx, doc->doc, root, 0);
     fz_drop_outline(ctx, root);
     return outline;
 }
