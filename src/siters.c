@@ -16,6 +16,18 @@
 #define MAX_SURFACE_DIM 2000
 #define MAX_CACHE_BYTES (40 * 1024 * 1024)
 
+/* Upper bound for widget size requests in pixels (int-safe). */
+#define MAX_SIZE_REQUEST 100000000
+
+/* Clamp a double to [0, max] before converting to int. This avoids
+   implementation-defined (and potentially UB) behavior when absurd PDF page
+   sizes or zoom values produce doubles beyond the int range. */
+static int clamp_double_to_int(double v, int max) {
+    if (!(v > 0.0)) return 0;
+    if (v >= (double)max) return max;
+    return (int)v;
+}
+
 /* DATADIR is normally defined by -DDATADIR=... at build time.
    This fallback lets clang-based tools parse the file without flags. */
 #ifndef DATADIR
@@ -3528,7 +3540,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
         if (upper < 1.0) upper = 1.0;
         gtk_adjustment_set_upper(sadj, upper);
         double target_h = MAX(vp_h, tab->max_page_h);
-        gtk_widget_set_size_request(tab->pages_drawing, -1, (int)ceil(target_h));
+        gtk_widget_set_size_request(tab->pages_drawing, -1, clamp_double_to_int(ceil(target_h), MAX_SIZE_REQUEST));
     }
 
     if (tab->initial_scroll_pending) {
@@ -4036,10 +4048,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, off_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                int iw = (int)(tab->cached_page_widths[i] * scale * dsx + 0.5);
-                int ih = (int)(tab->cached_page_heights[i] * scale * dsy + 0.5);
-                if (iw > MAX_SURFACE_DIM) iw = MAX_SURFACE_DIM;
-                if (ih > MAX_SURFACE_DIM) ih = MAX_SURFACE_DIM;
+                int iw = clamp_double_to_int(tab->cached_page_widths[i] * scale * dsx + 0.5, MAX_SURFACE_DIM);
+                int ih = clamp_double_to_int(tab->cached_page_heights[i] * scale * dsy + 0.5, MAX_SURFACE_DIM);
                 if (iw > 0 && ih > 0) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -4126,10 +4136,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, left_x, y, page_w1, page_h1);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                int iw1 = (int)(tab->cached_page_widths[i] * scale * dsx2 + 0.5);
-                int ih1 = (int)(tab->cached_page_heights[i] * scale * dsy2 + 0.5);
-                if (iw1 > MAX_SURFACE_DIM) iw1 = MAX_SURFACE_DIM;
-                if (ih1 > MAX_SURFACE_DIM) ih1 = MAX_SURFACE_DIM;
+                int iw1 = clamp_double_to_int(tab->cached_page_widths[i] * scale * dsx2 + 0.5, MAX_SURFACE_DIM);
+                int ih1 = clamp_double_to_int(tab->cached_page_heights[i] * scale * dsy2 + 0.5, MAX_SURFACE_DIM);
                 if (iw1 > 0 && ih1 > 0) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -4180,10 +4188,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, right_x, y, page_w2, page_h2);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                int iw2 = (int)(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5);
-                int ih2 = (int)(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5);
-                if (iw2 > MAX_SURFACE_DIM) iw2 = MAX_SURFACE_DIM;
-                if (ih2 > MAX_SURFACE_DIM) ih2 = MAX_SURFACE_DIM;
+                int iw2 = clamp_double_to_int(tab->cached_page_widths[i + 1] * scale * dsx2 + 0.5, MAX_SURFACE_DIM);
+                int ih2 = clamp_double_to_int(tab->cached_page_heights[i + 1] * scale * dsy2 + 0.5, MAX_SURFACE_DIM);
                 if (iw2 > 0 && ih2 > 0) {
                     if (tab->page_cache[i + 1]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i + 1]);
@@ -4255,10 +4261,8 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
                 cairo_rectangle(cr, dev_x, off_y, page_w, page_h);
                 cairo_fill(cr);
                 cairo_restore(cr);
-                int iwh = (int)(tab->cached_page_widths[i] * scale * dsxh + 0.5);
-                int ihh = (int)(tab->cached_page_heights[i] * scale * dsyh + 0.5);
-                if (iwh > MAX_SURFACE_DIM) iwh = MAX_SURFACE_DIM;
-                if (ihh > MAX_SURFACE_DIM) ihh = MAX_SURFACE_DIM;
+                int iwh = clamp_double_to_int(tab->cached_page_widths[i] * scale * dsxh + 0.5, MAX_SURFACE_DIM);
+                int ihh = clamp_double_to_int(tab->cached_page_heights[i] * scale * dsyh + 0.5, MAX_SURFACE_DIM);
                 if (iwh > 0 && ihh > 0) {
                     if (tab->page_cache[i]) {
                         int cw = cairo_image_surface_get_width(tab->page_cache[i]);
@@ -4324,7 +4328,7 @@ static void build_continuous_view(TabData *tab) {
     invalidate_page_cache(tab);
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
-    int page_width_px = tab->n_pages > 0 ? (int)ceil(tab->cached_page_widths[0] * scale) : 800;
+    int page_width_px = tab->n_pages > 0 ? clamp_double_to_int(ceil(tab->cached_page_widths[0] * scale), MAX_SIZE_REQUEST) : 800;
     if (page_width_px < 1) page_width_px = 800;
 
     if (tab->layout_mode == 0) {
@@ -4335,7 +4339,7 @@ static void build_continuous_view(TabData *tab) {
         if (total_h < 1.0) total_h = 1.0;
         if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(total_h));
+        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, clamp_double_to_int(ceil(total_h), MAX_SIZE_REQUEST));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
                                        GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     } else if (tab->layout_mode == 1) {
@@ -4364,7 +4368,7 @@ static void build_continuous_view(TabData *tab) {
         if (max_row_w < 1.0) max_row_w = page_width_px;
         if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, (int)ceil(max_row_w), (int)ceil(total_h));
+        gtk_widget_set_size_request(tab->pages_drawing, clamp_double_to_int(ceil(max_row_w), MAX_SIZE_REQUEST), clamp_double_to_int(ceil(total_h), MAX_SIZE_REQUEST));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
                                        GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     } else if (tab->layout_mode == 2) {
@@ -4385,7 +4389,7 @@ static void build_continuous_view(TabData *tab) {
             gtk_adjustment_set_upper(adj, total_w);
         }
         gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, (int)ceil(max_h));
+        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, clamp_double_to_int(ceil(max_h), MAX_SIZE_REQUEST));
         gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
                                        GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
     }
