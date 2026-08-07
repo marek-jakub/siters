@@ -40,6 +40,8 @@ The switch was done in two phases:
 
 15. [Search Crashes on Tab Switch (Segfault / Stack Smashing)](#15-search-crashes-on-tab-switch-segfault--stack-smashing)
 
+16. [Latent Search Crash in Debug (-O0) Builds Only (SEGV in fz_do_catch)](#16-latent-search-crash-in-debug--o0-builds-only-segv-in-fz_do_catch)
+
 ---
 
 ## 1. PDF Text Not Rendering on X11 (and Ragged Text Fix)
@@ -473,4 +475,42 @@ The old (`perform_file_info_search`) and the first rewrite (batched idle with `p
 - `include/pdf.h` — `pdfr_search_page` signature changed to `(doc, page_idx, text, matches, max_matches)`
 - `src/pdf_mupdf.c` — `pdfr_search_page` rewritten to use `fz_search_page_number` + stack quads
 - `src/siters.c` — single-pass idle callback, `search_clear()` in `update_file_info_labels`
+- `tests/bugs.md` — this entry
+
+---
+
+## 16. Latent Search Crash in Debug (`-O0`) Builds Only (SEGV in `fz_do_catch`)
+
+**Bug:** A latent crash that occurs **only** when `pdfr_search_page` is compiled at `-O0` (debug builds). It does not affect the shipped Release binary, which is built with `-O3 -DNDEBUG`. When it does trigger, the process dies with SIGSEGV in MuPDF's `fz_do_catch` after the search itself has already succeeded.
+
+**Symptoms:**
+- SIGSEGV (exit 139) inside `fz_do_catch`, called from `pdfr_search_page`.
+- gdb shows the `ctx` local in the `pdfr_search_page` frame as the garbage pointer `0x100000001` — the exact `0x000100000001` pattern from Bug #15.
+- The search succeeds first: `n` and the returned quads are correct; the crash happens in the `fz_catch` machinery, i.e. `ctx` was clobbered between the `fz_try` body and the catch.
+- Triggers **only when the search writes hits** (`n > 0`); a search with zero matches does not crash.
+
+**Reproduction (debug build):**
+```sh
+gcc -std=c99 -D_GNU_SOURCE -O0 -Iinclude -Isrc -o /tmp/opencode/search_test_dbg \
+    /tmp/opencode/search_test2.c src/pdf_mupdf.c src/log.c \
+    $(pkg-config --cflags gtk+-3.0) -lmupdf -lmupdf-third -lmujs -lgumbo -ljpeg \
+    -ljbig2dec -lopenjp2 -lharfbuzz -lfreetype -lbz2 -lz -lpng16 -lbrotlidec \
+    -lbrotlicommon -lm $(pkg-config --libs gtk+-3.0)
+./search_test_dbg tiny.pdf word 5   # n=5, then SIGSEGV in fz_do_catch
+```
+
+**Scope and experiments (all at `-O0` unless noted):**
+- Does **not** reproduce at `-O2` or at `-O3 -DNDEBUG` (the app's actual Release flags) — the shipped binary is unaffected.
+- Does **not** reproduce under ASAN/UBSAN (stack layout changes) — so the sanitizer build hides it while the plain `-g -O0` build hits it.
+- Both the pre-clamp and the post-clamp (`MAX_SEARCH_QUADS`) versions of `pdfr_search_page` crash identically → pre-existing, not introduced by the search hardening work.
+- Heap-allocating the `quads` buffer does **not** fix it (tested: `calloc` + `free` version still crashes) → not a stack-buffer-size issue.
+- Isolating the function (`search_iso.c`), an exact single-function replication (`search_repro.c`), and no-op MuPDF callback variants all fail to reproduce → requires the full `src/pdf_mupdf.c` + `src/log.c` link at `-O0`.
+
+**Root cause:** Not fully pinned down. Presumed to be an interaction between MuPDF's `setjmp`/`longjmp`-based `fz_try`/`fz_catch` and GCC's `-O0` stack layout: the `ctx` stack slot (holding the frame that `fz_do_catch` reads) is corrupted by the longjmp when hits are written. The clobbered value `0x100000001` matches the Bug #15 corruption pattern.
+
+**Status:** Documented, not "fixed" — there is no crash in Release builds and no reproduction at `-O2` or under sanitizers. If debug builds must be stable, compile with `-O1`/`-O2`, or add sanitizer flags (ASAN build is crash-free).
+
+**Key files:**
+- `src/pdf_mupdf.c` — `pdfr_search_page` (the frame whose `ctx` is clobbered)
+- `src/log.c` — required part of the crashing link
 - `tests/bugs.md` — this entry
