@@ -156,21 +156,30 @@ if (page > 0) {
 The `switch-page` handler `on_left_notebook_switch_page` did call `populate_toc_treeview()` when `current_sidebar_mode == SIDEBAR_TOC`, but `populate_toc_treeview()` re-fetched the current tab via `get_current_left_tab()`, which calls `gtk_notebook_get_current_page()`. In certain signal emission paths, the notebook's internal current-page property could resolve to the wrong tab.
 
 **Solution:**  
-Introduced `populate_toc_treeview_for_tab(TabData *tab)` that accepts an explicit tab argument. The `switch-page` handler now passes its `tab` parameter (the new current page) directly:
+Introduced `populate_toc_treeview_for_tab(TabData *tab)` that accepts an explicit tab argument. The `switch-page` handler now passes its `tab` parameter (the new current page) directly, never re-deriving it via `get_current_left_tab()`:
 ```c
 static void populate_toc_treeview_for_tab(TabData *tab) {
+    last_toc_selected_page = -1;
     gtk_tree_store_clear(toc_tree_store);
-    if (!tab || !tab->doc) return;
-    PopplerIndexIter *root_iter = poppler_index_iter_new(tab->doc);
-    if (!root_iter) return;
-    populate_toc_treeview_recursive(root_iter, NULL);
-    poppler_index_iter_free(root_iter);
+    if (!tab) return;
+    if (!tab->doc) ensure_tab_doc_loaded(tab);
+    if (!tab->doc) return;
+
+    PdfrOutline *outline = pdfr_load_outline(tab->doc);
+    if (!outline) return;
+
+    populate_toc_treeview_recursive(outline, NULL);
+    pdfr_free_outline(tab->doc, outline);
 }
 ```
-Called from `on_left_notebook_switch_page` as:
+Called from `on_left_notebook_switch_page` (with the `tab` argument, after restoring the document model):
 ```c
-if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview_for_tab(tab);
+if (current_sidebar_mode == SIDEBAR_TOC) {
+    populate_toc_treeview_for_tab(tab);
+    update_toc_selection_for_current_page(tab);
+}
 ```
+The outline is fetched through the backend-neutral `pdfr_load_outline` (MuPDF since the backend switch); `ensure_tab_doc_loaded(tab)` guarantees the document is loaded before the outline is read.
 
 ---
 
