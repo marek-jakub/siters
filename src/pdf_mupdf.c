@@ -390,12 +390,17 @@ int pdfr_resolve_named_dest(PdfrDoc *doc, const char *name, double *out_x, doubl
 
 /* ---- Search ---- */
 
+/* Stack buffer for per-page search hits; pdfr_search_page clamps its input
+   to this size so a too-large max_matches cannot overflow the buffer. */
+#define MAX_SEARCH_QUADS 100
+
 int pdfr_search_page(PdfrDoc *doc, int page_idx,
                     const char *text, PdfrRect *matches, int max_matches) {
     if (!doc || !doc->doc || !text || max_matches <= 0) return 0;
     fz_context *ctx = pdfr_get_context();
     if (!ctx) return 0;
-    fz_quad quads[100];
+    if (max_matches > MAX_SEARCH_QUADS) max_matches = MAX_SEARCH_QUADS;
+    fz_quad quads[MAX_SEARCH_QUADS];
     int hit_mark = 0;
     int n = 0;
     fz_var(n);
