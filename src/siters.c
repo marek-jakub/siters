@@ -67,6 +67,7 @@ typedef struct TabDataStruct {
     GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
     GtkWidget *h_scrollbar;   /* manual horizontal scrollbar for row view */
     int layout_mode; /* 0=single-column,1=two-column,2=horizontal */
+    int built_layout_mode; /* layout mode used by the last build_continuous_view (to detect layout-only changes) */
     double last_zoom; /* used to track when we need to rebuild the continuous view on zoom change */
     gboolean initial_scroll_pending; /* flag to indicate we need to scroll to the saved page after initial render */
     RestoreState *pending_restore; /* in-progress idle restore callback */
@@ -107,6 +108,7 @@ typedef struct TabDataStruct {
     int search_page_idx;       /* next page to search (for batched idle) */
     guint search_idle_id;
     guint load_idle_id;        /* pending deferred document-load idle source id */
+    gboolean load_failed;      /* TRUE if the last open attempt for this tab failed */
 } TabData;
 
 typedef enum {
@@ -344,6 +346,8 @@ static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri
 static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void start_initial_scroll_restore(TabData *tab, int target_page, double target_zoom, double target_fraction);
 static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
+static void restore_document_model_to_tab(TabData *tab);
+static void refresh_tab_label(TabData *tab);
 
 /* Theme-aware icon color: dark theme uses yellow, light theme uses dark brown */
 static gboolean is_dark_theme = TRUE;
@@ -1229,13 +1233,21 @@ static void invalidate_page_cache(TabData *tab) {
 
 static gboolean ensure_tab_doc_loaded(TabData *tab) {
     if (!tab || !tab->current_file) return FALSE;
-    if (tab->doc) return TRUE;
+    if (tab->doc) {
+        if (tab->load_failed) {
+            tab->load_failed = FALSE;
+            refresh_tab_label(tab);
+        }
+        return TRUE;
+    }
 
     char *open_error = NULL;
     PdfrDoc *doc = pdfr_open(tab->current_file, &open_error);
     if (!doc) {
         LOG_ERROR("Failed to reopen PDF: %s", open_error ? open_error : "unknown error");
         free(open_error);
+        tab->load_failed = TRUE;
+        refresh_tab_label(tab);
         return FALSE;
     }
     free(open_error);
@@ -1246,7 +1258,14 @@ static gboolean ensure_tab_doc_loaded(TabData *tab) {
     tab->doc = doc;
     tab->n_pages = pdfr_count_pages(doc);
     cache_page_dimensions(tab);
+    /* Apply the saved per-document model (layout mode, zoom, page) BEFORE the
+       first build so the initial view already uses the correct layout. */
+    restore_document_model_to_tab(tab);
     build_continuous_view(tab);
+    if (tab->load_failed) {
+        tab->load_failed = FALSE;
+        refresh_tab_label(tab);
+    }
     queue_draw(tab);
     return TRUE;
 }
@@ -3569,17 +3588,31 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
     /* For row view (mode 2), the size_request width is clamped to page_width_px
        to prevent the window from growing.  GTK's internal handler set the
        hadjustment upper from the clamped size_request, so we must extend it
-       here to the full total_w BEFORE scroll_to_page runs below. */
+       here to the full total_w BEFORE scroll_to_page runs below.  Recompute
+       total_w and max_h from the page cache so the scroll range and drawing
+       height are correct even if the last build used a different layout. */
     if (tab->layout_mode == 2 && tab->cached_page_widths && tab->n_pages > 0 && tab->h_scrollbar) {
         int vp_w = allocation ? allocation->width : 200;
         int vp_h = allocation ? allocation->height : 200;
+        double scale = get_ppi_scale(tab);
+        double total_w = 0.0;
+        double max_h = 0.0;
+        const double spacing = 6.0;
+        for (int i = 0; i < tab->n_pages; ++i) {
+            double page_w = tab->cached_page_widths[i] * scale;
+            double page_h = tab->cached_page_heights[i] * scale;
+            total_w += page_w + spacing;
+            if (page_h > max_h) max_h = page_h;
+        }
+        if (total_w < 1.0) total_w = 1.0;
+        if (max_h < 1.0) max_h = 1.0;
+        tab->max_page_h = max_h;
         GtkAdjustment *sadj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
         gtk_adjustment_set_page_size(sadj, vp_w > 0 ? vp_w : 200);
         gtk_adjustment_set_step_increment(sadj, vp_w > 0 ? vp_w * 0.1 : 20);
         gtk_adjustment_set_page_increment(sadj, vp_w * 0.9);
-        double upper = gtk_adjustment_get_upper(sadj);
-        if (upper < 1.0) upper = 1.0;
-        gtk_adjustment_set_upper(sadj, upper);
+        gtk_adjustment_set_lower(sadj, 0.0);
+        gtk_adjustment_set_upper(sadj, total_w);
         double target_h = MAX(vp_h, tab->max_page_h);
         gtk_widget_set_size_request(tab->pages_drawing, -1, clamp_double_to_int(ceil(target_h), MAX_SIZE_REQUEST));
     }
@@ -4367,6 +4400,7 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
 static void build_continuous_view(TabData *tab) {
     if (!tab || !tab->cached_page_widths || !tab->pages_drawing) return;
     invalidate_page_cache(tab);
+    tab->built_layout_mode = tab->layout_mode;
     const double spacing = 6.0;
     double scale = get_ppi_scale(tab);
     int page_width_px = tab->n_pages > 0 ? clamp_double_to_int(ceil(tab->cached_page_widths[0] * scale), MAX_SIZE_REQUEST) : 800;
@@ -4590,6 +4624,30 @@ static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
     update_document_model_from_tab(tab);
 }
 
+static void refresh_tab_label(TabData *tab) {
+    if (!tab || !tab->tab_label || !tab->current_file) return;
+
+    char *basename = g_path_get_basename(tab->current_file);
+    const char *label_text = basename;
+    char *truncated = NULL;
+    if (sessions_model) {
+        int max_chars = sessions_model_get_tab_width(sessions_model);
+        if (max_chars > 0 && (int)strlen(basename) > max_chars) {
+            truncated = g_strndup(basename, max_chars);
+            label_text = truncated;
+        }
+    }
+    if (tab->load_failed) {
+        char *marker = g_strdup_printf("%s (failed)", label_text);
+        gtk_label_set_text(GTK_LABEL(tab->tab_label), marker);
+        g_free(marker);
+    } else {
+        gtk_label_set_text(GTK_LABEL(tab->tab_label), label_text);
+    }
+    g_free(truncated);
+    g_free(basename);
+}
+
 static void set_tab_filename(TabData *tab, const char *filename) {
     if (!tab || !filename) return;
 
@@ -4597,23 +4655,10 @@ static void set_tab_filename(TabData *tab, const char *filename) {
     if (tab->current_file)
         g_free(tab->current_file);
     tab->current_file = g_strdup(filename);
+    tab->load_failed = FALSE;
 
     /* Update the tab's label with filename */
-    if (tab->tab_label) {
-        char *basename = g_path_get_basename(filename);
-        const char *label_text = basename;
-        char *truncated = NULL;
-        if (sessions_model) {
-            int max_chars = sessions_model_get_tab_width(sessions_model);
-            if (max_chars > 0 && (int)strlen(basename) > max_chars) {
-                truncated = g_strndup(basename, max_chars);
-                label_text = truncated;
-            }
-        }
-        gtk_label_set_text(GTK_LABEL(tab->tab_label), label_text);
-        g_free(truncated);
-        g_free(basename);
-    }
+    refresh_tab_label(tab);
 }
 
 static void open_document_in_tab(TabData *tab) {
@@ -4624,6 +4669,8 @@ static void open_document_in_tab(TabData *tab) {
     if (!doc) {
         LOG_ERROR("Failed to open PDF: %s", open_error ? open_error : "unknown error");
         free(open_error);
+        tab->load_failed = TRUE;
+        refresh_tab_label(tab);
         return;
     }
     free(open_error);
@@ -4633,6 +4680,11 @@ static void open_document_in_tab(TabData *tab) {
     cache_page_dimensions(tab);
     tab->cur_page = 0;
     tab->zoom = 96.0;
+
+    if (tab->load_failed) {
+        tab->load_failed = FALSE;
+        refresh_tab_label(tab);
+    }
 
     queue_draw(tab);
 
@@ -5179,7 +5231,9 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
                         double saved_zoom = document_model_get_zoom(dm);
                         if (saved_zoom >= 10.0 && saved_zoom <= 500.0)
                             tab->zoom = saved_zoom;
-                        if (tab->zoom != tab->last_zoom) {
+                        /* Rebuild when the layout mode OR zoom differs from the
+                           last build so layout-only changes are reflected. */
+                        if (tab->layout_mode != tab->built_layout_mode || tab->zoom != tab->last_zoom) {
                             build_continuous_view(tab);
                             tab->last_zoom = tab->zoom;
                         }
