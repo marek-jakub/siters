@@ -106,6 +106,7 @@ typedef struct TabDataStruct {
     gboolean search_cancelled;
     int search_page_idx;       /* next page to search (for batched idle) */
     guint search_idle_id;
+    guint load_idle_id;        /* pending deferred document-load idle source id */
 } TabData;
 
 typedef enum {
@@ -295,6 +296,11 @@ static void restore_open_tabs_for_session(const char *session_name);
 
 /* PDF handling function prototypes */
 static TabData *create_new_tab(GtkWidget *notebook);
+static void set_tab_filename(TabData *tab, const char *filename);
+static void open_document_in_tab(TabData *tab);
+static gboolean load_tab_deferred_cb(gpointer data);
+static void schedule_tab_deferred_load(TabData *tab);
+static void cancel_tab_deferred_load(TabData *tab);
 static void load_file_into_tab(TabData *tab, const char *filename);
 static void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
@@ -615,6 +621,7 @@ static void destroy_tab_data(gpointer data) {
     TabData *tab = data;
     if (!tab) return;
     cancel_tab_restore(tab);
+    cancel_tab_deferred_load(tab);
     cancel_doc_model_debounce(tab);
     if (tab->zoom_scroll_source_id) {
         g_source_remove(tab->zoom_scroll_source_id);
@@ -2420,7 +2427,7 @@ static void populate_toc_treeview_for_tab(TabData *tab) {
     last_toc_selected_page = -1;
     gtk_tree_store_clear(toc_tree_store);
     if (!tab) return;
-    if (!tab->doc) ensure_tab_doc_loaded(tab);
+    if (!tab->doc && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
     if (!tab->doc) return;
 
     PdfrOutline *outline = pdfr_load_outline(tab->doc);
@@ -3251,7 +3258,10 @@ static void restore_open_tabs_for_session(const char *session_name) {
     int left_index = 0;
     int right_index = 0;
 
-    // Restore saved documents in left notebook
+    // Pass 1: create placeholder tabs for all saved documents (fast, no parsing).
+    // The focused (last-read) tabs are loaded synchronously in pass 2 so the user
+    // immediately sees content; the remaining tabs are opened progressively at idle
+    // priority so switching sessions does not freeze the UI on large document sets.
     const GList *docs = session_model_get_document_urls(session);
     for (const GList *iter = docs; iter != NULL; iter = iter->next) {
         char *uri = (char *)iter->data;
@@ -3263,7 +3273,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
         if (filename) {
             TabData *tab = create_new_tab(left_notebook);
             if (tab) {
-                load_file_into_tab(tab, filename);
+                set_tab_filename(tab, filename);
                 if (last_read_uri && g_strcmp0(uri, last_read_uri) == 0) {
                     matched_left_index = left_index;
                 }
@@ -3286,7 +3296,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
         if (filename) {
             TabData *tab = create_new_tab(right_notebook);
             if (tab) {
-                load_file_into_tab(tab, filename);
+                set_tab_filename(tab, filename);
                 if (last_read_help_uri && g_strcmp0(uri, last_read_help_uri) == 0) {
                     matched_right_index = right_index;
                 }
@@ -3298,18 +3308,49 @@ static void restore_open_tabs_for_session(const char *session_name) {
         }
     }
 
-    // Re-focus last-read tabs if present
-    if (left_notebook && matched_left_index >= 0 &&
-        matched_left_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook))) {
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), matched_left_index);
-    }
-
-    if (right_notebook && matched_right_index >= 0 &&
-        matched_right_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook))) {
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), matched_right_index);
-    }
-
     is_restoring_session_tabs = FALSE;
+
+    int n_left = left_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook)) : 0;
+    int n_right = right_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) : 0;
+
+    int focus_left = (matched_left_index >= 0) ? matched_left_index : (n_left > 0 ? 0 : -1);
+    int focus_right = (matched_right_index >= 0) ? matched_right_index : (n_right > 0 ? 0 : -1);
+
+    // Pass 2: synchronously load the focused tabs so content appears immediately;
+    // defer all other tabs to idle-time progressive loading.
+    for (int i = 0; i < n_left; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), i);
+        TabData *t = page ? g_object_get_data(G_OBJECT(page), "tab-data") : NULL;
+        if (!t) continue;
+        if (i == focus_left)
+            open_document_in_tab(t);
+        else
+            schedule_tab_deferred_load(t);
+    }
+
+    for (int i = 0; i < n_right; i++) {
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), i);
+        TabData *t = page ? g_object_get_data(G_OBJECT(page), "tab-data") : NULL;
+        if (!t) continue;
+        if (i == focus_right)
+            open_document_in_tab(t);
+        else
+            schedule_tab_deferred_load(t);
+    }
+
+    // Re-focus last-read tabs (fires the notebook switch handler with loaded docs)
+    if (left_notebook && focus_left >= 0 && focus_left < n_left) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), focus_left);
+    }
+
+    if (right_notebook && focus_right >= 0 && focus_right < n_right) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), focus_right);
+    }
+
+    /* Refresh sidebar state for the restored current tabs. The switch handler
+       above may not fire if the focused tab was already current, so do it here. */
+    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
+    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
 }
 
 static void queue_draw(TabData *tab) {
@@ -3516,7 +3557,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
 
     /* Ensure doc is loaded for the active tab that owns this size-allocate */
     if (!tab->cached_page_widths) {
-        if (!ensure_tab_doc_loaded(tab)) return;
+        if (!is_restoring_session_tabs && !ensure_tab_doc_loaded(tab)) return;
     }
 
     double zoom = tab->zoom > 0 ? tab->zoom : 96.0;
@@ -4549,25 +4590,9 @@ static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
     update_document_model_from_tab(tab);
 }
 
-static void load_file_into_tab(TabData *tab, const char *filename) {
+static void set_tab_filename(TabData *tab, const char *filename) {
     if (!tab || !filename) return;
-    char *open_error = NULL;
-    PdfrDoc *doc = pdfr_open(filename, &open_error);
-    if (!doc) {
-        LOG_ERROR("Failed to open PDF: %s", open_error ? open_error : "unknown error");
-        free(open_error);
-        return;
-    }
-    free(open_error);
 
-    if (tab->doc)
-        pdfr_close(tab->doc);
-
-    tab->doc = doc;
-    tab->n_pages = pdfr_count_pages(doc);
-    cache_page_dimensions(tab);
-    tab->cur_page = 0;
-    tab->zoom = 96.0;
     /* track current filename for per-document settings */
     if (tab->current_file)
         g_free(tab->current_file);
@@ -4589,6 +4614,25 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
         g_free(truncated);
         g_free(basename);
     }
+}
+
+static void open_document_in_tab(TabData *tab) {
+    if (!tab || !tab->current_file || tab->doc) return;
+
+    char *open_error = NULL;
+    PdfrDoc *doc = pdfr_open(tab->current_file, &open_error);
+    if (!doc) {
+        LOG_ERROR("Failed to open PDF: %s", open_error ? open_error : "unknown error");
+        free(open_error);
+        return;
+    }
+    free(open_error);
+
+    tab->doc = doc;
+    tab->n_pages = pdfr_count_pages(doc);
+    cache_page_dimensions(tab);
+    tab->cur_page = 0;
+    tab->zoom = 96.0;
 
     queue_draw(tab);
 
@@ -4610,6 +4654,31 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
             sync_right_page_widget_from_tab(tab);
         }
     }
+}
+
+static gboolean load_tab_deferred_cb(gpointer data) {
+    TabData *tab = data;
+    tab->load_idle_id = 0;
+    if (tab && !tab->doc)
+        open_document_in_tab(tab);
+    return G_SOURCE_REMOVE;
+}
+
+static void schedule_tab_deferred_load(TabData *tab) {
+    if (!tab || tab->doc || tab->load_idle_id) return;
+    tab->load_idle_id = g_idle_add_full(G_PRIORITY_LOW, load_tab_deferred_cb, tab, NULL);
+}
+
+static void cancel_tab_deferred_load(TabData *tab) {
+    if (!tab || !tab->load_idle_id) return;
+    g_source_remove(tab->load_idle_id);
+    tab->load_idle_id = 0;
+}
+
+static void load_file_into_tab(TabData *tab, const char *filename) {
+    if (!tab || !filename) return;
+    set_tab_filename(tab, filename);
+    open_document_in_tab(tab);
     if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
     if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
     if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
@@ -5091,7 +5160,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     update_last_read_for_notebook(notebook, page, page_num);
 
-    if (tab) ensure_tab_doc_loaded(tab);
+    if (tab && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
@@ -5188,7 +5257,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     update_last_read_for_notebook(notebook, page, page_num);
 
     /* Load current tab's doc if needed */
-    if (tab) ensure_tab_doc_loaded(tab);
+    if (tab && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
