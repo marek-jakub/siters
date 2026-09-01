@@ -15,6 +15,8 @@ Installation:
     pip install dogtail python3-pyatspi
 """
 
+from __future__ import annotations
+
 import logging
 import os
 import shutil
@@ -23,16 +25,23 @@ import sys
 import tempfile
 import time
 import unittest
+from typing import cast, override
 
 try:
     from dogtail import config  # type: ignore[import-untyped]
-    from dogtail.tree import root  # type: ignore[import-untyped]
+    from dogtail.tree import Node, root  # type: ignore[import-untyped]
     from dogtail.utils import run  # type: ignore[import-untyped]
 except ImportError as e:
     print("Error: Dogtail is not installed.")
     print("Install it with: pip install dogtail python3-pyatspi")
     print(f"Import error details: {e}")
     sys.exit(1)
+
+# Recursive alias for arbitrary JSON documents (used instead of `Any` so that
+# explicit-Any lints stay clean while still modelling untrusted JSON data).
+type JsonValue = (
+    None | bool | int | float | str | list[JsonValue] | dict[str, JsonValue]
+)
 
 # Suppress dogtail's verbose debug logging
 logging.getLogger("dogtail").setLevel(logging.CRITICAL)
@@ -43,11 +52,12 @@ logging.disable(logging.INFO)
 class SitersGUITestCase(unittest.TestCase):
     """Base test case for Siters GUI tests with setup/teardown."""
 
-    def __init__(self, methodName: str = "runTest") -> None:
-        super().__init__(methodName)
-        self.app = None
+    app: Node | None = None
+    siters_binary: str = "siters"
+    temp_config_dir: str | None = None
 
     @classmethod
+    @override
     def setUpClass(cls):
         """Set up test fixtures for all tests."""
         config.config.debug_file = "/tmp/"
@@ -65,6 +75,7 @@ class SitersGUITestCase(unittest.TestCase):
         os.environ["SITERS_CONFIG_DIR"] = cls.temp_config_dir
 
     @classmethod
+    @override
     def tearDownClass(cls):
         """Clean up test fixtures."""
         if "SITERS_CONFIG_DIR" in os.environ:
@@ -73,31 +84,40 @@ class SitersGUITestCase(unittest.TestCase):
             shutil.rmtree(cls.temp_config_dir, ignore_errors=True)
             cls.temp_config_dir = None
 
+    @override
     def setUp(self):
         """Start the Siters application before each test."""
         # Check if we have an X display - required for GUI testing
         if not os.environ.get("DISPLAY") and not os.environ.get("WAYLAND_DISPLAY"):
             self.skipTest(
                 "No display server (DISPLAY or WAYLAND_DISPLAY) available. "
-                "To run GUI tests, use: xvfb-run -a python3 test_gui_simple.py"
+                + "To run GUI tests, use: xvfb-run -a python3 test_gui_simple.py"
             )
 
         try:
             # Use dumb=True to skip dogtail's accessibility-based startup detection
             # This prevents hanging when the app doesn't expose itself via AT-SPI
-            self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
+            self.app = run(self.siters_binary, timeout=5, dumb=True)
             time.sleep(0.5)
         except Exception as e:
             self.skipTest(f"Could not start Siters application: {e}")
 
+    @override
     def tearDown(self):
         """Close the Siters application after each test."""
         if hasattr(self, "app") and self.app:
             try:
-                self.app.kill()  # type: ignore[union-attr]
+                self.app.kill()
                 time.sleep(0.5)
             except Exception:
                 pass
+
+    def _restart_app(self) -> None:
+        """Restart the Siters application so it reloads its config file."""
+        if hasattr(self, "app") and self.app:
+            self.app.kill()
+            time.sleep(0.5)
+        self.app = run(self.siters_binary, timeout=5, dumb=True)
 
 
 class TestSitersBasicOperation(SitersGUITestCase):
@@ -123,7 +143,7 @@ class TestSitersBasicOperation(SitersGUITestCase):
         try:
             # Simple check - the process should exist
             result = subprocess.run(
-                ["pgrep", "-f", "siters"], capture_output=True, timeout=2
+                ["pgrep", "-f", "siters"], capture_output=True, timeout=2, check=False
             )
             self.assertEqual(result.returncode, 0, "Siters process not found")
         except Exception as e:
@@ -286,7 +306,9 @@ class TestSitersBasicOperation(SitersGUITestCase):
                 return None
 
         # Helper to poll for the sidebar label appearing/disappearing
-        def wait_for_sidebar_label(should_exist, timeout=5.0):
+        def wait_for_sidebar_label(
+            should_exist: bool, timeout: float = 5.0
+        ) -> Node | None:
             end = time.time() + timeout
             while time.time() < end:
                 label = find_sidebar_label()
@@ -363,7 +385,9 @@ class TestSitersBasicOperation(SitersGUITestCase):
                 return None
 
         # Helper to poll for the sidebar label appearing/disappearing
-        def wait_for_sidebar_label(should_exist, timeout=5.0):
+        def wait_for_sidebar_label(
+            should_exist: bool, timeout: float = 5.0
+        ) -> Node | None:
             end = time.time() + timeout
             while time.time() < end:
                 label = find_sidebar_label()
@@ -448,7 +472,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     roles_to_try = ["tree table", "table", "tree", "tree view"]
                     for role in roles_to_try:
                         try:
-                            result = siters_app.findChild(lambda x: x.roleName == role)
+                            result = siters_app.findChild(
+                                lambda x, r=role: x.roleName == r
+                            )
                             if result:
                                 return result
                         except Exception:
@@ -460,8 +486,8 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
             # Helper to get session names — tries AT-SPI tree, falls back to config file
             def get_session_names_from_tree():
-                names = []
-                cells = []
+                names: list[str] = []
+                cells: list[Node] = []
                 tree = find_sessions_tree()
                 if tree:
                     # Try "table cell" first, then "cell" as fallback
@@ -491,9 +517,15 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         cfg_file = os.path.join(cfg_dir, "siters.json")
                         if os.path.exists(cfg_file):
                             with open(cfg_file) as f:
-                                cfg = json.load(f)
-                            sessions = cfg.get("sessions", {})
-                            names = sessions.get("names", [])
+                                cfg = cast(
+                                    dict[str, JsonValue], json.load(f)
+                                )
+                            sessions = cast(
+                                dict[str, JsonValue], cfg.get("sessions", {})
+                            )
+                            names = cast(
+                                list[str], sessions.get("names", [])
+                            )
                     except Exception:
                         pass
 
@@ -528,8 +560,8 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     for role in roles_to_try:
                         try:
                             result = siters_app.findChild(
-                                lambda x: (
-                                    x.roleName == role and x.name != "Current page"
+                                lambda x, r=role: (
+                                    x.roleName == r and x.name != "Current page"
                                 )
                             )
                             if result:
@@ -542,10 +574,12 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     return None
 
             # Helper to find buttons in sessions sidebar
-            def find_button_by_name(button_name):
+            def find_button_by_name(button_name: str) -> Node | None:
                 try:
-                    lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and x.name == '{button_name}'"
-                    result = siters_app.findChild(eval(lambda_str))
+                    result = siters_app.findChild(
+                        lambda x: x.roleName in ["push button", "toggle button"]
+                        and x.name == button_name
+                    )
                     if result:
                         return result
 
@@ -557,13 +591,20 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
                     if button_name in name_variations:
                         for alt_name in name_variations[button_name]:
-                            lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and x.name == '{alt_name}'"
-                            result = siters_app.findChild(eval(lambda_str))
+                            result = siters_app.findChild(
+                                lambda x, n=alt_name: (
+                                    x.roleName
+                                    in ["push button", "toggle button"]
+                                    and x.name == n
+                                )
+                            )
                             if result:
                                 return result
 
-                    lambda_str = f"lambda x: x.roleName in ['push button', 'toggle button'] and '{button_name}'.lower() in (x.name or '').lower()"
-                    result = siters_app.findChild(eval(lambda_str))
+                    result = siters_app.findChild(
+                        lambda x: x.roleName in ["push button", "toggle button"]
+                        and button_name.lower() in (x.name or "").lower()
+                    )
                     if result:
                         return result
 
@@ -581,12 +622,12 @@ class TestSitersSessionManagement(SitersGUITestCase):
             # Verify the sidebar actually opened by checking for sidebar-only widgets
             def sidebar_is_open():
                 try:
-                    siters_app.findChild(lambda x: x.name == "Sessions entry")
+                    _ = siters_app.findChild(lambda x: x.name == "Sessions entry")
                     return True
                 except Exception:
                     pass
                 try:
-                    siters_app.findChild(lambda x: x.name == "Add session")
+                    _ = siters_app.findChild(lambda x: x.name == "Add session")
                     return True
                 except Exception:
                     pass
@@ -600,15 +641,20 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         capture_output=True,
                         text=True,
                         timeout=2,
+                        check=False,
                     )
                     if result.returncode == 0 and result.stdout.strip():
                         window_id = result.stdout.strip().split("\n")[0]
-                        subprocess.run(["xdotool", "windowfocus", window_id], timeout=2)
+                        _ = subprocess.run(
+                            ["xdotool", "windowfocus", window_id],
+                            timeout=2,
+                            check=False,
+                        )
                         time.sleep(0.2)
                         # Click Sessions button by its position in the toolbar
                         if hasattr(sessions_btn, "position"):
                             x, y = sessions_btn.position
-                            subprocess.run(
+                            _ = subprocess.run(
                                 [
                                     "xdotool",
                                     "mousemove",
@@ -618,6 +664,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                                     "1",
                                 ],
                                 timeout=2,
+                                check=False,
                             )
                             time.sleep(1)
                 except Exception:
@@ -650,10 +697,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     session3_cell = siters_app.findChild(
                         lambda x: x.roleName == "table cell" and x.name == "TestSession"
                     )
-                    if session3_cell.click:
-                        session3_cell.click()
-                    else:
-                        session3_cell.do_action(0)
+                    session3_cell.click()
                     time.sleep(0.5)
                 except Exception as e:
                     print(f"WARNING: Could not click TestSession directly: {e}")
@@ -726,16 +770,19 @@ class TestSitersSessionManagement(SitersGUITestCase):
                                 capture_output=True,
                                 text=True,
                                 timeout=2,
+                                check=False,
                             )
                             if result.returncode == 0 and result.stdout.strip():
                                 window_id = result.stdout.strip().split("\n")[0]
-                                subprocess.run(
-                                    ["xdotool", "windowfocus", window_id], timeout=2
+                                _ = subprocess.run(
+                                    ["xdotool", "windowfocus", window_id],
+                                    timeout=2,
+                                    check=False,
                                 )
                                 time.sleep(0.2)
                                 if hasattr(entry, "position"):
                                     x, y = entry.position
-                                    subprocess.run(
+                                    _ = subprocess.run(
                                         [
                                             "xdotool",
                                             "mousemove",
@@ -745,17 +792,21 @@ class TestSitersSessionManagement(SitersGUITestCase):
                                             "1",
                                         ],
                                         timeout=2,
+                                        check=False,
                                     )
                                     time.sleep(0.2)
-                                subprocess.run(
-                                    ["xdotool", "key", "ctrl+a+BackSpace"], timeout=2
+                                _ = subprocess.run(
+                                    ["xdotool", "key", "ctrl+a+BackSpace"],
+                                    timeout=2,
+                                    check=False,
                                 )
                                 time.sleep(0.1)
                                 for char in "TestSession":
-                                    subprocess.run(
+                                    _ = subprocess.run(
                                         ["xdotool", "type", char],
                                         timeout=2,
                                         capture_output=True,
+                                        check=False,
                                     )
                                 time.sleep(0.3)
                                 if "TestSession" in (entry.text or ""):
@@ -766,7 +817,7 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     # Method 4: Fall back to rawinput press_key
                     if not success:
                         try:
-                            from dogtail.rawinput import pressKey
+                            from dogtail.rawinput import pressKey  # type: ignore[import-untyped]
 
                             pressKey("ctrl+a")
                             time.sleep(0.1)
@@ -797,25 +848,26 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 config_file = os.path.join(config_dir, "siters.json")
 
                 # Read existing config or start fresh
-                config = {}
+                config: dict[str, JsonValue] = {}
                 if os.path.exists(config_file):
                     with open(config_file, "r") as f:
-                        config = json.load(f)
+                        config = cast(dict[str, JsonValue], json.load(f))
 
                 # Ensure sessions structure exists
-                if "sessions" not in config:
-                    config["sessions"] = {"names": ["Default"], "data": {}}
-                if "data" not in config["sessions"]:
-                    config["sessions"]["data"] = {}
-                if "names" not in config["sessions"]:
-                    config["sessions"]["names"] = ["Default"]
-
-                names = config["sessions"]["names"]
+                sessions_section = cast(
+                    dict[str, JsonValue], config.get("sessions", {})
+                )
+                data_section = cast(
+                    dict[str, JsonValue], sessions_section.get("data", {})
+                )
+                if "names" not in sessions_section:
+                    sessions_section["names"] = ["Default"]
+                names = cast(list[str], sessions_section["names"])
                 if "TestSession" not in names:
                     names.append("TestSession")
 
-                if "TestSession" not in config["sessions"]["data"]:
-                    config["sessions"]["data"]["TestSession"] = {
+                if "TestSession" not in data_section:
+                    data_section["TestSession"] = {
                         "documents": [],
                         "helper_documents": [],
                         "last_read_document": "",
@@ -825,8 +877,8 @@ class TestSitersSessionManagement(SitersGUITestCase):
                     }
 
                 # Also ensure Default exists
-                if "Default" not in config["sessions"]["data"]:
-                    config["sessions"]["data"]["Default"] = {
+                if "Default" not in data_section:
+                    data_section["Default"] = {
                         "documents": [],
                         "helper_documents": [],
                         "last_read_document": "",
@@ -835,14 +887,14 @@ class TestSitersSessionManagement(SitersGUITestCase):
                         "helper_page_color": "#FFFFFF",
                     }
 
+                sessions_section["data"] = data_section
+                config["sessions"] = sessions_section
+
                 with open(config_file, "w") as f:
                     json.dump(config, f, indent=2)
 
                 # Restart app to reload config
-                if hasattr(self, "app") and self.app:
-                    self.app.kill()  # type: ignore[union-attr]
-                    time.sleep(0.5)
-                self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
+                self._restart_app()
                 time.sleep(2)
                 siters_app = root.application("siters")
                 time.sleep(1)
@@ -901,7 +953,9 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 self.skipTest(f"Could not click TestSession: {e}")
 
             # Helper to wait for window title to contain expected text
-            def wait_for_window_title_contains(app, expected_text, timeout=3.0):
+            def wait_for_window_title_contains(
+                app: Node, expected_text: str, timeout: float = 3.0
+            ) -> str | None:
                 end = time.time() + timeout
                 while time.time() < end:
                     try:
@@ -954,28 +1008,38 @@ class TestSitersSessionManagement(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Error during session management test: {e}")
 
-    def _write_json_config(self, last_open_session, session_names, config_dir):
+    def _write_json_config(
+        self,
+        last_open_session: str,
+        session_names: list[str],
+        config_dir: str,
+    ) -> None:
         """Write a JSON config file for testing."""
         config_file = os.path.join(config_dir, "siters.json")
 
         import json
 
-        config = {
-            "window": {
-                "width": 1000,
-                "height": 800,
-                "x": 0,
-                "y": 0,
-                "maximized": False,
+        config = cast(
+            dict[str, JsonValue],
+            {
+                "window": {
+                    "width": 1000,
+                    "height": 800,
+                    "x": 0,
+                    "y": 0,
+                    "maximized": False,
+                },
+                "sessions": {
+                    "names": session_names,
+                    "last_open_session": last_open_session,
+                    "data": {},
+                },
             },
-            "sessions": {
-                "names": session_names,
-                "last_open_session": last_open_session,
-                "data": {},
-            },
-        }
+        )
+        sessions_section = cast(dict[str, JsonValue], config["sessions"])
+        data_section = cast(dict[str, JsonValue], sessions_section["data"])
         for name in session_names:
-            config["sessions"]["data"][name] = {
+            data_section[name] = {
                 "documents": [],
                 "helper_documents": [],
                 "last_read_document": "",
@@ -1006,18 +1070,16 @@ class TestSitersSessionManagement(SitersGUITestCase):
 
         # Restart the app after writing the test config file so it reloads from disk
         try:
-            if hasattr(self, "app") and self.app:
-                self.app.kill()  # type: ignore[union-attr]
-                time.sleep(0.5)
-
-            self.app = run(self.siters_binary, timeout=5, dumb=True)  # type: ignore[assignment]
+            self._restart_app()
             time.sleep(2)
 
             siters_app = root.application("siters")
             time.sleep(2)
 
             # Verify window title reflects loaded last_open_session
-            def wait_for_window_title_contains(app, expected_text, timeout=5.0):
+            def wait_for_window_title_contains(
+                app: Node, expected_text: str, timeout: float = 5.0
+            ) -> str | None:
                 end = time.time() + timeout
                 while time.time() < end:
                     try:
