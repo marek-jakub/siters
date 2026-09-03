@@ -61,7 +61,7 @@ if(OPENJP2_STATIC_LIB)
 endif()
 
 # Include directories
-include_directories(include include/json-glib src src/search
+include_directories(include include/json-glib src src/search src/session
     ${GTK_INCLUDE_DIRS} ${MUPDF_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
 # Data directory — default to source root for development; override with
@@ -76,6 +76,7 @@ add_definitions(-DDATADIR="${DATADIR}")
 add_executable(siters
     src/main.c
     src/siters.c
+    src/session/state.c
     src/search/search.c
     src/sessions_model.c
     src/session_model.c
@@ -107,6 +108,7 @@ enable_testing()
 # CMocka unit tests
 add_executable(test_siters_unit
     tests/test_siters_unit.c
+    src/session/state.c
     src/search/search.c
     src/sessions_model.c
     src/session_model.c
