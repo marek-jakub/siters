@@ -9,6 +9,9 @@
 #include "sessions_model.h"
 #include "session_model.h"
 #include "document_model.h"
+#include "app.h"
+#include "tab.h"
+#include "search.h"
 
 #include "mem_debug.h"
 
@@ -34,165 +37,9 @@ static int clamp_double_to_int(double v, int max) {
 #define DATADIR "."
 #endif
 
-/* Forward declaration and struct definitions for tab management */
-typedef struct TabDataStruct TabData;
-
-
-
-/* State tracking for deferred, layout-aware restore */
-typedef struct {
-    TabData *tab;
-    int restore_stage;      /* 0=init, 1=layout_settle, 2=measure, 3=apply, 4=finalize */
-    int settle_attempts;    /* Track how many times we've waited for layout */
-    double target_fraction; /* Saved fraction within page */
-    int target_page;        /* Target page number (0-based) */
-    double target_zoom;     /* Target zoom level */
-    guint source_id;        /* Active idle source id for cancellation */
-} RestoreState;
-
-typedef struct TabDataStruct {
-    PdfrDoc *doc;
-    int n_pages;
-    int cur_page;
-    GtkWidget *drawing;
-    double zoom;
-    GdkRGBA page_color;
-    /* per-document storage */
-    char *current_file;
-    GtkWidget *tab_label;  /* reference to the label widget in the tab */
-    GtkWidget *tab_label_box; /* reference to the label container box */
-    GtkWidget *tab_label_close_btn; /* reference to the close button */
-    /* continuous view widgets */
-    GtkWidget *scrolled;
-    GtkWidget *pages_drawing; /* single drawing area used for both single and continuous views */
-    GtkWidget *h_scrollbar;   /* manual horizontal scrollbar for row view */
-    int layout_mode; /* 0=single-column,1=two-column,2=horizontal */
-    int built_layout_mode; /* layout mode used by the last build_continuous_view (to detect layout-only changes) */
-    double last_zoom; /* used to track when we need to rebuild the continuous view on zoom change */
-    gboolean initial_scroll_pending; /* flag to indicate we need to scroll to the saved page after initial render */
-    RestoreState *pending_restore; /* in-progress idle restore callback */
-    double scroll_offset; /* used to restore scroll position in continuous view */
-    gboolean is_helper; /* TRUE if this tab is in the right (helper) notebook */
-    guint zoom_scroll_source_id; /* pending zoom-scroll idle callback source id */
-    guint h_scrollbar_timer_id;  /* auto-hide timer for horizontal scrollbar */
-    guint scroll_doc_debounce_id; /* debounce timer for document model update on scroll */
-    int zoom_scroll_target_page; /* target page for post-zoom scroll restore */
-    double zoom_scroll_fraction; /* fractional offset within target page */
-    gboolean dragging;          /* drag-to-scroll in progress */
-    double drag_start_x;        /* cursor X at drag start in widget coords */
-    double drag_start_y;        /* cursor Y at drag start in widget coords */
-    double drag_scroll_x;       /* h_scrollbar value at drag start */
-    double drag_scroll_y;       /* vadjustment value at drag start */
-    double *cached_page_widths;  /* raw page widths from pdfr_page_size */
-    double *cached_page_heights; /* raw page heights from pdfr_page_size */
-    double *cached_page_x0;      /* page bounds origin x0 from pdfr_page_size */
-    double *cached_page_y0;      /* page bounds origin y0 from pdfr_page_size */
-    double max_page_h;           /* tallest page height (scaled) for row view sizing */
-    cairo_surface_t **page_cache; /* cached rendered page surfaces (NULL = not cached) */
-    int total_cache_bytes;        /* sum of pixel-buffer bytes across all cached surfaces */
-    PdfrLink **page_links;     /* array[n_pages]: head of PerPageLink list, NULL = not loaded */
-    int page_links_n;       /* size of page_links array (== n_pages) */
-    GdkCursorType last_cursor_type; /* last cursor set on drawing area (to avoid redundant X11 calls) */
-    gint64 last_cursor_check;       /* monotonic time of last link cursor check (for throttling) */
-
-    /* Heuristic page-from-scroll cache */
-    int last_known_page;
-    double last_known_page_start;
-
-    /* Search state */
-    struct { int page; int n_matches; PdfrRect *rects; } *search_results;
-    int search_results_n;
-    int search_results_cap;
-    char *search_text;
-    gboolean search_cancelled;
-    int search_page_idx;       /* next page to search (for batched idle) */
-    guint search_idle_id;
-    guint load_idle_id;        /* pending deferred document-load idle source id */
-    gboolean load_failed;      /* TRUE if the last open attempt for this tab failed */
-} TabData;
-
-typedef enum {
-    SIDEBAR_NONE,
-    SIDEBAR_SESSIONS,
-    SIDEBAR_TOC,
-    SIDEBAR_SETTINGS,
-    SIDEBAR_FILE_INFO
-} SidebarMode;
-
-/* Current window geometry */
-static gint current_width = 1000;
-static gint current_height = 800;
-static gint current_x = -1;
-static gint current_y = -1;
-static gboolean current_maximized = FALSE;
-
-/* Sidebar for sessions, toc and settings */
-static SidebarMode current_sidebar_mode = SIDEBAR_NONE;
-static GtkWidget *sidebar;
-static GtkWidget *sidebar_label;
-static GtkWidget *main_hbox;
-static GtkWidget *content_vbox;
-static GtkWidget *window;
-
-/* Sessions sidebar components */
-static GtkWidget *sessions_container;
-static GtkWidget *sessions_title;
-static GtkWidget *sessions_entry;
-static GtkWidget *sessions_add_btn;
-static GtkWidget *sessions_remove_btn;
-static GtkWidget *sessions_update_btn;
-static GtkWidget *sessions_tree_view;
-static GtkTreeStore *sessions_tree_store;
-static sessions_model_t *sessions_model;
-static gboolean sessions_tree_syncing = FALSE;
-static gchar *last_tree_selection_key = NULL;
-
-/* Debounce ID for saving state after rapid zoom events */
-static guint zoom_save_debounce_id = 0;
-
-/* TOC sidebar components */
-static GtkWidget *toc_container;
-static GtkWidget *toc_tree_view;
-static GtkTreeStore *toc_tree_store;
-static gboolean toc_tree_syncing = FALSE;
-
-/* Last directory used in file chooser */
-static char *last_open_dir = NULL;
-
-/* Tracks the last page selected in the TOC tree to avoid redundant updates */
-static int last_toc_selected_page = -1;
-
-/* Settings sidebar components */
-static GtkWidget *settings_container;
-static GtkWidget *tabbar_combo;
-static GtkWidget *tab_width_spin;
-static GtkWidget *left_color_btn;
-static GtkWidget *right_color_btn;
-
-/* Sidebar toggle buttons */
-static GtkWidget *sessions_btn = NULL;
-static GtkWidget *toc_btn = NULL;
-static GtkWidget *settings_btn = NULL;
-static GtkWidget *file_info_btn = NULL;
-
-/* File info sidebar */
-static GtkWidget *file_info_container;
-static GtkWidget *file_info_name_label;
-static GtkWidget *file_info_path_label;
-static GtkWidget *file_info_size_label;
-static GtkWidget *file_info_pages_label;
-static GtkWidget *search_entry;
-static GtkWidget *search_btn;
-static GtkWidget *search_results_view;
-static GtkListStore *search_results_store;
-static GtkWidget *search_no_results_label;
-
-enum {
-    SEARCH_COL_PAGE = 0,
-    SEARCH_COL_COUNT,
-    SEARCH_COL_LABEL,
-    SEARCH_COL_NCOL
-};
+/* Single application-wide state object. All former module-level statics now
+   live as fields of this struct (defined in app.h). */
+App app;
 
 typedef enum {
     SESSION_COL_LABEL = 0,      // visible text
@@ -214,41 +61,7 @@ typedef enum {
     TOC_COL_COUNT
 } TOCTreeCols;
 
-/* Session models - map from session name to session_model_t */
-static GHashTable *session_models;
-
-/* Document models - map from document URI to document_model_t */
-static GHashTable *document_models = NULL;  // Hash table: URI -> document_model_t
-
-/* Paned/Notebook components */
-static GtkWidget *paned;
-static GtkWidget *right_pane;
-static GtkWidget *left_notebook;
-static GtkWidget *right_notebook;
-static gchar *current_selected_session = NULL;
-static gboolean is_restoring_session_tabs = FALSE;
-
-/* Page jump widget */
-static GtkWidget *page_entry = NULL;
-static GtkWidget *page_total_label = NULL;
-static GtkWidget *page_nav_overlay = NULL;
-static gboolean page_spin_syncing = FALSE;
-
-/* Right notebook page jump widget */
-static GtkWidget *right_page_entry = NULL;
-static GtkWidget *right_page_total_label = NULL;
-static GtkWidget *right_page_nav_overlay = NULL;
-static gboolean right_page_spin_syncing = FALSE;
-
-/* Layout radio buttons (left and right toolbars) */
-static GtkWidget *left_column_btn = NULL;
-static GtkWidget *left_double_column_btn = NULL;
-static GtkWidget *left_row_btn = NULL;
-static GtkWidget *right_column_btn = NULL;
-static GtkWidget *right_double_column_btn = NULL;
-static GtkWidget *right_row_btn = NULL;
-
-static TabData *get_current_left_tab(void);
+TabData *get_current_left_tab(void);
 static TabData *get_current_right_tab(void);
 static void sync_page_widget_from_tab(TabData *tab);
 static void sync_right_page_widget_from_tab(TabData *tab);
@@ -260,7 +73,7 @@ static void on_page_up_right(GtkButton *btn, gpointer user_data);
 static void on_page_down_right(GtkButton *btn, gpointer user_data);
 
 static void cancel_tab_restore(TabData *tab);
-static void cancel_doc_model_debounce(TabData *tab);
+void cancel_doc_model_debounce(TabData *tab);
 static void destroy_tab_data(gpointer data);
 static void apply_layout_to_tab(TabData *tab, int layout);
 static void on_layout_left_toggled(GtkToggleButton *btn, gpointer user_data);
@@ -304,11 +117,11 @@ static gboolean load_tab_deferred_cb(gpointer data);
 static void schedule_tab_deferred_load(TabData *tab);
 static void cancel_tab_deferred_load(TabData *tab);
 static void load_file_into_tab(TabData *tab, const char *filename);
-static void queue_draw(TabData *tab);
+void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
 static void build_continuous_view(TabData *tab);
 static void invalidate_page_cache(TabData *tab);
-static void scroll_to_page(TabData *tab, int page, double target_y);
+void scroll_to_page(TabData *tab, int page, double target_y);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
 static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
@@ -332,14 +145,6 @@ static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
-static void search_clear(void);
-static void search_cancel(TabData *tab);
-static void search_free(TabData *tab);
-static gboolean search_idle(gpointer user_data);
-static void on_search_activated(GtkEntry *entry, gpointer user_data);
-static void on_search_clicked(GtkButton *btn, gpointer user_data);
-static void on_search_row_activated(GtkTreeView *tv, GtkTreePath *path, GtkTreeViewColumn *col, gpointer user_data);
-static void search_highlight_page(TabData *tab, cairo_t *cr, int page_1based, double ox, double oy, double sc);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
@@ -348,14 +153,6 @@ static void start_initial_scroll_restore(TabData *tab, int target_page, double t
 static char* make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 static void restore_document_model_to_tab(TabData *tab);
 static void refresh_tab_label(TabData *tab);
-
-/* Theme-aware icon color: dark theme uses yellow, light theme uses dark brown */
-static gboolean is_dark_theme = TRUE;
-
-/* User override to force dark theme regardless of system */
-static gboolean keep_dark_theme = FALSE;
-static GtkWidget *keep_dark_check = NULL;
-static GtkCssProvider *dark_css_provider = NULL;
 
 /* Detect whether the system theme is dark by checking gtk-application-prefer-dark-theme
    and gtk-theme-name for keywords. */
@@ -391,7 +188,7 @@ static GtkWidget* create_toolbar_icon(const char *name) {
     }
     g_free(path);
 
-    const char *target_color = is_dark_theme ? "#FFFFAD" : "#141400";
+    const char *target_color = app.is_dark_theme ? "#FFFFAD" : "#141400";
 
     /* Recolor all #XXXXXX values in the SVG to match the theme */
     char *p = svg_content;
@@ -437,25 +234,25 @@ static gchar* format_file_size(goffset size) {
 
 static void update_file_info_labels(TabData *tab) {
     search_clear();
-    if (search_entry) {
-        gtk_entry_set_text(GTK_ENTRY(search_entry), "");
+    if (app.search_entry) {
+        gtk_entry_set_text(GTK_ENTRY(app.search_entry), "");
     }
     if (!tab || !tab->current_file) {
-        gtk_label_set_text(GTK_LABEL(file_info_name_label), "Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(file_info_path_label), "Path: (none)");
-        gtk_label_set_text(GTK_LABEL(file_info_size_label), "Size: (none)");
-        gtk_label_set_text(GTK_LABEL(file_info_pages_label), "Pages: (none)");
+        gtk_label_set_text(GTK_LABEL(app.file_info_name_label), "Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(app.file_info_path_label), "Path: (none)");
+        gtk_label_set_text(GTK_LABEL(app.file_info_size_label), "Size: (none)");
+        gtk_label_set_text(GTK_LABEL(app.file_info_pages_label), "Pages: (none)");
         return;
     }
 
     gchar *basename = g_path_get_basename(tab->current_file);
     gchar *name_text = g_strdup_printf("Name: %s", basename);
     g_free(basename);
-    gtk_label_set_text(GTK_LABEL(file_info_name_label), name_text);
+    gtk_label_set_text(GTK_LABEL(app.file_info_name_label), name_text);
     g_free(name_text);
 
     gchar *path_text = g_strdup_printf("Path: %s", tab->current_file);
-    gtk_label_set_text(GTK_LABEL(file_info_path_label), path_text);
+    gtk_label_set_text(GTK_LABEL(app.file_info_path_label), path_text);
     g_free(path_text);
 
     GFile *gf = g_file_new_for_path(tab->current_file);
@@ -465,22 +262,22 @@ static void update_file_info_labels(TabData *tab) {
         goffset size = g_file_info_get_size(info);
         gchar *size_str = format_file_size(size);
         gchar *size_text = g_strdup_printf("Size: %s", size_str);
-        gtk_label_set_text(GTK_LABEL(file_info_size_label), size_text);
+        gtk_label_set_text(GTK_LABEL(app.file_info_size_label), size_text);
         g_free(size_text);
         g_free(size_str);
         g_object_unref(info);
     } else {
-        gtk_label_set_text(GTK_LABEL(file_info_size_label), "Size: Unknown");
+        gtk_label_set_text(GTK_LABEL(app.file_info_size_label), "Size: Unknown");
     }
     g_object_unref(gf);
 
     if (tab->doc) {
         int n_pages = pdfr_count_pages(tab->doc);
         gchar *pages_text = g_strdup_printf("Pages: %d", n_pages);
-        gtk_label_set_text(GTK_LABEL(file_info_pages_label), pages_text);
+        gtk_label_set_text(GTK_LABEL(app.file_info_pages_label), pages_text);
         g_free(pages_text);
     } else {
-        gtk_label_set_text(GTK_LABEL(file_info_pages_label), "Pages: N/A");
+        gtk_label_set_text(GTK_LABEL(app.file_info_pages_label), "Pages: N/A");
     }
 }
 
@@ -519,15 +316,15 @@ static void recolor_toolbar_children(GtkWidget *parent) {
 
 /* Recolor all toolbar icons */
 static void recolor_all_toolbars(void) {
-    if (main_hbox) {
-        GList *children = gtk_container_get_children(GTK_CONTAINER(main_hbox));
+    if (app.main_hbox) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(app.main_hbox));
         for (GList *iter = children; iter; iter = iter->next) {
             recolor_toolbar_children(GTK_WIDGET(iter->data));
         }
         g_list_free(children);
     }
-    if (right_pane) {
-        GList *children = gtk_container_get_children(GTK_CONTAINER(right_pane));
+    if (app.right_pane) {
+        GList *children = gtk_container_get_children(GTK_CONTAINER(app.right_pane));
         for (GList *iter = children; iter; iter = iter->next) {
             recolor_toolbar_children(GTK_WIDGET(iter->data));
         }
@@ -542,14 +339,14 @@ static void on_theme_changed(GObject *gobject, GParamSpec *pspec, gpointer user_
     (void)gobject;
     (void)pspec;
     (void)user_data;
-    if (keep_dark_theme) {
-        is_dark_theme = TRUE;
+    if (app.keep_dark_theme) {
+        app.is_dark_theme = TRUE;
         apply_dark_css(TRUE);
     } else {
         apply_dark_css(FALSE);
-        is_dark_theme = detect_system_dark_theme();
-        if (sessions_model)
-            sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+        app.is_dark_theme = detect_system_dark_theme();
+        if (app.sessions_model)
+            sessions_model_set_theme(app.sessions_model, app.is_dark_theme ? "dark" : "light");
     }
     recolor_all_toolbars();
 }
@@ -562,8 +359,8 @@ static void apply_dark_css(gboolean apply) {
     GdkScreen *screen = gdk_screen_get_default();
     if (!screen) return;
     if (apply) {
-        if (!dark_css_provider) {
-            dark_css_provider = gtk_css_provider_new();
+        if (!app.dark_css_provider) {
+            app.dark_css_provider = gtk_css_provider_new();
             const char *css =
                 "window, window.background, box, notebook, scrolledwindow,\n"
                 "popover, popover.background, menubar, menu, .sidebar { background: #2e2e2e; }\n"
@@ -594,18 +391,18 @@ static void apply_dark_css(gboolean apply) {
                 "menu menuitem:hover { background: #3584e4; }\n"
                 "dialog .background { background: #2e2e2e; }\n";
             GError *css_err = NULL;
-            if (!gtk_css_provider_load_from_data(dark_css_provider, css, -1, &css_err)) {
+            if (!gtk_css_provider_load_from_data(app.dark_css_provider, css, -1, &css_err)) {
                 LOG_ERROR("Failed to load dark theme CSS: %s", css_err->message);
                 g_clear_error(&css_err);
             }
         }
         gtk_style_context_add_provider_for_screen(screen,
-            GTK_STYLE_PROVIDER(dark_css_provider),
+            GTK_STYLE_PROVIDER(app.dark_css_provider),
             GTK_STYLE_PROVIDER_PRIORITY_APPLICATION);
     } else {
-        if (dark_css_provider) {
+        if (app.dark_css_provider) {
             gtk_style_context_remove_provider_for_screen(screen,
-                GTK_STYLE_PROVIDER(dark_css_provider));
+                GTK_STYLE_PROVIDER(app.dark_css_provider));
         }
     }
 }
@@ -671,21 +468,21 @@ static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event,
     (void)user_data;
 
     // Update current geometry
-    current_width = event->width;
-    current_height = event->height;
-    current_x = event->x;
-    current_y = event->y;
-    current_maximized = gtk_window_is_maximized(GTK_WINDOW(widget));
+    app.current_width = event->width;
+    app.current_height = event->height;
+    app.current_x = event->x;
+    app.current_y = event->y;
+    app.current_maximized = gtk_window_is_maximized(GTK_WINDOW(widget));
 
     return FALSE; // Allow further processing
 }
 
 static void update_window_title_for_session(const char *session_name) {
-    if (!window) return;
+    if (!app.window) return;
 
     const char *name = (session_name && *session_name) ? session_name : "Default";
     gchar *title = g_strdup_printf("Siters - %s", name);
-    gtk_window_set_title(GTK_WINDOW(window), title);
+    gtk_window_set_title(GTK_WINDOW(app.window), title);
     g_free(title);
 }
 
@@ -746,8 +543,8 @@ static document_model_t* json_parse_document(JsonObject *obj) {
 
 void save_state(void) {
     // Save current session's open tabs before saving state
-    if (current_selected_session) {
-        save_open_tabs_for_session(current_selected_session);
+    if (app.current_selected_session) {
+        save_open_tabs_for_session(app.current_selected_session);
     }
 
     const gchar *cfg_override = g_getenv("SITERS_CONFIG_DIR");
@@ -763,40 +560,40 @@ void save_state(void) {
 
     json_builder_set_member_name(builder, "window");
     json_builder_begin_object(builder);
-    if (window) {
+    if (app.window) {
         json_builder_set_member_name(builder, "width");
-        json_builder_add_int_value(builder, current_width);
+        json_builder_add_int_value(builder, app.current_width);
         json_builder_set_member_name(builder, "height");
-        json_builder_add_int_value(builder, current_height);
+        json_builder_add_int_value(builder, app.current_height);
         json_builder_set_member_name(builder, "x");
-        json_builder_add_int_value(builder, current_x);
+        json_builder_add_int_value(builder, app.current_x);
         json_builder_set_member_name(builder, "y");
-        json_builder_add_int_value(builder, current_y);
+        json_builder_add_int_value(builder, app.current_y);
         json_builder_set_member_name(builder, "maximized");
-        json_builder_add_boolean_value(builder, current_maximized);
+        json_builder_add_boolean_value(builder, app.current_maximized);
     }
-    if (sessions_model) {
+    if (app.sessions_model) {
         json_builder_set_member_name(builder, "tabbar_position");
-        json_builder_add_string_value(builder, sessions_model_get_tabbar_position(sessions_model));
+        json_builder_add_string_value(builder, sessions_model_get_tabbar_position(app.sessions_model));
         json_builder_set_member_name(builder, "tab_width");
-        json_builder_add_int_value(builder, sessions_model_get_tab_width(sessions_model));
+        json_builder_add_int_value(builder, sessions_model_get_tab_width(app.sessions_model));
         json_builder_set_member_name(builder, "theme");
-        json_builder_add_string_value(builder, sessions_model_get_theme(sessions_model));
+        json_builder_add_string_value(builder, sessions_model_get_theme(app.sessions_model));
         json_builder_set_member_name(builder, "keep_dark");
-        json_builder_add_boolean_value(builder, sessions_model_get_keep_dark(sessions_model));
+        json_builder_add_boolean_value(builder, sessions_model_get_keep_dark(app.sessions_model));
     }
 
-    if (last_open_dir) {
+    if (app.last_open_dir) {
         json_builder_set_member_name(builder, "last_open_dir");
-        json_builder_add_string_value(builder, last_open_dir);
+        json_builder_add_string_value(builder, app.last_open_dir);
     }
 
     json_builder_end_object(builder);
 
     json_builder_set_member_name(builder, "sessions");
     json_builder_begin_object(builder);
-    if (sessions_model) {
-        const GList *session_names = sessions_model_get_session_names(sessions_model);
+    if (app.sessions_model) {
+        const GList *session_names = sessions_model_get_session_names(app.sessions_model);
         if (session_names) {
             json_builder_set_member_name(builder, "names");
             json_builder_begin_array(builder);
@@ -804,7 +601,7 @@ void save_state(void) {
                 json_builder_add_string_value(builder, (const char *)iter->data);
             json_builder_end_array(builder);
 
-            const char *last_session = sessions_model_get_last_open_session(sessions_model);
+            const char *last_session = sessions_model_get_last_open_session(app.sessions_model);
             if (last_session) {
                 json_builder_set_member_name(builder, "last_open_session");
                 json_builder_add_string_value(builder, last_session);
@@ -817,13 +614,13 @@ void save_state(void) {
                 json_builder_set_member_name(builder, session_name);
                 json_builder_begin_object(builder);
 
-                session_model_t *session = g_hash_table_lookup(session_models, session_name);
+                session_model_t *session = g_hash_table_lookup(app.session_models, session_name);
                 if (session) {
                     json_builder_set_member_name(builder, "documents");
-                    json_emit_session_docs(builder, session_model_get_document_urls(session), "left", document_models, session_name);
+                    json_emit_session_docs(builder, session_model_get_document_urls(session), "left", app.document_models, session_name);
 
                     json_builder_set_member_name(builder, "helper_documents");
-                    json_emit_session_docs(builder, session_model_get_helper_document_urls(session), "right", document_models, session_name);
+                    json_emit_session_docs(builder, session_model_get_helper_document_urls(session), "right", app.document_models, session_name);
 
                     const char *lr = session_model_get_last_read_document(session);
                     json_builder_set_member_name(builder, "last_read_document");
@@ -908,12 +705,12 @@ static void load_session_doc_array(JsonArray *arr, session_model_t *session, con
 
         document_model_t *dm = json_parse_document(obj);
         if (dm) {
-            if (!document_models) {
-                document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+            if (!app.document_models) {
+                app.document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                        (GDestroyNotify)document_model_free);
             }
             char *key = make_document_key(session_name, uri, is_helper);
-            g_hash_table_insert(document_models, key, dm);
+            g_hash_table_insert(app.document_models, key, dm);
         }
     }
 }
@@ -946,50 +743,50 @@ void load_state(void) {
     JsonObject *root_obj = json_node_get_object(root);
 
     JsonObject *win = json_object_get_object_member(root_obj, "window");
-    if (win && window) {
+    if (win && app.window) {
         int w = (int)json_object_get_int_member_with_default(win, "width", 1000);
         int h = (int)json_object_get_int_member_with_default(win, "height", 800);
         int x = (int)json_object_get_int_member_with_default(win, "x", -1);
         int y = (int)json_object_get_int_member_with_default(win, "y", -1);
         gboolean max = json_object_get_boolean_member_with_default(win, "maximized", FALSE);
 
-        gtk_window_set_default_size(GTK_WINDOW(window), w, h);
+        gtk_window_set_default_size(GTK_WINDOW(app.window), w, h);
         if (x >= 0 && y >= 0)
-            gtk_window_move(GTK_WINDOW(window), x, y);
+            gtk_window_move(GTK_WINDOW(app.window), x, y);
         if (max)
-            gtk_window_maximize(GTK_WINDOW(window));
+            gtk_window_maximize(GTK_WINDOW(app.window));
 
-        current_width = w;
-        current_height = h;
-        current_x = x;
-        current_y = y;
-        current_maximized = max;
+        app.current_width = w;
+        app.current_height = h;
+        app.current_x = x;
+        app.current_y = y;
+        app.current_maximized = max;
     }
 
-    g_free(last_open_dir);
-    last_open_dir = g_strdup(json_object_get_string_member_with_default(root_obj, "last_open_dir", NULL));
+    g_free(app.last_open_dir);
+    app.last_open_dir = g_strdup(json_object_get_string_member_with_default(root_obj, "last_open_dir", NULL));
 
-    if (sessions_model && win) {
+    if (app.sessions_model && win) {
         const char *pos = json_object_get_string_member_with_default(win, "tabbar_position", "top");
-        sessions_model_set_tabbar_position(sessions_model, pos);
+        sessions_model_set_tabbar_position(app.sessions_model, pos);
         int tw = (int)json_object_get_int_member_with_default(win, "tab_width", 100);
-        sessions_model_set_tab_width(sessions_model, tw);
+        sessions_model_set_tab_width(app.sessions_model, tw);
         /* Theme is auto-detected in create_main_window; always keep the model
            in sync with auto-detection so create_toolbar_icon stays correct. */
-        sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+        sessions_model_set_theme(app.sessions_model, app.is_dark_theme ? "dark" : "light");
 
         /* Restore keep_dark override */
         gboolean saved_keep = json_object_get_boolean_member_with_default(win, "keep_dark", FALSE);
-        sessions_model_set_keep_dark(sessions_model, saved_keep);
-        keep_dark_theme = saved_keep;
-        if (keep_dark_check) {
-            g_signal_handlers_block_by_func(keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
-            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(keep_dark_check), saved_keep);
-            g_signal_handlers_unblock_by_func(keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
+        sessions_model_set_keep_dark(app.sessions_model, saved_keep);
+        app.keep_dark_theme = saved_keep;
+        if (app.keep_dark_check) {
+            g_signal_handlers_block_by_func(app.keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
+            gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.keep_dark_check), saved_keep);
+            g_signal_handlers_unblock_by_func(app.keep_dark_check, G_CALLBACK(on_keep_dark_toggled), NULL);
         }
         if (saved_keep) {
-            is_dark_theme = TRUE;
-            sessions_model_set_theme(sessions_model, "dark");
+            app.is_dark_theme = TRUE;
+            sessions_model_set_theme(app.sessions_model, "dark");
             apply_dark_css(TRUE);
             recolor_all_toolbars();
         }
@@ -997,8 +794,8 @@ void load_state(void) {
 
     JsonObject *sessions_obj = json_object_get_object_member(root_obj, "sessions");
     if (sessions_obj) {
-        if (!sessions_model)
-            sessions_model = sessions_model_new();
+        if (!app.sessions_model)
+            app.sessions_model = sessions_model_new();
 
         JsonArray *names_arr = json_object_get_array_member(sessions_obj, "names");
         if (names_arr) {
@@ -1006,7 +803,7 @@ void load_state(void) {
             for (guint i = 0; i < nlen; i++) {
                 const char *name = json_array_get_string_element(names_arr, i);
                 if (!name || !*name) continue;
-                sessions_model_add_session_name(sessions_model, name);
+                sessions_model_add_session_name(app.sessions_model, name);
 
                 session_model_t *session = session_model_new();
                 session_model_set_session_name(session, name);
@@ -1028,31 +825,31 @@ void load_state(void) {
                     }
                 }
 
-                g_hash_table_insert(session_models, g_strdup(name), session);
+                g_hash_table_insert(app.session_models, g_strdup(name), session);
             }
         }
 
         const char *last_session = json_object_get_string_member_with_default(sessions_obj, "last_open_session", NULL);
         if (last_session && *last_session) {
-            sessions_model_set_last_open_session(sessions_model, last_session);
+            sessions_model_set_last_open_session(app.sessions_model, last_session);
         } else {
-            sessions_model_set_last_open_session(sessions_model, "Default");
+            sessions_model_set_last_open_session(app.sessions_model, "Default");
         }
     }
 
     populate_sessions_treeview();
 
-    if (sessions_model && current_selected_session) {
-        const char *loaded_session = sessions_model_get_last_open_session(sessions_model);
-        if (loaded_session && strcmp(loaded_session, current_selected_session) != 0) {
+    if (app.sessions_model && app.current_selected_session) {
+        const char *loaded_session = sessions_model_get_last_open_session(app.sessions_model);
+        if (loaded_session && strcmp(loaded_session, app.current_selected_session) != 0) {
             // Update current_selected_session and restore open tabs for the loaded session
-            g_free(current_selected_session);
-            current_selected_session = g_strdup(loaded_session);
+            g_free(app.current_selected_session);
+            app.current_selected_session = g_strdup(loaded_session);
             restore_open_tabs_for_session(loaded_session);
             sync_left_layout_buttons(get_current_left_tab());
             sync_right_layout_buttons(get_current_right_tab());
             sync_page_widget_from_tab(get_current_left_tab());
-            update_window_title_for_session(current_selected_session);
+            update_window_title_for_session(app.current_selected_session);
         } else if (loaded_session) {
             restore_open_tabs_for_session(loaded_session);
             sync_left_layout_buttons(get_current_left_tab());
@@ -1061,49 +858,49 @@ void load_state(void) {
         }
     }
 
-    if (sessions_model) {
-        apply_tabbar_position(sessions_model_get_tabbar_position(sessions_model));
-        apply_tab_width(sessions_model_get_tab_width(sessions_model));
+    if (app.sessions_model) {
+        apply_tabbar_position(sessions_model_get_tabbar_position(app.sessions_model));
+        apply_tab_width(sessions_model_get_tab_width(app.sessions_model));
         /* Sync settings UI widgets with loaded values */
-        if (tabbar_combo) {
-            const char *pos = sessions_model_get_tabbar_position(sessions_model);
+        if (app.tabbar_combo) {
+            const char *pos = sessions_model_get_tabbar_position(app.sessions_model);
             if (g_strcmp0(pos, "left") == 0)
-                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 0);
+                gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 0);
             else if (g_strcmp0(pos, "right") == 0)
-                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 2);
+                gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 2);
             else
-                gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+                gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 1);
         }
-        if (tab_width_spin)
-            gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin),
-                                       sessions_model_get_tab_width(sessions_model));
+        if (app.tab_width_spin)
+            gtk_spin_button_set_value(GTK_SPIN_BUTTON(app.tab_width_spin),
+                                       sessions_model_get_tab_width(app.sessions_model));
 
         /* Sync color buttons with current session's saved colors */
         session_model_t *cur = get_current_session_model();
         if (cur) {
             const char *pc = session_model_get_page_color(cur);
             const char *hpc = session_model_get_helper_page_color(cur);
-            if (left_color_btn) {
-                g_signal_handlers_block_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+            if (app.left_color_btn) {
+                g_signal_handlers_block_by_func(app.left_color_btn, G_CALLBACK(on_left_color_set), NULL);
                 if (pc) {
                     GdkRGBA c;
                     if (gdk_rgba_parse(&c, pc))
-                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(left_color_btn), &c);
+                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app.left_color_btn), &c);
                 }
-                g_signal_handlers_unblock_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+                g_signal_handlers_unblock_by_func(app.left_color_btn, G_CALLBACK(on_left_color_set), NULL);
             }
-            if (right_color_btn) {
-                g_signal_handlers_block_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+            if (app.right_color_btn) {
+                g_signal_handlers_block_by_func(app.right_color_btn, G_CALLBACK(on_right_color_set), NULL);
                 if (hpc) {
                     GdkRGBA c;
                     if (gdk_rgba_parse(&c, hpc))
-                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(right_color_btn), &c);
+                        gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app.right_color_btn), &c);
                 }
-                g_signal_handlers_unblock_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+                g_signal_handlers_unblock_by_func(app.right_color_btn, G_CALLBACK(on_right_color_set), NULL);
             }
             /* Re-apply colors to all tabs */
-            apply_page_color_to_notebook(left_notebook, pc ? pc : "#FFFFFF");
-            apply_page_color_to_notebook(right_notebook, hpc ? hpc : "#FFFFFF");
+            apply_page_color_to_notebook(app.left_notebook, pc ? pc : "#FFFFFF");
+            apply_page_color_to_notebook(app.right_notebook, hpc ? hpc : "#FFFFFF");
         }
     }
 
@@ -1231,7 +1028,7 @@ static void invalidate_page_cache(TabData *tab) {
         cache_evict_idx(tab, i);
 }
 
-static gboolean ensure_tab_doc_loaded(TabData *tab) {
+gboolean ensure_tab_doc_loaded(TabData *tab) {
     if (!tab || !tab->current_file) return FALSE;
     if (tab->doc) {
         if (tab->load_failed) {
@@ -1276,21 +1073,21 @@ static char* make_document_key(const char *session_name, const char *uri, gboole
     return g_strdup_printf("%s:%s:%s", session_name ? session_name : "Unknown", side, uri);
 }
 
-static void update_document_model_from_tab(TabData *tab) {
-    if (!tab || !tab->current_file || !document_models) return;
+void update_document_model_from_tab(TabData *tab) {
+    if (!tab || !tab->current_file || !app.document_models) return;
     if (!tab->cached_page_widths) return;
 
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
+    char *key = make_document_key(app.current_selected_session, uri, tab->is_helper);
 
     // Get or create document model
-    document_model_t *doc_model = g_hash_table_lookup(document_models, key);
+    document_model_t *doc_model = g_hash_table_lookup(app.document_models, key);
     if (!doc_model) {
         doc_model = document_model_new();
         document_model_set_url(doc_model, uri);
-        g_hash_table_insert(document_models, key, doc_model);
+        g_hash_table_insert(app.document_models, key, doc_model);
     } else {
         g_free(key);
     }
@@ -1360,13 +1157,13 @@ static void update_document_model_from_tab(TabData *tab) {
 }
 
 static void restore_document_model_to_tab(TabData *tab) {
-    if (!tab || !tab->current_file || !document_models) return;
+    if (!tab || !tab->current_file || !app.document_models) return;
 
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
-    document_model_t *doc_model = g_hash_table_lookup(document_models, key);
+    char *key = make_document_key(app.current_selected_session, uri, tab->is_helper);
+    document_model_t *doc_model = g_hash_table_lookup(app.document_models, key);
     g_free(key);
     if (doc_model) {
         int saved_page = document_model_get_current_page(doc_model);
@@ -1396,22 +1193,22 @@ static void restore_document_model_to_tab(TabData *tab) {
 static void switch_to_session(const char *session_name) {
     if (!session_name || !*session_name) return;
 
-    if (current_selected_session && g_strcmp0(current_selected_session, session_name) == 0) {
+    if (app.current_selected_session && g_strcmp0(app.current_selected_session, session_name) == 0) {
         return;
     }
 
-    if (current_selected_session) {
-        save_open_tabs_for_session(current_selected_session);
-        g_free(current_selected_session);
+    if (app.current_selected_session) {
+        save_open_tabs_for_session(app.current_selected_session);
+        g_free(app.current_selected_session);
     }
 
-    current_selected_session = g_strdup(session_name);
+    app.current_selected_session = g_strdup(session_name);
     restore_open_tabs_for_session(session_name);
     sync_page_widget_from_tab(get_current_left_tab());
-    update_window_title_for_session(current_selected_session);
+    update_window_title_for_session(app.current_selected_session);
 
-    if (sessions_model) {
-        sessions_model_set_last_open_session(sessions_model, session_name);
+    if (app.sessions_model) {
+        sessions_model_set_last_open_session(app.sessions_model, session_name);
     }
 
     /* Sync color buttons to switched session's colors */
@@ -1420,51 +1217,51 @@ static void switch_to_session(const char *session_name) {
         const char *pc = session_model_get_page_color(session);
         const char *hpc = session_model_get_helper_page_color(session);
 
-        if (left_color_btn) {
-            g_signal_handlers_block_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+        if (app.left_color_btn) {
+            g_signal_handlers_block_by_func(app.left_color_btn, G_CALLBACK(on_left_color_set), NULL);
             if (pc) {
                 GdkRGBA c;
                 if (gdk_rgba_parse(&c, pc))
-                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(left_color_btn), &c);
+                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app.left_color_btn), &c);
             }
-            g_signal_handlers_unblock_by_func(left_color_btn, G_CALLBACK(on_left_color_set), NULL);
-            apply_page_color_to_notebook(left_notebook, pc ? pc : "#FFFFFF");
+            g_signal_handlers_unblock_by_func(app.left_color_btn, G_CALLBACK(on_left_color_set), NULL);
+            apply_page_color_to_notebook(app.left_notebook, pc ? pc : "#FFFFFF");
         }
-        if (right_color_btn) {
-            g_signal_handlers_block_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+        if (app.right_color_btn) {
+            g_signal_handlers_block_by_func(app.right_color_btn, G_CALLBACK(on_right_color_set), NULL);
             if (hpc) {
                 GdkRGBA c;
                 if (gdk_rgba_parse(&c, hpc))
-                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(right_color_btn), &c);
+                    gtk_color_chooser_set_rgba(GTK_COLOR_CHOOSER(app.right_color_btn), &c);
             }
-            g_signal_handlers_unblock_by_func(right_color_btn, G_CALLBACK(on_right_color_set), NULL);
-            apply_page_color_to_notebook(right_notebook, hpc ? hpc : "#FFFFFF");
+            g_signal_handlers_unblock_by_func(app.right_color_btn, G_CALLBACK(on_right_color_set), NULL);
+            apply_page_color_to_notebook(app.right_notebook, hpc ? hpc : "#FFFFFF");
         }
     }
 }
 
 static void reset_sessions_tree_selection_guard(void) {
-    g_clear_pointer(&last_tree_selection_key, g_free);
+    g_clear_pointer(&app.last_tree_selection_key, g_free);
 }
 
 void populate_sessions_treeview(void) {
-    if (!sessions_tree_store || !sessions_model) return;
+    if (!app.sessions_tree_store || !app.sessions_model) return;
 
-    sessions_tree_syncing = TRUE;
+    app.sessions_tree_syncing = TRUE;
     reset_sessions_tree_selection_guard();
 
     /* Save expanded session rows before clearing */
     GPtrArray *expanded = g_ptr_array_new_with_free_func(g_free);
     GtkTreeIter iter;
-    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &iter)) {
         do {
             char *name = NULL;
-            gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+            gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &iter,
                                SESSION_COL_SESSION_NAME, &name, -1);
             if (name) {
-                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &iter);
                 if (path) {
-                    if (gtk_tree_view_row_expanded(GTK_TREE_VIEW(sessions_tree_view), path)) {
+                    if (gtk_tree_view_row_expanded(GTK_TREE_VIEW(app.sessions_tree_view), path)) {
                         g_ptr_array_add(expanded, name);
                     } else {
                         g_free(name);
@@ -1474,19 +1271,19 @@ void populate_sessions_treeview(void) {
                     g_free(name);
                 }
             }
-        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &iter));
     }
 
-    gtk_tree_store_clear(sessions_tree_store);
+    gtk_tree_store_clear(app.sessions_tree_store);
 
-    const GList *session_names = sessions_model_get_session_names(sessions_model);
+    const GList *session_names = sessions_model_get_session_names(app.sessions_model);
     for (const GList *s = session_names; s; s = s->next) {
         const char *session_name = (const char *)s->data;
         GtkTreeIter parent;
 
-        gtk_tree_store_append(sessions_tree_store, &parent, NULL);
+        gtk_tree_store_append(app.sessions_tree_store, &parent, NULL);
         gtk_tree_store_set(
-            sessions_tree_store, &parent,
+            app.sessions_tree_store, &parent,
             SESSION_COL_LABEL, session_name,
             SESSION_COL_ROW_KIND, SESSION_ROW_SESSION,
             SESSION_COL_SESSION_NAME, session_name,
@@ -1494,7 +1291,7 @@ void populate_sessions_treeview(void) {
             -1
         );
 
-        session_model_t *session = g_hash_table_lookup(session_models, session_name);
+        session_model_t *session = g_hash_table_lookup(app.session_models, session_name);
         if (!session) continue;
 
         // ONLY document_urls (left notebook docs), no helper_document_urls
@@ -1506,9 +1303,9 @@ void populate_sessions_treeview(void) {
             char *filename = g_filename_from_uri(uri, NULL, NULL);
             char *basename = filename ? g_path_get_basename(filename) : g_strdup(uri);
 
-            gtk_tree_store_append(sessions_tree_store, &child, &parent);
+            gtk_tree_store_append(app.sessions_tree_store, &child, &parent);
             gtk_tree_store_set(
-                sessions_tree_store, &child,
+                app.sessions_tree_store, &child,
                 SESSION_COL_LABEL, basename,
                 SESSION_COL_ROW_KIND, SESSION_ROW_FILE,
                 SESSION_COL_SESSION_NAME, session_name,
@@ -1525,45 +1322,45 @@ void populate_sessions_treeview(void) {
     for (guint i = 0; i < expanded->len; i++) {
         const char *name = g_ptr_array_index(expanded, i);
         GtkTreeIter row;
-        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &row)) {
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &row)) {
             do {
                 char *row_name = NULL;
-                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &row,
+                gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &row,
                                    SESSION_COL_SESSION_NAME, &row_name, -1);
                 if (row_name && strcmp(row_name, name) == 0) {
-                    GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &row);
+                    GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &row);
                     if (path) {
-                        gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                        gtk_tree_view_expand_row(GTK_TREE_VIEW(app.sessions_tree_view), path, FALSE);
                         gtk_tree_path_free(path);
                     }
                     g_free(row_name);
                     break;
                 }
                 g_free(row_name);
-            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &row));
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &row));
         }
     }
     g_ptr_array_unref(expanded);
 
     /* Auto-select current session + document when sidebar is visible */
-    if (current_sidebar_mode == SIDEBAR_SESSIONS && current_selected_session) {
+    if (app.current_sidebar_mode == SIDEBAR_SESSIONS && app.current_selected_session) {
         reset_sessions_tree_selection_guard();
-        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
         GtkTreeIter iter;
-        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &iter)) {
             do {
                 gchar *name = NULL;
-                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &iter,
                                    SESSION_COL_SESSION_NAME, &name, -1);
                 if (!name) continue;
-                if (g_strcmp0(name, current_selected_session) != 0) {
+                if (g_strcmp0(name, app.current_selected_session) != 0) {
                     g_free(name);
                     continue;
                 }
-                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &iter);
                 if (path) {
                     gtk_tree_selection_select_path(sel, path);
-                    gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                    gtk_tree_view_expand_row(GTK_TREE_VIEW(app.sessions_tree_view), path, FALSE);
                     gtk_tree_path_free(path);
                 }
                 TabData *tab = get_current_left_tab();
@@ -1571,13 +1368,13 @@ void populate_sessions_treeview(void) {
                     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
                     if (uri) {
                         GtkTreeIter child;
-                        if (gtk_tree_model_iter_children(GTK_TREE_MODEL(sessions_tree_store), &child, &iter)) {
+                        if (gtk_tree_model_iter_children(GTK_TREE_MODEL(app.sessions_tree_store), &child, &iter)) {
                             do {
                                 gchar *doc_uri = NULL;
-                                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &child,
+                                gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &child,
                                                    SESSION_COL_DOC_URI, &doc_uri, -1);
                                 if (doc_uri && g_strcmp0(doc_uri, uri) == 0) {
-                                    GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &child);
+                                    GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &child);
                                     if (cp) {
                                         gtk_tree_selection_select_path(sel, cp);
                                         gtk_tree_path_free(cp);
@@ -1586,18 +1383,18 @@ void populate_sessions_treeview(void) {
                                     break;
                                 }
                                 g_free(doc_uri);
-                            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &child));
+                            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &child));
                         }
                         g_free(uri);
                         }
                     }
                 g_free(name);
                 break;
-            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &iter));
         }
     }
 
-    sessions_tree_syncing = FALSE;
+    app.sessions_tree_syncing = FALSE;
 }
 
 /* Helper: Determine current page from scroll position */
@@ -1897,20 +1694,20 @@ static void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data) {
     GtkWidget *btn = GTK_WIDGET(button);
     if (active) {
         gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("title-bar-on"));
-        gtk_window_set_decorated(GTK_WINDOW(window), TRUE);
+        gtk_window_set_decorated(GTK_WINDOW(app.window), TRUE);
     } else {
         gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("title-bar-off"));
-        gboolean was_maximized = gtk_window_is_maximized(GTK_WINDOW(window));
+        gboolean was_maximized = gtk_window_is_maximized(GTK_WINDOW(app.window));
         if (was_maximized) {
-            gtk_window_unmaximize(GTK_WINDOW(window));
+            gtk_window_unmaximize(GTK_WINDOW(app.window));
         }
-        gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
+        gtk_window_set_decorated(GTK_WINDOW(app.window), FALSE);
         if (was_maximized) {
-            gtk_window_maximize(GTK_WINDOW(window));
+            gtk_window_maximize(GTK_WINDOW(app.window));
         }
     }
     // Force layout update after changing decoration
-    gtk_widget_queue_resize(window);
+    gtk_widget_queue_resize(app.window);
 }
 
 static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
@@ -1920,52 +1717,50 @@ static void on_helper_toggle(GtkToggleButton *button, gpointer user_data) {
 
     if (active) {
         gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("sidebar-helper-on"));
-        if (right_pane) {
-            gtk_widget_show_all(GTK_WIDGET(right_pane));
-            set_right_notebook_session(current_selected_session ? current_selected_session : "Default");
+        if (app.right_pane) {
+            gtk_widget_show_all(GTK_WIDGET(app.right_pane));
+            set_right_notebook_session(app.current_selected_session ? app.current_selected_session : "Default");
             sync_right_layout_buttons(get_current_right_tab());
         }
     } else {
         // Save current helper tabs before hiding
-        if (current_selected_session) {
-            save_open_tabs_for_session(current_selected_session);
+        if (app.current_selected_session) {
+            save_open_tabs_for_session(app.current_selected_session);
         }
         gtk_button_set_image(GTK_BUTTON(btn), create_toolbar_icon("sidebar-helper-off"));
-        if (right_pane) {
-            gtk_widget_hide(GTK_WIDGET(right_pane));
+        if (app.right_pane) {
+            gtk_widget_hide(GTK_WIDGET(app.right_pane));
         }
     }
 }
 
 static void on_minimize_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
-    GtkWindow *window = GTK_WINDOW(user_data);
-    gtk_window_iconify(window);
+    GtkWindow *win = GTK_WINDOW(user_data);
+    gtk_window_iconify(win);
 }
 
-static guint maximize_pending_id = 0;
-
 static gboolean defer_maximize_toggle(gpointer user_data) {
-    GtkWindow *window = GTK_WINDOW(user_data);
-    maximize_pending_id = 0;
-    if (window) {
-        if (gtk_window_is_maximized(window))
-            gtk_window_unmaximize(window);
+    GtkWindow *win = GTK_WINDOW(user_data);
+    app.maximize_pending_id = 0;
+    if (win) {
+        if (gtk_window_is_maximized(win))
+            gtk_window_unmaximize(win);
         else
-            gtk_window_maximize(window);
-        if (left_notebook) gtk_widget_queue_resize(left_notebook);
-        if (right_notebook) gtk_widget_queue_resize(right_notebook);
+            gtk_window_maximize(win);
+        if (app.left_notebook) gtk_widget_queue_resize(app.left_notebook);
+        if (app.right_notebook) gtk_widget_queue_resize(app.right_notebook);
     }
-    g_object_unref(window);
+    g_object_unref(win);
     return FALSE;
 }
 
 static void on_maximize_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
-    GtkWindow *window = GTK_WINDOW(user_data);
-    if (!window || maximize_pending_id) return;
-    g_object_ref(window);
-    maximize_pending_id = g_idle_add(defer_maximize_toggle, window);
+    GtkWindow *win = GTK_WINDOW(user_data);
+    if (!win || app.maximize_pending_id) return;
+    g_object_ref(win);
+    app.maximize_pending_id = g_idle_add(defer_maximize_toggle, win);
 }
 
 static void on_close_clicked(GtkButton *button, gpointer user_data) {
@@ -1979,14 +1774,14 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
 
-    const char *session_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
+    const char *session_name = gtk_entry_get_text(GTK_ENTRY(app.sessions_entry));
     if (session_name && strlen(session_name) > 0) {
         // Check if session name already exists
-        const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+        const GList *existing_sessions = sessions_model_get_session_names(app.sessions_model);
         for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
             if (strcmp((const char*)iter->data, session_name) == 0) {
                 // Show error dialog
-                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app.window),
                     GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                     GTK_MESSAGE_ERROR,
                     GTK_BUTTONS_OK,
@@ -1999,20 +1794,20 @@ static void on_sessions_add_clicked(GtkButton *button, gpointer user_data) {
         }
 
         // Add to model
-        sessions_model_add_session_name(sessions_model, session_name);
+        sessions_model_add_session_name(app.sessions_model, session_name);
 
         // Create per-session model so notebook restore can find it
-        if (session_models && !g_hash_table_lookup(session_models, session_name)) {
+        if (app.session_models && !g_hash_table_lookup(app.session_models, session_name)) {
             session_model_t *session = session_model_new();
             session_model_set_session_name(session, session_name);
-            g_hash_table_insert(session_models, g_strdup(session_name), session);
+            g_hash_table_insert(app.session_models, g_strdup(session_name), session);
         }
 
         // Update tree view
         populate_sessions_treeview();
 
         // Clear entry
-        gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+        gtk_entry_set_text(GTK_ENTRY(app.sessions_entry), "");
 
         // Save state to persist the new session
         save_state();
@@ -2023,7 +1818,7 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
 
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
     GtkTreeIter iter;
     GtkTreeModel *model;
 
@@ -2034,7 +1829,7 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
         // Prevent removing the "Default" session
         if (strcmp(session_name, "Default") == 0) {
             // Show a message dialog that Default session cannot be removed
-            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+            GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app.window),
                 GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                 GTK_MESSAGE_INFO,
                 GTK_BUTTONS_OK,
@@ -2046,46 +1841,46 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
         }
 
         // Remove from model
-        sessions_model_remove_session_name(sessions_model, session_name);
+        sessions_model_remove_session_name(app.sessions_model, session_name);
 
         // Remove stale document models for this session
-        if (session_models && document_models) {
-            session_model_t *sm = g_hash_table_lookup(session_models, session_name);
+        if (app.session_models && app.document_models) {
+            session_model_t *sm = g_hash_table_lookup(app.session_models, session_name);
             if (sm) {
                 const GList *iter;
                 for (iter = session_model_get_document_urls(sm); iter; iter = iter->next) {
                     char *key = make_document_key(session_name, (const char *)iter->data, FALSE);
-                    g_hash_table_remove(document_models, key);
+                    g_hash_table_remove(app.document_models, key);
                     g_free(key);
                 }
                 for (iter = session_model_get_helper_document_urls(sm); iter; iter = iter->next) {
                     char *key = make_document_key(session_name, (const char *)iter->data, TRUE);
-                    g_hash_table_remove(document_models, key);
+                    g_hash_table_remove(app.document_models, key);
                     g_free(key);
                 }
             }
         }
 
         // Remove from session_models hash table so stale data doesn't persist
-        if (session_models)
-            g_hash_table_remove(session_models, session_name);
+        if (app.session_models)
+            g_hash_table_remove(app.session_models, session_name);
 
         // Update tree view
         populate_sessions_treeview();
 
         // If the removed session is currently selected, switch to "Default" or first remaining session
-        if (current_selected_session && strcmp(current_selected_session, session_name) == 0) {
-            g_free(current_selected_session);
-            current_selected_session = g_strdup("Default"); // or first remaining session
+        if (app.current_selected_session && strcmp(app.current_selected_session, session_name) == 0) {
+            g_free(app.current_selected_session);
+            app.current_selected_session = g_strdup("Default"); // or first remaining session
 
-            restore_open_tabs_for_session(current_selected_session);
+            restore_open_tabs_for_session(app.current_selected_session);
             sync_page_widget_from_tab(get_current_left_tab());
 
-            if (sessions_model) {
-                sessions_model_set_last_open_session(sessions_model, current_selected_session);
+            if (app.sessions_model) {
+                sessions_model_set_last_open_session(app.sessions_model, app.current_selected_session);
             }
 
-            update_window_title_for_session(current_selected_session);
+            update_window_title_for_session(app.current_selected_session);
         }
 
         g_free(session_name);
@@ -2099,19 +1894,19 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
 
-    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+    GtkTreeSelection *selection = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
     GtkTreeIter iter;
     GtkTreeModel *model;
 
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
-        const char *new_name = gtk_entry_get_text(GTK_ENTRY(sessions_entry));
+        const char *new_name = gtk_entry_get_text(GTK_ENTRY(app.sessions_entry));
         if (new_name && strlen(new_name) > 0) {
             gchar *old_name;
             gtk_tree_model_get(model, &iter, 0, &old_name, -1);
 
             // Prevent renaming the "Default" session
             if (strcmp(old_name, "Default") == 0) {
-                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app.window),
                     GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                     GTK_MESSAGE_INFO,
                     GTK_BUTTONS_OK,
@@ -2123,12 +1918,12 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
             }
 
             // Check if new name already exists (excluding the current session)
-            const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+            const GList *existing_sessions = sessions_model_get_session_names(app.sessions_model);
             for (const GList *iter_check = existing_sessions; iter_check != NULL; iter_check = iter_check->next) {
                 if (strcmp((const char*)iter_check->data, old_name) != 0 &&
                     strcmp((const char*)iter_check->data, new_name) == 0) {
                     // Show error dialog
-                    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(window),
+                    GtkWidget *dialog = gtk_message_dialog_new(GTK_WINDOW(app.window),
                         GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
                         GTK_MESSAGE_ERROR,
                         GTK_BUTTONS_OK,
@@ -2142,15 +1937,15 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
             }
 
             // Migrate the session model in the hash table to the new key
-            session_model_t *session_model = g_hash_table_lookup(session_models, old_name);
+            session_model_t *session_model = g_hash_table_lookup(app.session_models, old_name);
             if (session_model) {
                 session_model_set_session_name(session_model, new_name);
-                g_hash_table_steal(session_models, old_name);
-                g_hash_table_insert(session_models, g_strdup(new_name), session_model);
+                g_hash_table_steal(app.session_models, old_name);
+                g_hash_table_insert(app.session_models, g_strdup(new_name), session_model);
 
                 // Re-key all document_models entries that embed the old session name
-                if (document_models) {
-                    GList *keys = g_hash_table_get_keys(document_models);
+                if (app.document_models) {
+                    GList *keys = g_hash_table_get_keys(app.document_models);
                     GList *to_rekey = NULL;
                     int old_len = strlen(old_name);
                     for (GList *k = keys; k; k = k->next) {
@@ -2162,11 +1957,11 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                     g_list_free(keys);
                     for (GList *k = to_rekey; k; k = k->next) {
                         char *old_key = (char *)k->data;
-                        document_model_t *doc = g_hash_table_lookup(document_models, old_key);
+                        document_model_t *doc = g_hash_table_lookup(app.document_models, old_key);
                         if (doc) {
                             char *new_key = g_strdup_printf("%s%s", new_name, old_key + old_len);
-                            g_hash_table_steal(document_models, old_key);
-                            g_hash_table_insert(document_models, new_key, doc);
+                            g_hash_table_steal(app.document_models, old_key);
+                            g_hash_table_insert(app.document_models, new_key, doc);
                             g_free(old_key);
                         }
                     }
@@ -2175,35 +1970,35 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
             }
 
             // Update in sessions_model
-            sessions_model_remove_session_name(sessions_model, old_name);
-            sessions_model_add_session_name(sessions_model, new_name);
+            sessions_model_remove_session_name(app.sessions_model, old_name);
+            sessions_model_add_session_name(app.sessions_model, new_name);
 
             // Update current_selected_session BEFORE tree repopulation so the
             // cursor-changed handler sees it matches and avoids switch_to_session.
-            gboolean was_current = (current_selected_session &&
-                                    strcmp(current_selected_session, old_name) == 0);
+            gboolean was_current = (app.current_selected_session &&
+                                    strcmp(app.current_selected_session, old_name) == 0);
             if (was_current) {
-                g_free(current_selected_session);
-                current_selected_session = g_strdup(new_name);
+                g_free(app.current_selected_session);
+                app.current_selected_session = g_strdup(new_name);
             }
 
             // Update tree view
             populate_sessions_treeview();
 
             // Re-select the renamed session in the tree
-            sessions_tree_syncing = TRUE;
+            app.sessions_tree_syncing = TRUE;
             {
                 GtkTreeIter si;
-                if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &si)) {
+                if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &si)) {
                     do {
                         char *sn = NULL;
-                        gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &si,
+                        gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &si,
                                            SESSION_COL_SESSION_NAME, &sn, -1);
                         if (sn && strcmp(sn, new_name) == 0) {
                             GtkTreeSelection *sel = gtk_tree_view_get_selection(
-                                GTK_TREE_VIEW(sessions_tree_view));
+                                GTK_TREE_VIEW(app.sessions_tree_view));
                             GtkTreePath *path = gtk_tree_model_get_path(
-                                GTK_TREE_MODEL(sessions_tree_store), &si);
+                                GTK_TREE_MODEL(app.sessions_tree_store), &si);
                             gtk_tree_selection_select_path(sel, path);
                             gtk_tree_path_free(path);
                             g_free(sn);
@@ -2211,21 +2006,21 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
                         }
                         g_free(sn);
                     } while (gtk_tree_model_iter_next(
-                        GTK_TREE_MODEL(sessions_tree_store), &si));
+                        GTK_TREE_MODEL(app.sessions_tree_store), &si));
                 }
             }
-            sessions_tree_syncing = FALSE;
+            app.sessions_tree_syncing = FALSE;
 
             // Update window title for the renamed session
             if (was_current) {
-                if (sessions_model) {
-                    sessions_model_set_last_open_session(sessions_model, current_selected_session);
+                if (app.sessions_model) {
+                    sessions_model_set_last_open_session(app.sessions_model, app.current_selected_session);
                 }
-                update_window_title_for_session(current_selected_session);
+                update_window_title_for_session(app.current_selected_session);
             }
 
             // Clear entry
-            gtk_entry_set_text(GTK_ENTRY(sessions_entry), "");
+            gtk_entry_set_text(GTK_ENTRY(app.sessions_entry), "");
 
             // Persist the rename
             save_state();
@@ -2236,20 +2031,20 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
 }
 
 static void set_right_notebook_session(const gchar *session_name) {
-    if (!right_notebook || !session_name || !session_models) return;
+    if (!app.right_notebook || !session_name || !app.session_models) return;
 
-    is_restoring_session_tabs = TRUE;
+    app.is_restoring_session_tabs = TRUE;
 
     // Clear current right notebook
-    while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) > 0) {
-        gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), 0);
+    while (gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook)) > 0) {
+        gtk_notebook_remove_page(GTK_NOTEBOOK(app.right_notebook), 0);
     }
-    gtk_widget_hide(right_page_nav_overlay);
+    gtk_widget_hide(app.right_page_nav_overlay);
 
     // Get the session model
-    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    session_model_t *session = g_hash_table_lookup(app.session_models, session_name);
     if (!session) {
-        is_restoring_session_tabs = FALSE;
+        app.is_restoring_session_tabs = FALSE;
         return;
     }
 
@@ -2263,7 +2058,7 @@ static void set_right_notebook_session(const gchar *session_name) {
         const char *uri = (const char*)iter->data;
         char *filename = g_filename_from_uri(uri, NULL, NULL);
         if (filename) {
-            TabData *tab = create_new_tab(right_notebook);
+            TabData *tab = create_new_tab(app.right_notebook);
             if (tab) {
                 load_file_into_tab(tab, filename);
                 if (last_read_help_uri && g_strcmp0(uri, last_read_help_uri) == 0) {
@@ -2275,21 +2070,21 @@ static void set_right_notebook_session(const gchar *session_name) {
     }
 
     // Re-focus last-read helper tab
-    if (matched_index >= 0 && matched_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook))) {
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), matched_index);
+    if (matched_index >= 0 && matched_index < gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook))) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(app.right_notebook), matched_index);
     }
 
     // If no helper documents, show an empty right notebook
-    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) == 0) {
-        gtk_widget_show_all(right_notebook);
+    if (gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook)) == 0) {
+        gtk_widget_show_all(app.right_notebook);
     }
 
-    is_restoring_session_tabs = FALSE;
+    app.is_restoring_session_tabs = FALSE;
 }
 
 static void on_sessions_treeview_cursor_changed(GtkTreeView *tree_view, gpointer user_data) {
     (void)user_data;
-    if (sessions_tree_syncing) return;
+    if (app.sessions_tree_syncing) return;
 
     GtkTreeSelection *sel = gtk_tree_view_get_selection(tree_view);
     GtkTreeModel *model = NULL;
@@ -2313,20 +2108,20 @@ static void on_sessions_treeview_cursor_changed(GtkTreeView *tree_view, gpointer
         ? g_strdup_printf("F|%s|%s", session_name, doc_uri)
         : g_strdup_printf("S|%s", session_name);
 
-    if (last_tree_selection_key && g_strcmp0(last_tree_selection_key, key) == 0) {
+    if (app.last_tree_selection_key && g_strcmp0(app.last_tree_selection_key, key) == 0) {
         g_free(key);
         goto cleanup; /* noisy repeat */
     }
 
-    g_free(last_tree_selection_key);
-    last_tree_selection_key = key;
+    g_free(app.last_tree_selection_key);
+    app.last_tree_selection_key = key;
 
     switch_to_session(session_name);
 
     if (row_kind == SESSION_ROW_FILE && doc_uri && *doc_uri) {
-        int idx = find_matching_tab_index(GTK_NOTEBOOK(left_notebook), doc_uri);
+        int idx = find_matching_tab_index(GTK_NOTEBOOK(app.left_notebook), doc_uri);
         if (idx >= 0) {
-            gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), idx);
+            gtk_notebook_set_current_page(GTK_NOTEBOOK(app.left_notebook), idx);
         }
     }
 
@@ -2340,78 +2135,78 @@ static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data) {
 
     if (!gtk_toggle_button_get_active(btn)) {
         /* Toggled off: close sidebar if we are the active mode */
-        if (current_sidebar_mode == SIDEBAR_SESSIONS) {
-            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-            current_sidebar_mode = SIDEBAR_NONE;
+        if (app.current_sidebar_mode == SIDEBAR_SESSIONS) {
+            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
+            app.current_sidebar_mode = SIDEBAR_NONE;
         }
         return;
     }
 
     /* Toggled on: open sessions sidebar, deactivate other buttons */
-    if (gtk_widget_get_parent(sidebar) != NULL) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    if (gtk_widget_get_parent(app.sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
     }
 
     /* Deactivate other toggle buttons */
-    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
-    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    g_signal_handlers_block_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
 
-    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
-    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    g_signal_handlers_block_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
 
-    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    g_signal_handlers_block_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
 
     /* Hide other sidebar contents */
-    gtk_widget_hide(sidebar_label);
-    gtk_widget_hide(sessions_container);
-    gtk_widget_hide(settings_container);
-    gtk_widget_hide(toc_container);
-    gtk_widget_hide(file_info_container);
-    gtk_tree_store_clear(toc_tree_store);
+    gtk_widget_hide(app.sidebar_label);
+    gtk_widget_hide(app.sessions_container);
+    gtk_widget_hide(app.settings_container);
+    gtk_widget_hide(app.toc_container);
+    gtk_widget_hide(app.file_info_container);
+    gtk_tree_store_clear(app.toc_tree_store);
 
     /* Show sessions container */
-    gtk_widget_show_all(sessions_container);
+    gtk_widget_show_all(app.sessions_container);
 
-    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-    gtk_widget_set_size_request(sidebar, 300, -1);
-    gtk_widget_show(sidebar);
-    current_sidebar_mode = SIDEBAR_SESSIONS;
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
+    gtk_widget_set_size_request(app.sidebar, 300, -1);
+    gtk_widget_show(app.sidebar);
+    app.current_sidebar_mode = SIDEBAR_SESSIONS;
 
     /* Auto-select current session and document in the tree */
-    if (sessions_tree_store && current_selected_session) {
+    if (app.sessions_tree_store && app.current_selected_session) {
         reset_sessions_tree_selection_guard();
-        sessions_tree_syncing = TRUE;
-        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+        app.sessions_tree_syncing = TRUE;
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
         GtkTreeIter iter;
-        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+        if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &iter)) {
             do {
                 gchar *name = NULL;
-                gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+                gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &iter,
                                    SESSION_COL_SESSION_NAME, &name, -1);
                 if (!name) continue;
-                if (g_strcmp0(name, current_selected_session) != 0) {
+                if (g_strcmp0(name, app.current_selected_session) != 0) {
                     g_free(name);
                     continue;
                 }
                 /* Found matching session row — select and expand it */
-                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &iter);
+                GtkTreePath *path = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &iter);
                 if (path) {
                     gtk_tree_selection_select_path(sel, path);
-                    gtk_tree_view_expand_row(GTK_TREE_VIEW(sessions_tree_view), path, FALSE);
+                    gtk_tree_view_expand_row(GTK_TREE_VIEW(app.sessions_tree_view), path, FALSE);
                     gtk_tree_path_free(path);
                 }
                 update_sessions_tree_document_selection();
                 g_free(name);
                 break;
-            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+            } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &iter));
         }
-        sessions_tree_syncing = FALSE;
+        app.sessions_tree_syncing = FALSE;
     }
 }
 
@@ -2428,8 +2223,8 @@ static void populate_toc_treeview_recursive(PdfrOutline *entry, GtkTreeIter *par
         }
 
         GtkTreeIter child;
-        gtk_tree_store_append(toc_tree_store, &child, parent);
-        gtk_tree_store_set(toc_tree_store, &child,
+        gtk_tree_store_append(app.toc_tree_store, &child, parent);
+        gtk_tree_store_set(app.toc_tree_store, &child,
                           TOC_COL_LABEL, cur->title ? cur->title : "(Untitled)",
                           TOC_COL_PAGE, page,
                           TOC_COL_NAMED_DEST, named_dest,
@@ -2443,10 +2238,10 @@ static void populate_toc_treeview_recursive(PdfrOutline *entry, GtkTreeIter *par
 }
 
 static void populate_toc_treeview_for_tab(TabData *tab) {
-    last_toc_selected_page = -1;
-    gtk_tree_store_clear(toc_tree_store);
+    app.last_toc_selected_page = -1;
+    gtk_tree_store_clear(app.toc_tree_store);
     if (!tab) return;
-    if (!tab->doc && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
+    if (!tab->doc && !app.is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
     if (!tab->doc) return;
 
     PdfrOutline *outline = pdfr_load_outline(tab->doc);
@@ -2479,58 +2274,58 @@ static gboolean toc_find_nearest_cb(GtkTreeModel *model, GtkTreePath *path, GtkT
 }
 
 static void update_toc_selection_for_current_page(TabData *tab) {
-    if (!toc_tree_store || !toc_tree_view || !tab) return;
+    if (!app.toc_tree_store || !app.toc_tree_view || !tab) return;
 
     int target_page = tab->cur_page + 1;
     if (target_page < 1) target_page = 1;
 
-    if (target_page == last_toc_selected_page) return;
+    if (target_page == app.last_toc_selected_page) return;
 
     TocFindData find = { .target_page = target_page, .best_page = 0, .best_path = NULL };
-    gtk_tree_model_foreach(GTK_TREE_MODEL(toc_tree_store), toc_find_nearest_cb, &find);
+    gtk_tree_model_foreach(GTK_TREE_MODEL(app.toc_tree_store), toc_find_nearest_cb, &find);
 
     if (find.best_path) {
-        toc_tree_syncing = TRUE;
-        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(toc_tree_view));
+        app.toc_tree_syncing = TRUE;
+        GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.toc_tree_view));
         gtk_tree_selection_select_path(sel, find.best_path);
-        gtk_tree_view_expand_to_path(GTK_TREE_VIEW(toc_tree_view), find.best_path);
-        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(toc_tree_view), find.best_path, NULL, FALSE, 0, 0);
-        last_toc_selected_page = target_page;
+        gtk_tree_view_expand_to_path(GTK_TREE_VIEW(app.toc_tree_view), find.best_path);
+        gtk_tree_view_scroll_to_cell(GTK_TREE_VIEW(app.toc_tree_view), find.best_path, NULL, FALSE, 0, 0);
+        app.last_toc_selected_page = target_page;
         gtk_tree_path_free(find.best_path);
-        toc_tree_syncing = FALSE;
+        app.toc_tree_syncing = FALSE;
     }
 }
 
 static void update_sessions_tree_document_selection_for_tab(TabData *tab) {
-    if (!sessions_tree_store || !sessions_tree_view || !current_selected_session) return;
+    if (!app.sessions_tree_store || !app.sessions_tree_view || !app.current_selected_session) return;
 
     if (!tab || !tab->current_file) return;
 
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
 
-    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(sessions_tree_view));
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
     GtkTreeIter iter;
-    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(sessions_tree_store), &iter)) {
+    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &iter)) {
         do {
             gchar *name = NULL;
-            gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &iter,
+            gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &iter,
                                SESSION_COL_SESSION_NAME, &name, -1);
             if (!name) continue;
-            if (g_strcmp0(name, current_selected_session) != 0) {
+            if (g_strcmp0(name, app.current_selected_session) != 0) {
                 g_free(name);
                 continue;
             }
             g_free(name);
             /* Found the session row. Select the matching document child. */
             GtkTreeIter child;
-            if (gtk_tree_model_iter_children(GTK_TREE_MODEL(sessions_tree_store), &child, &iter)) {
+            if (gtk_tree_model_iter_children(GTK_TREE_MODEL(app.sessions_tree_store), &child, &iter)) {
                 do {
                     gchar *doc_uri = NULL;
-                    gtk_tree_model_get(GTK_TREE_MODEL(sessions_tree_store), &child,
+                    gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &child,
                                        SESSION_COL_DOC_URI, &doc_uri, -1);
                     if (doc_uri && g_strcmp0(doc_uri, uri) == 0) {
-                        GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(sessions_tree_store), &child);
+                        GtkTreePath *cp = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &child);
                         if (cp) {
                             gtk_tree_selection_select_path(sel, cp);
                             gtk_tree_path_free(cp);
@@ -2540,10 +2335,10 @@ static void update_sessions_tree_document_selection_for_tab(TabData *tab) {
                         return;
                     }
                     g_free(doc_uri);
-                } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &child));
+                } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &child));
             }
             break;
-        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(sessions_tree_store), &iter));
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &iter));
     }
     g_free(uri);
 }
@@ -2556,8 +2351,8 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
     (void)column;
     (void)user_data;
 
-    if (toc_tree_syncing) return;
-    if (!gtk_widget_get_visible(toc_container)) return;
+    if (app.toc_tree_syncing) return;
+    if (!gtk_widget_get_visible(app.toc_container)) return;
 
     GtkTreeModel *model = gtk_tree_view_get_model(tree_view);
     GtkTreeIter iter;
@@ -2579,7 +2374,7 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
         TabData *tab = get_current_left_tab();
         if (tab) {
             cancel_doc_model_debounce(tab);
-            last_toc_selected_page = page;
+            app.last_toc_selected_page = page;
             tab->cur_page = page - 1;
             scroll_to_page(tab, page - 1, -1);
             update_document_model_from_tab(tab);
@@ -2592,47 +2387,47 @@ static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {
-        if (current_sidebar_mode == SIDEBAR_TOC) {
-            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-            current_sidebar_mode = SIDEBAR_NONE;
+        if (app.current_sidebar_mode == SIDEBAR_TOC) {
+            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
+            app.current_sidebar_mode = SIDEBAR_NONE;
         }
         return;
     }
 
-    if (gtk_widget_get_parent(sidebar) != NULL) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    if (gtk_widget_get_parent(app.sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
     }
 
     /* Deactivate other toggle buttons */
-    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
-    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    g_signal_handlers_block_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
 
-    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
-    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    g_signal_handlers_block_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
 
-    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    g_signal_handlers_block_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
 
     /* Hide other sidebar contents */
-    gtk_widget_hide(sidebar_label);
-    gtk_widget_hide(sessions_container);
-    gtk_widget_hide(settings_container);
-    gtk_widget_hide(file_info_container);
+    gtk_widget_hide(app.sidebar_label);
+    gtk_widget_hide(app.sessions_container);
+    gtk_widget_hide(app.settings_container);
+    gtk_widget_hide(app.file_info_container);
 
     populate_toc_treeview();
 
-    gtk_widget_show_all(toc_container);
+    gtk_widget_show_all(app.toc_container);
     update_toc_selection_for_current_page(get_current_left_tab());
 
-    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-    gtk_widget_set_size_request(sidebar, 300, -1);
-    gtk_widget_show(sidebar);
-    current_sidebar_mode = SIDEBAR_TOC;
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
+    gtk_widget_set_size_request(app.sidebar, 300, -1);
+    gtk_widget_show(app.sidebar);
+    app.current_sidebar_mode = SIDEBAR_TOC;
 }
 
 static double get_angle_for_position(const char *pos) {
@@ -2645,41 +2440,41 @@ static void apply_tabbar_position(const char *pos) {
     GtkPositionType gpos = GTK_POS_TOP;
     if (g_strcmp0(pos, "left") == 0) gpos = GTK_POS_LEFT;
     else if (g_strcmp0(pos, "right") == 0) gpos = GTK_POS_RIGHT;
-    if (left_notebook)
-        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(left_notebook), gpos);
-    if (right_notebook)
-        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(right_notebook), gpos);
+    if (app.left_notebook)
+        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(app.left_notebook), gpos);
+    if (app.right_notebook)
+        gtk_notebook_set_tab_pos(GTK_NOTEBOOK(app.right_notebook), gpos);
 
     gboolean is_side = (g_strcmp0(pos, "left") == 0 || g_strcmp0(pos, "right") == 0);
-    if (left_notebook) {
-        gtk_notebook_set_show_border(GTK_NOTEBOOK(left_notebook), !is_side);
-        gtk_widget_set_size_request(left_notebook, is_side ? -1 : 70, is_side ? 200 : -1);
+    if (app.left_notebook) {
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(app.left_notebook), !is_side);
+        gtk_widget_set_size_request(app.left_notebook, is_side ? -1 : 70, is_side ? 200 : -1);
     }
-    if (right_notebook) {
-        gtk_notebook_set_show_border(GTK_NOTEBOOK(right_notebook), !is_side);
-        gtk_widget_set_size_request(right_notebook, -1, is_side ? 200 : -1);
+    if (app.right_notebook) {
+        gtk_notebook_set_show_border(GTK_NOTEBOOK(app.right_notebook), !is_side);
+        gtk_widget_set_size_request(app.right_notebook, -1, is_side ? 200 : -1);
     }
 
     /* Adjust page nav overlay so it doesn't sit over a left-side tab bar */
-    if (page_nav_overlay) {
+    if (app.page_nav_overlay) {
         if (g_strcmp0(pos, "left") == 0) {
-            gtk_widget_set_margin_start(page_nav_overlay, 60);
+            gtk_widget_set_margin_start(app.page_nav_overlay, 60);
         } else {
-            gtk_widget_set_margin_start(page_nav_overlay, 16);
+            gtk_widget_set_margin_start(app.page_nav_overlay, 16);
         }
     }
     /* Adjust right page nav overlay for right-side tab bar */
-    if (right_page_nav_overlay) {
+    if (app.right_page_nav_overlay) {
         if (g_strcmp0(pos, "right") == 0) {
-            gtk_widget_set_margin_end(right_page_nav_overlay, 60);
+            gtk_widget_set_margin_end(app.right_page_nav_overlay, 60);
         } else {
-            gtk_widget_set_margin_end(right_page_nav_overlay, 8);
+            gtk_widget_set_margin_end(app.right_page_nav_overlay, 8);
         }
     }
 
     double angle = get_angle_for_position(pos);
     GtkOrientation box_orientation = is_side ? GTK_ORIENTATION_VERTICAL : GTK_ORIENTATION_HORIZONTAL;
-    GtkWidget *notebooks[] = {left_notebook, right_notebook};
+    GtkWidget *notebooks[] = {app.left_notebook, app.right_notebook};
     for (int n = 0; n < 2; n++) {
         if (!notebooks[n]) continue;
         int np = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebooks[n]));
@@ -2705,7 +2500,7 @@ static void apply_tabbar_position(const char *pos) {
 
 static void apply_tab_width(int width) {
     /* Truncate all existing tab labels to 'width' characters */
-    GtkWidget *notebooks[] = {left_notebook, right_notebook};
+    GtkWidget *notebooks[] = {app.left_notebook, app.right_notebook};
     for (int n = 0; n < 2; n++) {
         if (!notebooks[n]) continue;
         int np = gtk_notebook_get_n_pages(GTK_NOTEBOOK(notebooks[n]));
@@ -2729,42 +2524,42 @@ static void apply_tab_width(int width) {
 
 static void on_tabbar_combo_changed(GtkComboBox *combo, gpointer user_data) {
     (void)user_data;
-    if (!sessions_model) return;
+    if (!app.sessions_model) return;
     const char *pos = gtk_combo_box_get_active_id(GTK_COMBO_BOX(combo));
     if (!pos) return;
-    sessions_model_set_tabbar_position(sessions_model, pos);
+    sessions_model_set_tabbar_position(app.sessions_model, pos);
     apply_tabbar_position(pos);
     save_state();
 }
 
 static void on_tab_width_spin_changed(GtkSpinButton *spin, gpointer user_data) {
     (void)user_data;
-    if (!sessions_model) return;
+    if (!app.sessions_model) return;
     int w = (int)gtk_spin_button_get_value(spin);
-    sessions_model_set_tab_width(sessions_model, w);
+    sessions_model_set_tab_width(app.sessions_model, w);
     apply_tab_width(w);
     save_state();
 }
 
 static void on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
-    keep_dark_theme = gtk_toggle_button_get_active(btn);
-    if (keep_dark_theme) {
-        is_dark_theme = TRUE;
+    app.keep_dark_theme = gtk_toggle_button_get_active(btn);
+    if (app.keep_dark_theme) {
+        app.is_dark_theme = TRUE;
         apply_dark_css(TRUE);
     } else {
         apply_dark_css(FALSE);
-        is_dark_theme = detect_system_dark_theme();
+        app.is_dark_theme = detect_system_dark_theme();
     }
     recolor_all_toolbars();
-    if (sessions_model)
-        sessions_model_set_keep_dark(sessions_model, keep_dark_theme);
+    if (app.sessions_model)
+        sessions_model_set_keep_dark(app.sessions_model, app.keep_dark_theme);
     save_state();
 }
 
 static session_model_t *get_current_session_model(void) {
-    if (!current_selected_session || !session_models) return NULL;
-    return g_hash_table_lookup(session_models, current_selected_session);
+    if (!app.current_selected_session || !app.session_models) return NULL;
+    return g_hash_table_lookup(app.session_models, app.current_selected_session);
 }
 
 static void apply_page_color_to_notebook(GtkWidget *notebook, const char *color_str) {
@@ -2790,7 +2585,7 @@ static void on_left_color_set(GtkColorButton *btn, gpointer user_data) {
     gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &color);
     char *str = gdk_rgba_to_string(&color);
     session_model_set_page_color(session, str);
-    apply_page_color_to_notebook(left_notebook, str);
+    apply_page_color_to_notebook(app.left_notebook, str);
     g_free(str);
     save_state();
 }
@@ -2803,7 +2598,7 @@ static void on_right_color_set(GtkColorButton *btn, gpointer user_data) {
     gtk_color_chooser_get_rgba(GTK_COLOR_CHOOSER(btn), &color);
     char *str = gdk_rgba_to_string(&color);
     session_model_set_helper_page_color(session, str);
-    apply_page_color_to_notebook(right_notebook, str);
+    apply_page_color_to_notebook(app.right_notebook, str);
     g_free(str);
     save_state();
 }
@@ -2812,260 +2607,92 @@ static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {
-        if (current_sidebar_mode == SIDEBAR_SETTINGS) {
-            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-            current_sidebar_mode = SIDEBAR_NONE;
+        if (app.current_sidebar_mode == SIDEBAR_SETTINGS) {
+            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
+            app.current_sidebar_mode = SIDEBAR_NONE;
         }
         return;
     }
 
-    if (gtk_widget_get_parent(sidebar) != NULL) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    if (gtk_widget_get_parent(app.sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
     }
 
     /* Deactivate other toggle buttons */
-    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
-    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    g_signal_handlers_block_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
 
-    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
-    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    g_signal_handlers_block_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
 
-    g_signal_handlers_block_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-    g_signal_handlers_unblock_by_func(file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    g_signal_handlers_block_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
 
     /* Hide other sidebar contents */
-    gtk_widget_hide(sidebar_label);
-    gtk_widget_hide(sessions_container);
-    gtk_widget_hide(toc_container);
-    gtk_widget_hide(file_info_container);
-    gtk_tree_store_clear(toc_tree_store);
+    gtk_widget_hide(app.sidebar_label);
+    gtk_widget_hide(app.sessions_container);
+    gtk_widget_hide(app.toc_container);
+    gtk_widget_hide(app.file_info_container);
+    gtk_tree_store_clear(app.toc_tree_store);
 
     /* Show settings container */
-    gtk_widget_show_all(settings_container);
+    gtk_widget_show_all(app.settings_container);
 
-    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-    gtk_widget_set_size_request(sidebar, 300, -1);
-    gtk_widget_show(sidebar);
-    current_sidebar_mode = SIDEBAR_SETTINGS;
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
+    gtk_widget_set_size_request(app.sidebar, 300, -1);
+    gtk_widget_show(app.sidebar);
+    app.current_sidebar_mode = SIDEBAR_SETTINGS;
 }
-
-/* Search implementation */
-#define SEARCH_MAX_PER_PAGE 50
-#define SEARCH_BATCH_SIZE 20
-
-static void search_cancel(TabData *tab) {
-    if (!tab) return;
-    tab->search_cancelled = TRUE;
-    if (tab->search_idle_id) {
-        g_source_remove(tab->search_idle_id);
-        tab->search_idle_id = 0;
-    }
-}
-
-static void search_free(TabData *tab) {
-    if (!tab) return;
-    for (int i = 0; i < tab->search_results_n; i++)
-        g_free(tab->search_results[i].rects);
-    g_free(tab->search_results);
-    tab->search_results = NULL;
-    tab->search_results_n = 0;
-    tab->search_results_cap = 0;
-    g_free(tab->search_text);
-    tab->search_text = NULL;
-}
-
-static void search_clear(void) {
-    TabData *tab = get_current_left_tab();
-    if (tab) {
-        search_cancel(tab);
-        search_free(tab);
-    }
-    if (search_results_store)
-        gtk_list_store_clear(search_results_store);
-    if (search_no_results_label)
-        gtk_widget_hide(search_no_results_label);
-    if (tab) queue_draw(tab);
-}
-
-static gboolean search_idle(gpointer user_data) {
-    TabData *tab = (TabData *)user_data;
-    tab->search_idle_id = 0;
-
-    if (!tab || tab->search_cancelled || !tab->doc)
-        return FALSE;
-
-    int n_pages = pdfr_count_pages(tab->doc);
-    PdfrRect rects_buf[SEARCH_MAX_PER_PAGE];
-    int batch = 0;
-
-    for (int i = tab->search_page_idx; i < n_pages && !tab->search_cancelled && tab->doc && batch < SEARCH_BATCH_SIZE; i++, batch++) {
-        int n = pdfr_search_page(tab->doc, i, tab->search_text, rects_buf, SEARCH_MAX_PER_PAGE);
-
-        if (tab->search_cancelled || !tab->doc)
-            return FALSE;
-
-        tab->search_page_idx = i + 1;
-
-        if (n <= 0) continue;
-
-        if (tab->search_results_n >= tab->search_results_cap) {
-            int new_cap = tab->search_results_cap ? tab->search_results_cap * 2 : 32;
-            void *tmp = g_realloc(tab->search_results, new_cap * sizeof(*tab->search_results));
-            if (!tmp) return FALSE;
-            tab->search_results = tmp;
-            tab->search_results_cap = new_cap;
-        }
-        tab->search_results[tab->search_results_n].page = i + 1;
-        tab->search_results[tab->search_results_n].n_matches = n;
-        tab->search_results[tab->search_results_n].rects = g_memdup2(rects_buf, sizeof(PdfrRect) * n);
-        tab->search_results_n++;
-
-        const char *plural = n == 1 ? "" : "es";
-        gchar *label = g_strdup_printf("Page %d (%d match%s)", i + 1, n, plural);
-        GtkTreeIter ti;
-        gtk_list_store_append(search_results_store, &ti);
-        gtk_list_store_set(search_results_store, &ti,
-            SEARCH_COL_PAGE, i + 1,
-            SEARCH_COL_COUNT, n,
-            SEARCH_COL_LABEL, label, -1);
-        g_free(label);
-    }
-
-    /* More pages remain — re-schedule */
-    if (tab->search_page_idx < n_pages && !tab->search_cancelled && tab->doc) {
-        queue_draw(tab);
-        tab->search_idle_id = g_idle_add(search_idle, tab);
-        return FALSE;
-    }
-
-    /* Search complete — shrink allocation to actual count */
-    if (tab->search_results_n > 0 && tab->search_results_n < tab->search_results_cap) {
-        tab->search_results = g_realloc(tab->search_results,
-            tab->search_results_n * sizeof(*tab->search_results));
-        tab->search_results_cap = tab->search_results_n;
-    }
-
-    if (tab->search_results_n == 0 && tab->search_text && *tab->search_text)
-        gtk_widget_show(search_no_results_label);
-
-    queue_draw(tab);
-    return FALSE;
-}
-
-static void search_start(const char *text) {
-    TabData *tab = get_current_left_tab();
-    if (!text || !*text) {
-        if (tab) { search_clear(); queue_draw(tab); }
-        return;
-    }
-    search_clear();
-    tab = get_current_left_tab();
-    if (!tab || !ensure_tab_doc_loaded(tab) || !tab->doc) return;
-    tab->search_text = g_strdup(text);
-    tab->search_cancelled = FALSE;
-    tab->search_page_idx = 0;
-    tab->search_idle_id = g_idle_add(search_idle, tab);
-}
-
-static void on_search_activated(GtkEntry *entry, gpointer user_data) {
-    (void)user_data;
-    search_start(gtk_entry_get_text(entry));
-}
-
-static void on_search_clicked(GtkButton *btn, gpointer user_data) {
-    (void)btn; (void)user_data;
-    search_start(gtk_entry_get_text(GTK_ENTRY(search_entry)));
-}
-
-static void on_search_row_activated(GtkTreeView *tv, GtkTreePath *path, GtkTreeViewColumn *col, gpointer user_data) {
-    (void)tv; (void)col; (void)user_data;
-    GtkTreeIter iter;
-    if (!gtk_tree_model_get_iter(GTK_TREE_MODEL(search_results_store), &iter, path)) return;
-    int page = 0;
-    gtk_tree_model_get(GTK_TREE_MODEL(search_results_store), &iter, SEARCH_COL_PAGE, &page, -1);
-    if (page > 0) {
-        TabData *tab = get_current_left_tab();
-        if (tab) {
-            cancel_doc_model_debounce(tab);
-            tab->cur_page = page - 1;
-            scroll_to_page(tab, page - 1, -1);
-            update_document_model_from_tab(tab);
-        }
-    }
-}
-
-static void search_highlight_page(TabData *tab, cairo_t *cr, int page_1based, double ox, double oy, double sc) {
-    if (!tab || tab->search_results_n <= 0) return;
-    for (int i = 0; i < tab->search_results_n; i++) {
-        if (tab->search_results[i].page != page_1based) continue;
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, 1.0, 1.0, 0.0, 0.3);
-        for (int m = 0; m < tab->search_results[i].n_matches; m++) {
-            PdfrRect *r = &tab->search_results[i].rects[m];
-            cairo_rectangle(cr, ox + r->x1 * sc, oy + r->y1 * sc,
-                            (r->x2 - r->x1) * sc, (r->y2 - r->y1) * sc);
-        }
-        cairo_fill(cr);
-        cairo_restore(cr);
-        break;
-    }
-}
-
-static GtkWidget *right_file_info_popover = NULL;
-static GtkWidget *right_popover_name_label;
-static GtkWidget *right_popover_path_label;
-static GtkWidget *right_popover_size_label;
-static GtkWidget *right_popover_pages_label;
 
 static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {
-        if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
-            gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
-            gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 1);
-            current_sidebar_mode = SIDEBAR_NONE;
+        if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) {
+            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
+            app.current_sidebar_mode = SIDEBAR_NONE;
         }
         return;
     }
 
-    if (gtk_widget_get_parent(sidebar) != NULL) {
-        gtk_container_remove(GTK_CONTAINER(main_hbox), sidebar);
+    if (gtk_widget_get_parent(app.sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
     }
 
     /* Deactivate other toggle buttons */
-    g_signal_handlers_block_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
-    g_signal_handlers_unblock_by_func(sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    g_signal_handlers_block_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
 
-    g_signal_handlers_block_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
-    g_signal_handlers_unblock_by_func(toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    g_signal_handlers_block_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
 
-    g_signal_handlers_block_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
-    g_signal_handlers_unblock_by_func(settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    g_signal_handlers_block_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.settings_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.settings_btn, G_CALLBACK(on_settings_toggled), NULL);
 
-    gtk_widget_hide(sidebar_label);
-    gtk_widget_hide(sessions_container);
-    gtk_widget_hide(toc_container);
-    gtk_widget_hide(settings_container);
-    gtk_tree_store_clear(toc_tree_store);
+    gtk_widget_hide(app.sidebar_label);
+    gtk_widget_hide(app.sessions_container);
+    gtk_widget_hide(app.toc_container);
+    gtk_widget_hide(app.settings_container);
+    gtk_tree_store_clear(app.toc_tree_store);
 
     update_file_info_labels(get_current_left_tab());
-    gtk_widget_show_all(file_info_container);
-    gtk_widget_hide(search_no_results_label);
+    gtk_widget_show_all(app.file_info_container);
+    gtk_widget_hide(app.search_no_results_label);
 
-    gtk_box_pack_start(GTK_BOX(main_hbox), sidebar, FALSE, FALSE, 0);
-    gtk_box_reorder_child(GTK_BOX(main_hbox), content_vbox, 2);
-    gtk_widget_set_size_request(sidebar, 300, -1);
-    gtk_widget_show(sidebar);
-    current_sidebar_mode = SIDEBAR_FILE_INFO;
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
+    gtk_widget_set_size_request(app.sidebar, 300, -1);
+    gtk_widget_show(app.sidebar);
+    app.current_sidebar_mode = SIDEBAR_FILE_INFO;
 }
 
 static void on_right_file_info_popover_closed(GtkPopover *popover, gpointer user_data);
@@ -3074,53 +2701,53 @@ static void on_right_file_info_clicked(GtkButton *button, gpointer user_data) {
     (void)user_data;
     GtkWidget *btn = GTK_WIDGET(button);
 
-    if (!right_file_info_popover) {
-        right_file_info_popover = gtk_popover_new(btn);
-        gtk_popover_set_position(GTK_POPOVER(right_file_info_popover), GTK_POS_LEFT);
-        gtk_popover_set_modal(GTK_POPOVER(right_file_info_popover), FALSE);
+    if (!app.right_file_info_popover) {
+        app.right_file_info_popover = gtk_popover_new(btn);
+        gtk_popover_set_position(GTK_POPOVER(app.right_file_info_popover), GTK_POS_LEFT);
+        gtk_popover_set_modal(GTK_POPOVER(app.right_file_info_popover), FALSE);
 
         GtkWidget *box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
         gtk_container_set_border_width(GTK_CONTAINER(box), 8);
 
-        right_popover_name_label = gtk_label_new("Name: (no file)");
-        gtk_widget_set_halign(right_popover_name_label, GTK_ALIGN_START);
-        gtk_box_pack_start(GTK_BOX(box), right_popover_name_label, FALSE, FALSE, 0);
+        app.right_popover_name_label = gtk_label_new("Name: (no file)");
+        gtk_widget_set_halign(app.right_popover_name_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), app.right_popover_name_label, FALSE, FALSE, 0);
 
-        right_popover_path_label = gtk_label_new("Path: (none)");
-        gtk_widget_set_halign(right_popover_path_label, GTK_ALIGN_FILL);
-        gtk_label_set_line_wrap(GTK_LABEL(right_popover_path_label), TRUE);
-        gtk_label_set_line_wrap_mode(GTK_LABEL(right_popover_path_label), PANGO_WRAP_WORD_CHAR);
-        gtk_label_set_max_width_chars(GTK_LABEL(right_popover_path_label), 60);
-        gtk_box_pack_start(GTK_BOX(box), right_popover_path_label, FALSE, FALSE, 0);
+        app.right_popover_path_label = gtk_label_new("Path: (none)");
+        gtk_widget_set_halign(app.right_popover_path_label, GTK_ALIGN_FILL);
+        gtk_label_set_line_wrap(GTK_LABEL(app.right_popover_path_label), TRUE);
+        gtk_label_set_line_wrap_mode(GTK_LABEL(app.right_popover_path_label), PANGO_WRAP_WORD_CHAR);
+        gtk_label_set_max_width_chars(GTK_LABEL(app.right_popover_path_label), 60);
+        gtk_box_pack_start(GTK_BOX(box), app.right_popover_path_label, FALSE, FALSE, 0);
 
-        right_popover_size_label = gtk_label_new("Size: (none)");
-        gtk_widget_set_halign(right_popover_size_label, GTK_ALIGN_START);
-        gtk_box_pack_start(GTK_BOX(box), right_popover_size_label, FALSE, FALSE, 0);
+        app.right_popover_size_label = gtk_label_new("Size: (none)");
+        gtk_widget_set_halign(app.right_popover_size_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), app.right_popover_size_label, FALSE, FALSE, 0);
 
-        right_popover_pages_label = gtk_label_new("Pages: (none)");
-        gtk_widget_set_halign(right_popover_pages_label, GTK_ALIGN_START);
-        gtk_box_pack_start(GTK_BOX(box), right_popover_pages_label, FALSE, FALSE, 0);
+        app.right_popover_pages_label = gtk_label_new("Pages: (none)");
+        gtk_widget_set_halign(app.right_popover_pages_label, GTK_ALIGN_START);
+        gtk_box_pack_start(GTK_BOX(box), app.right_popover_pages_label, FALSE, FALSE, 0);
 
-        gtk_container_add(GTK_CONTAINER(right_file_info_popover), box);
+        gtk_container_add(GTK_CONTAINER(app.right_file_info_popover), box);
         gtk_widget_show_all(box);
-        g_signal_connect(right_file_info_popover, "closed",
+        g_signal_connect(app.right_file_info_popover, "closed",
                          G_CALLBACK(on_right_file_info_popover_closed), btn);
     }
 
-    if (gtk_widget_get_mapped(right_file_info_popover)) {
-        gtk_popover_popdown(GTK_POPOVER(right_file_info_popover));
+    if (gtk_widget_get_mapped(app.right_file_info_popover)) {
+        gtk_popover_popdown(GTK_POPOVER(app.right_file_info_popover));
     } else {
         TabData *tab = get_current_right_tab();
 
         if (tab && tab->current_file) {
             gchar *basename = g_path_get_basename(tab->current_file);
             gchar *text = g_strdup_printf("Name: %s", basename);
-            gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+            gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
             g_free(text);
             g_free(basename);
 
             text = g_strdup_printf("Path: %s", tab->current_file);
-            gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+            gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
             g_free(text);
 
             GFile *gf = g_file_new_for_path(tab->current_file);
@@ -3129,30 +2756,30 @@ static void on_right_file_info_clicked(GtkButton *button, gpointer user_data) {
             if (info) {
                 gchar *size_str = format_file_size(g_file_info_get_size(info));
                 gchar *size_text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), size_text);
                 g_free(size_text);
                 g_free(size_str);
                 g_object_unref(info);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
             }
             g_object_unref(gf);
 
             if (tab->doc) {
                 gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(tab->doc));
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
             }
         } else {
-            gtk_label_set_text(GTK_LABEL(right_popover_name_label), "Name: (no file)");
-            gtk_label_set_text(GTK_LABEL(right_popover_path_label), "Path: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), "Name: (no file)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), "Path: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
         }
 
-        gtk_popover_popup(GTK_POPOVER(right_file_info_popover));
+        gtk_popover_popup(GTK_POPOVER(app.right_file_info_popover));
     }
 }
 
@@ -3163,9 +2790,9 @@ static void on_right_file_info_popover_closed(GtkPopover *popover, gpointer user
 }
 
 static void save_open_tabs_for_session(const char *session_name) {
-    if (!session_name || !session_models) return;
+    if (!session_name || !app.session_models) return;
 
-    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    session_model_t *session = g_hash_table_lookup(app.session_models, session_name);
     if (!session) return;
 
     // Replace current saved document URLs with the currently open tabs.
@@ -3179,10 +2806,10 @@ static void save_open_tabs_for_session(const char *session_name) {
     }
 
     // Save open tabs from left notebook
-    if (left_notebook) {
-        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
+    if (app.left_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.left_notebook));
         for (int i = 0; i < n_pages; i++) {
-            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), i);
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.left_notebook), i);
             if (page) {
                 TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
                 if (tab && tab->current_file) {
@@ -3198,10 +2825,10 @@ static void save_open_tabs_for_session(const char *session_name) {
     }
 
     // Save open tabs from right notebook
-    if (right_notebook) {
-        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
+    if (app.right_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook));
         for (int i = 0; i < n_pages; i++) {
-            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), i);
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.right_notebook), i);
             if (page) {
                 TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
                 if (tab && tab->current_file) {
@@ -3217,24 +2844,24 @@ static void save_open_tabs_for_session(const char *session_name) {
     }
 
     /* Also snapshot the currently focused tabs as last-read markers */
-    if (left_notebook) {
-        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(left_notebook));
+    if (app.left_notebook) {
+        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(app.left_notebook));
         if (cur >= 0) {
-            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), cur);
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.left_notebook), cur);
             if (page) {
-                update_last_read_for_notebook(GTK_NOTEBOOK(left_notebook), page, (guint)cur);
+                update_last_read_for_notebook(GTK_NOTEBOOK(app.left_notebook), page, (guint)cur);
             }
         } else {
             session_model_set_last_read_document(session, "");
         }
     }
 
-    if (right_notebook) {
-        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(right_notebook));
+    if (app.right_notebook) {
+        int cur = gtk_notebook_get_current_page(GTK_NOTEBOOK(app.right_notebook));
         if (cur >= 0) {
-            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), cur);
+            GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.right_notebook), cur);
             if (page) {
-                update_last_read_for_notebook(GTK_NOTEBOOK(right_notebook), page, (guint)cur);
+                update_last_read_for_notebook(GTK_NOTEBOOK(app.right_notebook), page, (guint)cur);
             }
         } else {
             session_model_set_last_read_help_document(session, "");
@@ -3243,29 +2870,29 @@ static void save_open_tabs_for_session(const char *session_name) {
 }
 
 static void restore_open_tabs_for_session(const char *session_name) {
-    if (!session_name || !session_models) return;
+    if (!session_name || !app.session_models) return;
 
-    session_model_t *session = g_hash_table_lookup(session_models, session_name);
+    session_model_t *session = g_hash_table_lookup(app.session_models, session_name);
     if (!session) {
         session = session_model_new();
         session_model_set_session_name(session, session_name);
-        g_hash_table_insert(session_models, g_strdup(session_name), session);
+        g_hash_table_insert(app.session_models, g_strdup(session_name), session);
     }
 
-    is_restoring_session_tabs = TRUE;
+    app.is_restoring_session_tabs = TRUE;
 
     // Clear current notebooks
-    if (left_notebook) {
-        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook));
+    if (app.left_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.left_notebook));
         for (int i = n_pages - 1; i >= 0; i--) {
-            gtk_notebook_remove_page(GTK_NOTEBOOK(left_notebook), i);
+            gtk_notebook_remove_page(GTK_NOTEBOOK(app.left_notebook), i);
         }
     }
 
-    if (right_notebook) {
-        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook));
+    if (app.right_notebook) {
+        int n_pages = gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook));
         for (int i = n_pages - 1; i >= 0; i--) {
-            gtk_notebook_remove_page(GTK_NOTEBOOK(right_notebook), i);
+            gtk_notebook_remove_page(GTK_NOTEBOOK(app.right_notebook), i);
         }
     }
 
@@ -3290,7 +2917,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
         }
 
         if (filename) {
-            TabData *tab = create_new_tab(left_notebook);
+            TabData *tab = create_new_tab(app.left_notebook);
             if (tab) {
                 set_tab_filename(tab, filename);
                 if (last_read_uri && g_strcmp0(uri, last_read_uri) == 0) {
@@ -3313,7 +2940,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
             filename = g_strdup(uri);
         }
         if (filename) {
-            TabData *tab = create_new_tab(right_notebook);
+            TabData *tab = create_new_tab(app.right_notebook);
             if (tab) {
                 set_tab_filename(tab, filename);
                 if (last_read_help_uri && g_strcmp0(uri, last_read_help_uri) == 0) {
@@ -3327,10 +2954,10 @@ static void restore_open_tabs_for_session(const char *session_name) {
         }
     }
 
-    is_restoring_session_tabs = FALSE;
+    app.is_restoring_session_tabs = FALSE;
 
-    int n_left = left_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(left_notebook)) : 0;
-    int n_right = right_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(right_notebook)) : 0;
+    int n_left = app.left_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.left_notebook)) : 0;
+    int n_right = app.right_notebook ? gtk_notebook_get_n_pages(GTK_NOTEBOOK(app.right_notebook)) : 0;
 
     int focus_left = (matched_left_index >= 0) ? matched_left_index : (n_left > 0 ? 0 : -1);
     int focus_right = (matched_right_index >= 0) ? matched_right_index : (n_right > 0 ? 0 : -1);
@@ -3338,7 +2965,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
     // Pass 2: synchronously load the focused tabs so content appears immediately;
     // defer all other tabs to idle-time progressive loading.
     for (int i = 0; i < n_left; i++) {
-        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), i);
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.left_notebook), i);
         TabData *t = page ? g_object_get_data(G_OBJECT(page), "tab-data") : NULL;
         if (!t) continue;
         if (i == focus_left)
@@ -3348,7 +2975,7 @@ static void restore_open_tabs_for_session(const char *session_name) {
     }
 
     for (int i = 0; i < n_right; i++) {
-        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), i);
+        GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.right_notebook), i);
         TabData *t = page ? g_object_get_data(G_OBJECT(page), "tab-data") : NULL;
         if (!t) continue;
         if (i == focus_right)
@@ -3358,26 +2985,26 @@ static void restore_open_tabs_for_session(const char *session_name) {
     }
 
     // Re-focus last-read tabs (fires the notebook switch handler with loaded docs)
-    if (left_notebook && focus_left >= 0 && focus_left < n_left) {
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(left_notebook), focus_left);
+    if (app.left_notebook && focus_left >= 0 && focus_left < n_left) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(app.left_notebook), focus_left);
     }
 
-    if (right_notebook && focus_right >= 0 && focus_right < n_right) {
-        gtk_notebook_set_current_page(GTK_NOTEBOOK(right_notebook), focus_right);
+    if (app.right_notebook && focus_right >= 0 && focus_right < n_right) {
+        gtk_notebook_set_current_page(GTK_NOTEBOOK(app.right_notebook), focus_right);
     }
 
     /* Refresh sidebar state for the restored current tabs. The switch handler
        above may not fire if the focused tab was already current, so do it here. */
-    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
+    if (app.current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
+    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
 }
 
-static void queue_draw(TabData *tab) {
+void queue_draw(TabData *tab) {
     if (tab && tab->pages_drawing)
         gtk_widget_queue_draw(tab->pages_drawing);
 }
 
-static void scroll_to_page(TabData *tab, int page, double target_y) {
+void scroll_to_page(TabData *tab, int page, double target_y) {
     if (!tab || !tab->scrolled || !tab->pages_drawing || !tab->cached_page_widths) return;
     if (page < 0 || page >= tab->n_pages) return;
 
@@ -3430,13 +3057,13 @@ static gboolean deferred_update_document_model(gpointer data) {
     tab->scroll_doc_debounce_id = 0;
     if (!tab || !tab->cached_page_widths) return G_SOURCE_REMOVE;
     update_document_model_from_tab(tab);
-    if (current_sidebar_mode == SIDEBAR_TOC) {
+    if (app.current_sidebar_mode == SIDEBAR_TOC) {
         update_toc_selection_for_current_page(tab);
     }
     return G_SOURCE_REMOVE;
 }
 
-static void cancel_doc_model_debounce(TabData *tab) {
+void cancel_doc_model_debounce(TabData *tab) {
     if (tab && tab->scroll_doc_debounce_id) {
         g_source_remove(tab->scroll_doc_debounce_id);
         tab->scroll_doc_debounce_id = 0;
@@ -3576,7 +3203,7 @@ static void on_tab_scrolled_size_allocate(GtkWidget *widget, GdkRectangle *alloc
 
     /* Ensure doc is loaded for the active tab that owns this size-allocate */
     if (!tab->cached_page_widths) {
-        if (!is_restoring_session_tabs && !ensure_tab_doc_loaded(tab)) return;
+        if (!app.is_restoring_session_tabs && !ensure_tab_doc_loaded(tab)) return;
     }
 
     double zoom = tab->zoom > 0 ? tab->zoom : 96.0;
@@ -3806,7 +3433,7 @@ static gboolean is_safe_link_scheme(const char *uri, char **scheme_out) {
 
 static gboolean confirm_unsafe_link(const char *uri, const char *scheme) {
     GtkWidget *dialog = gtk_message_dialog_new(
-        GTK_WINDOW(window),
+        GTK_WINDOW(app.window),
         GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT,
         GTK_MESSAGE_WARNING,
         GTK_BUTTONS_YES_NO,
@@ -3843,7 +3470,7 @@ static gboolean open_external_link(const char *uri) {
     g_free(scheme);
 
     GError *err = NULL;
-    gtk_show_uri_on_window(GTK_WINDOW(window), uri, GDK_CURRENT_TIME, &err);
+    gtk_show_uri_on_window(GTK_WINDOW(app.window), uri, GDK_CURRENT_TIME, &err);
     if (err) {
         g_warning("Failed to open URI: %s", err->message);
         g_clear_error(&err);
@@ -4471,30 +4098,30 @@ static void build_continuous_view(TabData *tab) {
     gtk_widget_queue_draw(tab->pages_drawing);
 }
 
-static TabData *get_current_left_tab(void) {
-    if (!left_notebook) return NULL;
-    int idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(left_notebook));
+TabData *get_current_left_tab(void) {
+    if (!app.left_notebook) return NULL;
+    int idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app.left_notebook));
     if (idx < 0) return NULL;
 
-    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(left_notebook), idx);
+    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.left_notebook), idx);
     if (!page) return NULL;
 
     return g_object_get_data(G_OBJECT(page), "tab-data");
 }
 
 static TabData *get_current_right_tab(void) {
-    if (!right_notebook) return NULL;
-    int idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(right_notebook));
+    if (!app.right_notebook) return NULL;
+    int idx = gtk_notebook_get_current_page(GTK_NOTEBOOK(app.right_notebook));
     if (idx < 0) return NULL;
 
-    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(right_notebook), idx);
+    GtkWidget *page = gtk_notebook_get_nth_page(GTK_NOTEBOOK(app.right_notebook), idx);
     if (!page) return NULL;
 
     return g_object_get_data(G_OBJECT(page), "tab-data");
 }
 
 static void sync_page_widget_from_tab(TabData *tab) {
-    if (!page_entry || !page_total_label) return;
+    if (!app.page_entry || !app.page_total_label) return;
 
     int total = 0;
     int current = 0;
@@ -4506,20 +4133,20 @@ static void sync_page_widget_from_tab(TabData *tab) {
         if (current > total) current = total;
     }
 
-    page_spin_syncing = TRUE;
+    app.page_spin_syncing = TRUE;
     if (total == 0) {
         /* pick one of these two lines */
-        gtk_entry_set_text(GTK_ENTRY(page_entry), "");   /* blank */
+        gtk_entry_set_text(GTK_ENTRY(app.page_entry), "");   /* blank */
         /* gtk_entry_set_text(GTK_ENTRY(page_entry), "0"); */ /* or 0 */
     } else {
         gchar *cur_txt = g_strdup_printf("%d", current);
-        gtk_entry_set_text(GTK_ENTRY(page_entry), cur_txt);
+        gtk_entry_set_text(GTK_ENTRY(app.page_entry), cur_txt);
         g_free(cur_txt);
     }
-    page_spin_syncing = FALSE;
+    app.page_spin_syncing = FALSE;
 
     gchar *txt = g_strdup_printf("/ %d", total);
-    gtk_label_set_text(GTK_LABEL(page_total_label), txt);
+    gtk_label_set_text(GTK_LABEL(app.page_total_label), txt);
     g_free(txt);
 }
 
@@ -4542,7 +4169,7 @@ static void on_page_entry_insert_text(GtkEditable *editable,
 
 static void on_page_entry_activate(GtkEntry *entry, gpointer user_data) {
     (void)user_data;
-    if (page_spin_syncing) return;
+    if (app.page_spin_syncing) return;
 
     TabData *tab = get_current_left_tab();
     if (!tab || tab->n_pages <= 0) return;
@@ -4565,7 +4192,7 @@ static void on_page_entry_activate(GtkEntry *entry, gpointer user_data) {
 }
 
 static void sync_right_page_widget_from_tab(TabData *tab) {
-    if (!right_page_entry || !right_page_total_label) return;
+    if (!app.right_page_entry || !app.right_page_total_label) return;
 
     int total = 0;
     int current = 0;
@@ -4577,32 +4204,32 @@ static void sync_right_page_widget_from_tab(TabData *tab) {
         if (current > total) current = total;
     }
 
-    right_page_spin_syncing = TRUE;
+    app.right_page_spin_syncing = TRUE;
     if (total == 0) {
-        gtk_entry_set_text(GTK_ENTRY(right_page_entry), "");
+        gtk_entry_set_text(GTK_ENTRY(app.right_page_entry), "");
     } else {
         gchar *cur_txt = g_strdup_printf("%d", current);
-        gtk_entry_set_text(GTK_ENTRY(right_page_entry), cur_txt);
+        gtk_entry_set_text(GTK_ENTRY(app.right_page_entry), cur_txt);
         g_free(cur_txt);
     }
-    right_page_spin_syncing = FALSE;
+    app.right_page_spin_syncing = FALSE;
 
     gchar *txt = g_strdup_printf("/ %d", total);
-    gtk_label_set_text(GTK_LABEL(right_page_total_label), txt);
+    gtk_label_set_text(GTK_LABEL(app.right_page_total_label), txt);
     g_free(txt);
 
     /* Show/hide right nav based on whether there are pages */
-    if (right_page_nav_overlay) {
+    if (app.right_page_nav_overlay) {
         if (total > 0)
-            gtk_widget_show(right_page_nav_overlay);
+            gtk_widget_show(app.right_page_nav_overlay);
         else
-            gtk_widget_hide(right_page_nav_overlay);
+            gtk_widget_hide(app.right_page_nav_overlay);
     }
 }
 
 static void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {
     (void)user_data;
-    if (right_page_spin_syncing) return;
+    if (app.right_page_spin_syncing) return;
 
     TabData *tab = get_current_right_tab();
     if (!tab || tab->n_pages <= 0) return;
@@ -4630,8 +4257,8 @@ static void refresh_tab_label(TabData *tab) {
     char *basename = g_path_get_basename(tab->current_file);
     const char *label_text = basename;
     char *truncated = NULL;
-    if (sessions_model) {
-        int max_chars = sessions_model_get_tab_width(sessions_model);
+    if (app.sessions_model) {
+        int max_chars = sessions_model_get_tab_width(app.sessions_model);
         if (max_chars > 0 && (int)strlen(basename) > max_chars) {
             truncated = g_strndup(basename, max_chars);
             label_text = truncated;
@@ -4731,18 +4358,18 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
     if (!tab || !filename) return;
     set_tab_filename(tab, filename);
     open_document_in_tab(tab);
-    if (current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
-    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+    if (app.current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
+    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
+    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
         TabData *rtab = get_current_right_tab();
         gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
         gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
         g_free(text);
         g_free(basename);
 
         text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
         g_free(text);
 
         if (rtab && rtab->current_file) {
@@ -4752,25 +4379,25 @@ static void load_file_into_tab(TabData *tab, const char *filename) {
             if (info) {
                 gchar *size_str = format_file_size(g_file_info_get_size(info));
                 gchar *size_text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), size_text);
                 g_free(size_text);
                 g_free(size_str);
                 g_object_unref(info);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
             }
             g_object_unref(gf);
 
             if (rtab->doc) {
                 gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
             }
         } else {
-            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
         }
     }
 }
@@ -4784,7 +4411,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->last_zoom = 96.0;
     tab->initial_scroll_pending = FALSE;
     tab->scroll_offset = -1.0;
-    tab->is_helper = (notebook == right_notebook);
+    tab->is_helper = (notebook == app.right_notebook);
     tab->zoom_scroll_source_id = 0;
     tab->scroll_doc_debounce_id = 0;
     tab->last_cursor_type = GDK_LEFT_PTR;
@@ -4852,15 +4479,15 @@ static TabData *create_new_tab(GtkWidget *notebook) {
 
     /* Determine box orientation based on tab position */
     GtkOrientation box_orientation = GTK_ORIENTATION_HORIZONTAL;
-    if (sessions_model) {
-        const char *pos = sessions_model_get_tabbar_position(sessions_model);
+    if (app.sessions_model) {
+        const char *pos = sessions_model_get_tabbar_position(app.sessions_model);
         if (g_strcmp0(pos, "left") == 0 || g_strcmp0(pos, "right") == 0)
             box_orientation = GTK_ORIENTATION_VERTICAL;
     }
     GtkWidget *label_box = gtk_box_new(box_orientation, 1);
     GtkWidget *label = gtk_label_new("New Document");
-    if (sessions_model)
-        gtk_label_set_angle(GTK_LABEL(label), get_angle_for_position(sessions_model_get_tabbar_position(sessions_model)));
+    if (app.sessions_model)
+        gtk_label_set_angle(GTK_LABEL(label), get_angle_for_position(sessions_model_get_tabbar_position(app.sessions_model)));
     tab->tab_label = label;  /* Store reference to label for updates */
     tab->tab_label_box = label_box;  /* Store reference to container for orientation changes */
     GtkWidget *close_img = gtk_image_new_from_icon_name("window-close-symbolic", GTK_ICON_SIZE_MENU);
@@ -4871,10 +4498,10 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     tab->tab_label_close_btn = close_btn;
     gtk_widget_set_has_tooltip(close_btn, TRUE);
     gtk_widget_set_tooltip_text(close_btn, "Close tab");
-    if (sessions_model && g_strcmp0(sessions_model_get_tabbar_position(sessions_model), "left") == 0) {
+    if (app.sessions_model && g_strcmp0(sessions_model_get_tabbar_position(app.sessions_model), "left") == 0) {
         gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
-    } else if (sessions_model && g_strcmp0(sessions_model_get_tabbar_position(sessions_model), "right") == 0) {
+    } else if (app.sessions_model && g_strcmp0(sessions_model_get_tabbar_position(app.sessions_model), "right") == 0) {
         gtk_box_pack_start(GTK_BOX(label_box), label, FALSE, FALSE, 0);
         gtk_box_pack_start(GTK_BOX(label_box), close_btn, FALSE, FALSE, 0);
     } else {
@@ -4903,7 +4530,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
 static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     if (!notebook) return;
     GtkWidget *dialog = gtk_file_chooser_dialog_new("Open PDF",
-                                                   GTK_WINDOW(window),
+                                                   GTK_WINDOW(app.window),
                                                    GTK_FILE_CHOOSER_ACTION_OPEN,
                                                    "_Cancel", GTK_RESPONSE_CANCEL,
                                                    "_Open", GTK_RESPONSE_ACCEPT,
@@ -4914,8 +4541,8 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     gtk_file_chooser_add_filter(GTK_FILE_CHOOSER(dialog), filter);
     gtk_file_chooser_set_select_multiple(GTK_FILE_CHOOSER(dialog), TRUE);
 
-    if (last_open_dir && g_file_test(last_open_dir, G_FILE_TEST_IS_DIR)) {
-        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), last_open_dir);
+    if (app.last_open_dir && g_file_test(app.last_open_dir, G_FILE_TEST_IS_DIR)) {
+        gtk_file_chooser_set_current_folder(GTK_FILE_CHOOSER(dialog), app.last_open_dir);
     }
 
     if (gtk_dialog_run(GTK_DIALOG(dialog)) == GTK_RESPONSE_ACCEPT) {
@@ -4925,8 +4552,8 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
             if (first_file) {
                 char *dir = g_path_get_dirname(first_file);
                 if (dir) {
-                    g_free(last_open_dir);
-                    last_open_dir = dir;
+                    g_free(app.last_open_dir);
+                    app.last_open_dir = dir;
                 }
             }
         }
@@ -4948,8 +4575,8 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
                 if (tab) {
                     load_file_into_tab(tab, fname);
                     /* Add to session model only for newly opened docs */
-                    if (current_selected_session) {
-                        session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+                    if (app.current_selected_session) {
+                        session_model_t *session = g_hash_table_lookup(app.session_models, app.current_selected_session);
                         if (session && uri) {
                             if (is_helper) {
                                 session_model_add_helper_document_url(session, uri);
@@ -4975,13 +4602,13 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
 static void on_open_file_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
-    open_file_in_notebook(left_notebook, FALSE);
+    open_file_in_notebook(app.left_notebook, FALSE);
 }
 
 static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data) {
     (void)button;
     (void)user_data;
-    open_file_in_notebook(right_notebook, TRUE);
+    open_file_in_notebook(app.right_notebook, TRUE);
 }
 
 static void close_tab_in_notebook(GtkNotebook *notebook) {
@@ -4998,13 +4625,13 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
         return;
     }
 
-    gboolean is_left = (notebook == GTK_NOTEBOOK(left_notebook));
-    gboolean is_right = (notebook == GTK_NOTEBOOK(right_notebook));
+    gboolean is_left = (notebook == GTK_NOTEBOOK(app.left_notebook));
+    gboolean is_right = (notebook == GTK_NOTEBOOK(app.right_notebook));
 
     char *closed_uri = NULL;
     session_model_t *session = NULL;
-    if (current_selected_session && session_models) {
-        session = g_hash_table_lookup(session_models, current_selected_session);
+    if (app.current_selected_session && app.session_models) {
+        session = g_hash_table_lookup(app.session_models, app.current_selected_session);
     }
 
     if (tab->current_file && session) {
@@ -5016,9 +4643,9 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
                 session_model_remove_helper_document_url(session, closed_uri);
             }
         }
-        if (closed_uri && document_models) {
-            char *key = make_document_key(current_selected_session, closed_uri, tab->is_helper);
-            g_hash_table_remove(document_models, key);
+        if (closed_uri && app.document_models) {
+            char *key = make_document_key(app.current_selected_session, closed_uri, tab->is_helper);
+            g_hash_table_remove(app.document_models, key);
             g_free(key);
         }
     }
@@ -5061,20 +4688,20 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
         sync_right_page_widget_from_tab(get_current_right_tab());
     }
 
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
+    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) {
         update_file_info_labels(get_current_left_tab());
     }
 
-    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
         TabData *rtab = get_current_right_tab();
         gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
         gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
         g_free(text);
         g_free(basename);
 
         text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
         g_free(text);
 
         if (rtab && rtab->current_file) {
@@ -5084,25 +4711,25 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
             if (info) {
                 gchar *size_str = format_file_size(g_file_info_get_size(info));
                 text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), text);
                 g_free(text);
                 g_free(size_str);
                 g_object_unref(info);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
             }
             g_object_unref(gf);
 
             if (rtab->doc) {
                 gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
             }
         } else {
-            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
         }
     }
 
@@ -5114,13 +4741,13 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
 static void on_close_file_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     (void)user_data;
-    close_tab_in_notebook(GTK_NOTEBOOK(left_notebook));
+    close_tab_in_notebook(GTK_NOTEBOOK(app.left_notebook));
 }
 
 static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
     (void)user_data;
-    close_tab_in_notebook(GTK_NOTEBOOK(right_notebook));
+    close_tab_in_notebook(GTK_NOTEBOOK(app.right_notebook));
 }
 
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri) {
@@ -5142,17 +4769,17 @@ static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri
 
 static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num) {
     (void)page_num;
-    if (is_restoring_session_tabs) return;
-    if (!notebook || !page || !current_selected_session || !session_models) return;
-    session_model_t *session = g_hash_table_lookup(session_models, current_selected_session);
+    if (app.is_restoring_session_tabs) return;
+    if (!notebook || !page || !app.current_selected_session || !app.session_models) return;
+    session_model_t *session = g_hash_table_lookup(app.session_models, app.current_selected_session);
     if (!session) return;
     TabData *tab = g_object_get_data(G_OBJECT(page), "tab-data");
     if (!tab || !tab->current_file) return;
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
-    if (notebook == GTK_NOTEBOOK(left_notebook)) {
+    if (notebook == GTK_NOTEBOOK(app.left_notebook)) {
         session_model_set_last_read_document(session, uri);
-    } else if (notebook == GTK_NOTEBOOK(right_notebook)) {
+    } else if (notebook == GTK_NOTEBOOK(app.right_notebook)) {
         session_model_set_last_read_help_document(session, uri);
     }
     g_free(uri);
@@ -5212,7 +4839,7 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     update_last_read_for_notebook(notebook, page, page_num);
 
-    if (tab && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
+    if (tab && !app.is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
@@ -5221,11 +4848,11 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
             restore_document_model_to_tab(tab);
             tab->initial_scroll_pending = FALSE;
         } else {
-            if (tab->current_file && document_models && tab->cached_page_widths) {
+            if (tab->current_file && app.document_models && tab->cached_page_widths) {
                 char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
                 if (uri) {
-                    char *key = make_document_key(current_selected_session, uri, tab->is_helper);
-                    document_model_t *dm = g_hash_table_lookup(document_models, key);
+                    char *key = make_document_key(app.current_selected_session, uri, tab->is_helper);
+                    document_model_t *dm = g_hash_table_lookup(app.document_models, key);
                     if (dm) {
                         tab->layout_mode = document_model_get_visualization_mode(dm);
                         double saved_zoom = document_model_get_zoom(dm);
@@ -5252,16 +4879,16 @@ static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page,
 
     sync_left_layout_buttons(tab);
     sync_page_widget_from_tab(tab);
-    if (current_sidebar_mode == SIDEBAR_TOC) {
+    if (app.current_sidebar_mode == SIDEBAR_TOC) {
         populate_toc_treeview_for_tab(tab);
         update_toc_selection_for_current_page(tab);
     }
-    if (current_sidebar_mode == SIDEBAR_SESSIONS) {
-        sessions_tree_syncing = TRUE;
+    if (app.current_sidebar_mode == SIDEBAR_SESSIONS) {
+        app.sessions_tree_syncing = TRUE;
         update_sessions_tree_document_selection_for_tab(tab);
-        sessions_tree_syncing = FALSE;
+        app.sessions_tree_syncing = FALSE;
     }
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(tab);
+    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(tab);
 }
 
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {
@@ -5311,7 +4938,7 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     update_last_read_for_notebook(notebook, page, page_num);
 
     /* Load current tab's doc if needed */
-    if (tab && !is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
+    if (tab && !app.is_restoring_session_tabs) ensure_tab_doc_loaded(tab);
 
     // RESTORE STATE WHEN SWITCHING TO THIS TAB
     if (tab) {
@@ -5323,16 +4950,16 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
     sync_page_widget_from_tab(get_current_left_tab());
     sync_right_page_widget_from_tab(tab);
 
-    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
         TabData *rtab = tab;
         gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
         gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
         g_free(text);
         g_free(basename);
 
         text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
         g_free(text);
 
         if (rtab && rtab->current_file) {
@@ -5342,25 +4969,25 @@ static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page
             if (info) {
                 gchar *size_str = format_file_size(g_file_info_get_size(info));
                 gchar *size_text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), size_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), size_text);
                 g_free(size_text);
                 g_free(size_str);
                 g_object_unref(info);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
             }
             g_object_unref(gf);
 
             if (rtab->doc) {
                 gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
             }
         } else {
-            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
         }
     }
 }
@@ -5370,8 +4997,8 @@ static void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, g
     (void)page;
     (void)page_num;
     (void)user_data;
-    if (current_selected_session) {
-        save_open_tabs_for_session(current_selected_session);
+    if (app.current_selected_session) {
+        save_open_tabs_for_session(app.current_selected_session);
         populate_sessions_treeview();
     }
 }
@@ -5388,11 +5015,11 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
         return;
     }
 
-    gboolean is_left = (ci->notebook == GTK_NOTEBOOK(left_notebook));
-    gboolean is_right = (ci->notebook == GTK_NOTEBOOK(right_notebook));
+    gboolean is_left = (ci->notebook == GTK_NOTEBOOK(app.left_notebook));
+    gboolean is_right = (ci->notebook == GTK_NOTEBOOK(app.right_notebook));
     session_model_t *session = NULL;
-    if (current_selected_session && session_models) {
-        session = g_hash_table_lookup(session_models, current_selected_session);
+    if (app.current_selected_session && app.session_models) {
+        session = g_hash_table_lookup(app.session_models, app.current_selected_session);
     }
 
     char *closed_uri = NULL;
@@ -5412,9 +5039,9 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
                     }
                 }
                 // Remove document model so reopened file starts fresh (zoom, page, view, etc.)
-                if (closed_uri && document_models) {
-                    char *key = make_document_key(current_selected_session, closed_uri, tab->is_helper);
-                    g_hash_table_remove(document_models, key);
+                if (closed_uri && app.document_models) {
+                    char *key = make_document_key(app.current_selected_session, closed_uri, tab->is_helper);
+                    g_hash_table_remove(app.document_models, key);
                     g_free(key);
                 }
             }
@@ -5459,20 +5086,20 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
         sync_right_page_widget_from_tab(get_current_right_tab());
     }
 
-    if (current_sidebar_mode == SIDEBAR_FILE_INFO) {
+    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) {
         update_file_info_labels(get_current_left_tab());
     }
 
-    if (right_file_info_popover && gtk_widget_get_mapped(right_file_info_popover)) {
+    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
         TabData *rtab = get_current_right_tab();
         gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
         gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(right_popover_name_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
         g_free(text);
         g_free(basename);
 
         text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(right_popover_path_label), text);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
         g_free(text);
 
         if (rtab && rtab->current_file) {
@@ -5482,25 +5109,25 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
             if (info) {
                 gchar *size_str = format_file_size(g_file_info_get_size(info));
                 text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), text);
                 g_free(text);
                 g_free(size_str);
                 g_object_unref(info);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: Unknown");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
             }
             g_object_unref(gf);
 
             if (rtab->doc) {
                 gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), pages_text);
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
                 g_free(pages_text);
             } else {
-                gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: N/A");
+                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
             }
         } else {
-            gtk_label_set_text(GTK_LABEL(right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(right_popover_pages_label), "Pages: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
         }
     }
 
@@ -5578,15 +5205,15 @@ static gboolean restore_zoom_scroll_cb(gpointer user_data) {
 
 static gboolean deferred_zoom_save(gpointer data) {
     (void)data;
-    zoom_save_debounce_id = 0;
+    app.zoom_save_debounce_id = 0;
     save_state();
     return FALSE;
 }
 
 static void schedule_zoom_save(void) {
-    if (zoom_save_debounce_id)
-        g_source_remove(zoom_save_debounce_id);
-    zoom_save_debounce_id = g_timeout_add(200, deferred_zoom_save, NULL);
+    if (app.zoom_save_debounce_id)
+        g_source_remove(app.zoom_save_debounce_id);
+    app.zoom_save_debounce_id = g_timeout_add(200, deferred_zoom_save, NULL);
 }
 
 static void apply_zoom_to_tab(TabData *tab, int direction) {
@@ -5772,35 +5399,35 @@ static void on_layout_right_toggled(GtkToggleButton *btn, gpointer user_data) {
 }
 
 static void sync_left_layout_buttons(TabData *tab) {
-    if (!left_column_btn) return;
-    g_signal_handlers_block_by_func(left_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
-    g_signal_handlers_block_by_func(left_double_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
-    g_signal_handlers_block_by_func(left_row_btn, G_CALLBACK(on_layout_left_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(left_column_btn), tab && tab->layout_mode == 0);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(left_double_column_btn), tab && tab->layout_mode == 1);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(left_row_btn), tab && tab->layout_mode == 2);
-    g_signal_handlers_unblock_by_func(left_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
-    g_signal_handlers_unblock_by_func(left_double_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
-    g_signal_handlers_unblock_by_func(left_row_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    if (!app.left_column_btn) return;
+    g_signal_handlers_block_by_func(app.left_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    g_signal_handlers_block_by_func(app.left_double_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    g_signal_handlers_block_by_func(app.left_row_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.left_column_btn), tab && tab->layout_mode == 0);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.left_double_column_btn), tab && tab->layout_mode == 1);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.left_row_btn), tab && tab->layout_mode == 2);
+    g_signal_handlers_unblock_by_func(app.left_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    g_signal_handlers_unblock_by_func(app.left_double_column_btn, G_CALLBACK(on_layout_left_toggled), NULL);
+    g_signal_handlers_unblock_by_func(app.left_row_btn, G_CALLBACK(on_layout_left_toggled), NULL);
 }
 
 static void sync_right_layout_buttons(TabData *tab) {
-    if (!right_column_btn) return;
-    g_signal_handlers_block_by_func(right_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
-    g_signal_handlers_block_by_func(right_double_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
-    g_signal_handlers_block_by_func(right_row_btn, G_CALLBACK(on_layout_right_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_column_btn), tab && tab->layout_mode == 0);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_double_column_btn), tab && tab->layout_mode == 1);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(right_row_btn), tab && tab->layout_mode == 2);
-    g_signal_handlers_unblock_by_func(right_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
-    g_signal_handlers_unblock_by_func(right_double_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
-    g_signal_handlers_unblock_by_func(right_row_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    if (!app.right_column_btn) return;
+    g_signal_handlers_block_by_func(app.right_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    g_signal_handlers_block_by_func(app.right_double_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    g_signal_handlers_block_by_func(app.right_row_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.right_column_btn), tab && tab->layout_mode == 0);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.right_double_column_btn), tab && tab->layout_mode == 1);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.right_row_btn), tab && tab->layout_mode == 2);
+    g_signal_handlers_unblock_by_func(app.right_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    g_signal_handlers_unblock_by_func(app.right_double_column_btn, G_CALLBACK(on_layout_right_toggled), NULL);
+    g_signal_handlers_unblock_by_func(app.right_row_btn, G_CALLBACK(on_layout_right_toggled), NULL);
 }
 
 GtkWidget* create_main_window(void) {
-    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
-    gtk_window_set_title(GTK_WINDOW(window), "Siters");
-    gtk_window_set_default_size(GTK_WINDOW(window), 1000, 800);
+    app.window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(app.window), "Siters");
+    gtk_window_set_default_size(GTK_WINDOW(app.window), 1000, 800);
 
     // Load application icon from PNG (gdk-pixbuf always supports PNG)
     GError *icon_err = NULL;
@@ -5822,22 +5449,22 @@ GtkWidget* create_main_window(void) {
     GdkGeometry hints = {0};
     hints.min_width = 1000;
     hints.min_height = 800;
-    gtk_window_set_geometry_hints(GTK_WINDOW(window), NULL, &hints, GDK_HINT_MIN_SIZE);
+    gtk_window_set_geometry_hints(GTK_WINDOW(app.window), NULL, &hints, GDK_HINT_MIN_SIZE);
 
     // Initialize sessions model
-    if (!sessions_model) {
-        sessions_model = sessions_model_new();
+    if (!app.sessions_model) {
+        app.sessions_model = sessions_model_new();
         // Initialize session models hash table
-        session_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)session_model_free);
+        app.session_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free, (GDestroyNotify)session_model_free);
 
         // Initialize document models hash table
-        if (!document_models) {
-            document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+        if (!app.document_models) {
+            app.document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
                                                    (GDestroyNotify)document_model_free);
         }
 
         // Always ensure "Default" session exists
-        const GList *existing_sessions = sessions_model_get_session_names(sessions_model);
+        const GList *existing_sessions = sessions_model_get_session_names(app.sessions_model);
         gboolean has_default = FALSE;
         for (const GList *iter = existing_sessions; iter != NULL; iter = iter->next) {
             if (strcmp((const char*)iter->data, "Default") == 0) {
@@ -5846,17 +5473,17 @@ GtkWidget* create_main_window(void) {
             }
         }
         if (!has_default) {
-            sessions_model_add_session_name(sessions_model, "Default");
+            sessions_model_add_session_name(app.sessions_model, "Default");
             // Create session model for Default
             session_model_t *default_session = session_model_new();
             session_model_set_session_name(default_session, "Default");
-            g_hash_table_insert(session_models, g_strdup("Default"), default_session);
+            g_hash_table_insert(app.session_models, g_strdup("Default"), default_session);
         } else {
             // Ensure we have a session model for Default
-            if (!g_hash_table_lookup(session_models, "Default")) {
+            if (!g_hash_table_lookup(app.session_models, "Default")) {
                 session_model_t *default_session = session_model_new();
                 session_model_set_session_name(default_session, "Default");
-                g_hash_table_insert(session_models, g_strdup("Default"), default_session);
+                g_hash_table_insert(app.session_models, g_strdup("Default"), default_session);
             }
         }
     }
@@ -5865,86 +5492,86 @@ GtkWidget* create_main_window(void) {
        and the theme name for known dark-theme keywords. */
     {
         GtkSettings *settings = gtk_settings_get_default();
-        is_dark_theme = detect_system_dark_theme();
-        sessions_model_set_theme(sessions_model, is_dark_theme ? "dark" : "light");
+        app.is_dark_theme = detect_system_dark_theme();
+        sessions_model_set_theme(app.sessions_model, app.is_dark_theme ? "dark" : "light");
         g_signal_connect(settings, "notify::gtk-theme-name", G_CALLBACK(on_theme_changed), NULL);
         g_signal_connect(settings, "notify::gtk-application-prefer-dark-theme", G_CALLBACK(on_theme_changed), NULL);
     }
 
-    g_signal_connect(window, "destroy", G_CALLBACK(on_window_destroy), NULL);
-    g_signal_connect(window, "configure-event", G_CALLBACK(on_window_configure), NULL);
+    g_signal_connect(app.window, "destroy", G_CALLBACK(on_window_destroy), NULL);
+    g_signal_connect(app.window, "configure-event", G_CALLBACK(on_window_configure), NULL);
 
     /* Main horizontal container: toolbar on left, content on right */
-    main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_container_add(GTK_CONTAINER(window), main_hbox);
+    app.main_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_container_add(GTK_CONTAINER(app.window), app.main_hbox);
 
     /* Left sidebar: main toolbar */
     GtkWidget *toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(toolbar), "Toolbar");
     gtk_widget_set_size_request(toolbar, 36, -1);
-    gtk_box_pack_start(GTK_BOX(main_hbox), toolbar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), toolbar, FALSE, FALSE, 0);
 
     /* Sidebar for sessions, toc, settings */
-    sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    g_object_ref(sidebar);  /* Keep a reference to prevent destruction when removed */
-    gtk_widget_set_size_request(sidebar, 200, -1);
-    atk_object_set_name(gtk_widget_get_accessible(sidebar), "Sidebar");
+    app.sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    g_object_ref(app.sidebar);  /* Keep a reference to prevent destruction when removed */
+    gtk_widget_set_size_request(app.sidebar, 200, -1);
+    atk_object_set_name(gtk_widget_get_accessible(app.sidebar), "Sidebar");
 
     /* Content for sidebar */
-    sidebar_label = gtk_label_new("");
-    gtk_label_set_justify(GTK_LABEL(sidebar_label), GTK_JUSTIFY_LEFT);
-    atk_object_set_name(gtk_widget_get_accessible(sidebar_label), "Sidebar label");
-    g_object_ref(sidebar_label);  /* Keep a reference to prevent destruction when removed */
-    gtk_box_pack_start(GTK_BOX(sidebar), sidebar_label, TRUE, TRUE, 0);
-    gtk_widget_hide(sidebar_label);
+    app.sidebar_label = gtk_label_new("");
+    gtk_label_set_justify(GTK_LABEL(app.sidebar_label), GTK_JUSTIFY_LEFT);
+    atk_object_set_name(gtk_widget_get_accessible(app.sidebar_label), "Sidebar label");
+    g_object_ref(app.sidebar_label);  /* Keep a reference to prevent destruction when removed */
+    gtk_box_pack_start(GTK_BOX(app.sidebar), app.sidebar_label, TRUE, TRUE, 0);
+    gtk_widget_hide(app.sidebar_label);
 
     /* Sessions container */
-    sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(sessions_container), 5);
-    g_object_ref(sessions_container);  /* Keep a reference */
+    app.sessions_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(app.sessions_container), 5);
+    g_object_ref(app.sessions_container);  /* Keep a reference */
 
     // Title
-    sessions_title = gtk_label_new("Sessions");
-    gtk_widget_set_halign(sessions_title, GTK_ALIGN_START);
+    app.sessions_title = gtk_label_new("Sessions");
+    gtk_widget_set_halign(app.sessions_title, GTK_ALIGN_START);
     PangoAttrList *attr_list = pango_attr_list_new();
     PangoAttribute *attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
     pango_attr_list_insert(attr_list, attr);
     attr = pango_attr_scale_new(PANGO_SCALE_LARGE);
     pango_attr_list_insert(attr_list, attr);
-    gtk_label_set_attributes(GTK_LABEL(sessions_title), attr_list);
+    gtk_label_set_attributes(GTK_LABEL(app.sessions_title), attr_list);
     pango_attr_list_unref(attr_list);
-    gtk_box_pack_start(GTK_BOX(sessions_container), sessions_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.sessions_container), app.sessions_title, FALSE, FALSE, 0);
 
     // Entry field
-    sessions_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(sessions_entry), "Enter session name...");
-    gtk_box_pack_start(GTK_BOX(sessions_container), sessions_entry, FALSE, FALSE, 0);
-    atk_object_set_name(gtk_widget_get_accessible(sessions_entry), "Sessions entry");
+    app.sessions_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(app.sessions_entry), "Enter session name...");
+    gtk_box_pack_start(GTK_BOX(app.sessions_container), app.sessions_entry, FALSE, FALSE, 0);
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_entry), "Sessions entry");
 
     // Buttons box
     GtkWidget *buttons_box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 5);
-    gtk_box_pack_start(GTK_BOX(sessions_container), buttons_box, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.sessions_container), buttons_box, FALSE, FALSE, 0);
 
-    sessions_add_btn = gtk_button_new_with_label("Add");
-    gtk_widget_set_tooltip_text(sessions_add_btn, "Add new session");
-    atk_object_set_name(gtk_widget_get_accessible(sessions_add_btn), "Add session");
-    g_signal_connect(sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_add_btn, TRUE, TRUE, 0);
+    app.sessions_add_btn = gtk_button_new_with_label("Add");
+    gtk_widget_set_tooltip_text(app.sessions_add_btn, "Add new session");
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_add_btn), "Add session");
+    g_signal_connect(app.sessions_add_btn, "clicked", G_CALLBACK(on_sessions_add_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), app.sessions_add_btn, TRUE, TRUE, 0);
 
-    sessions_remove_btn = gtk_button_new_with_label("Remove");
-    gtk_widget_set_tooltip_text(sessions_remove_btn, "Remove selected session");
-    atk_object_set_name(gtk_widget_get_accessible(sessions_remove_btn), "Remove session");
-    g_signal_connect(sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_remove_btn, TRUE, TRUE, 0);
+    app.sessions_remove_btn = gtk_button_new_with_label("Remove");
+    gtk_widget_set_tooltip_text(app.sessions_remove_btn, "Remove selected session");
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_remove_btn), "Remove session");
+    g_signal_connect(app.sessions_remove_btn, "clicked", G_CALLBACK(on_sessions_remove_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), app.sessions_remove_btn, TRUE, TRUE, 0);
 
-    sessions_update_btn = gtk_button_new_with_label("Update");
-    gtk_widget_set_tooltip_text(sessions_update_btn, "Update selected session name");
-    atk_object_set_name(gtk_widget_get_accessible(sessions_update_btn), "Update session");
-    g_signal_connect(sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
-    gtk_box_pack_start(GTK_BOX(buttons_box), sessions_update_btn, TRUE, TRUE, 0);
+    app.sessions_update_btn = gtk_button_new_with_label("Update");
+    gtk_widget_set_tooltip_text(app.sessions_update_btn, "Update selected session name");
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_update_btn), "Update session");
+    g_signal_connect(app.sessions_update_btn, "clicked", G_CALLBACK(on_sessions_update_clicked), NULL);
+    gtk_box_pack_start(GTK_BOX(buttons_box), app.sessions_update_btn, TRUE, TRUE, 0);
 
     // Tree view
-    sessions_tree_store = gtk_tree_store_new(
+    app.sessions_tree_store = gtk_tree_store_new(
     SESSION_COL_COUNT,
     G_TYPE_STRING,  // label
     G_TYPE_INT,     // row kind
@@ -5952,32 +5579,32 @@ GtkWidget* create_main_window(void) {
     G_TYPE_STRING   // doc uri
     );
 
-    sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(sessions_tree_store));
-    g_object_unref(sessions_tree_store);
-    atk_object_set_name(gtk_widget_get_accessible(sessions_tree_view), "Sessions tree");
+    app.sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app.sessions_tree_store));
+    g_object_unref(app.sessions_tree_store);
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_tree_view), "Sessions tree");
 
     GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *column = gtk_tree_view_column_new_with_attributes("Session / File", renderer, "text", SESSION_COL_LABEL, NULL);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(sessions_tree_view), column);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(app.sessions_tree_view), column);
 
-    g_signal_connect(sessions_tree_view, "cursor-changed", G_CALLBACK(on_sessions_treeview_cursor_changed), NULL);
+    g_signal_connect(app.sessions_tree_view, "cursor-changed", G_CALLBACK(on_sessions_treeview_cursor_changed), NULL);
 
     // Scrolled window for tree view
     GtkWidget *scrolled_window = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(scrolled_window), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_container_add(GTK_CONTAINER(scrolled_window), sessions_tree_view);
-    gtk_box_pack_start(GTK_BOX(sessions_container), scrolled_window, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(scrolled_window), app.sessions_tree_view);
+    gtk_box_pack_start(GTK_BOX(app.sessions_container), scrolled_window, TRUE, TRUE, 0);
 
     // Populate tree view with existing sessions
     populate_sessions_treeview();
 
-    gtk_box_pack_start(GTK_BOX(sidebar), sessions_container, TRUE, TRUE, 0);
-    gtk_widget_hide(sessions_container);
+    gtk_box_pack_start(GTK_BOX(app.sidebar), app.sessions_container, TRUE, TRUE, 0);
+    gtk_widget_hide(app.sessions_container);
 
     /* TOC container */
-    toc_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(toc_container), 5);
-    g_object_ref(toc_container);
+    app.toc_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(app.toc_container), 5);
+    g_object_ref(app.toc_container);
 
     GtkWidget *toc_title = gtk_label_new("Table of Contents");
     gtk_widget_set_halign(toc_title, GTK_ALIGN_START);
@@ -5986,32 +5613,32 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(toc_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
     gtk_label_set_attributes(GTK_LABEL(toc_title), toc_attr);
     pango_attr_list_unref(toc_attr);
-    gtk_box_pack_start(GTK_BOX(toc_container), toc_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.toc_container), toc_title, FALSE, FALSE, 0);
 
-    toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
+    app.toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
 
-    toc_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(toc_tree_store));
-    g_object_unref(toc_tree_store);
+    app.toc_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app.toc_tree_store));
+    g_object_unref(app.toc_tree_store);
 
     GtkCellRenderer *toc_renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *toc_col = gtk_tree_view_column_new_with_attributes("Section", toc_renderer, "text", TOC_COL_LABEL, NULL);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(toc_tree_view), toc_col);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(app.toc_tree_view), toc_col);
 
-    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(toc_tree_view), TRUE);
-    g_signal_connect(toc_tree_view, "row-activated", G_CALLBACK(on_toc_row_activated), NULL);
+    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(app.toc_tree_view), TRUE);
+    g_signal_connect(app.toc_tree_view, "row-activated", G_CALLBACK(on_toc_row_activated), NULL);
 
     GtkWidget *toc_scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(toc_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    gtk_container_add(GTK_CONTAINER(toc_scrolled), toc_tree_view);
-    gtk_box_pack_start(GTK_BOX(toc_container), toc_scrolled, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(toc_scrolled), app.toc_tree_view);
+    gtk_box_pack_start(GTK_BOX(app.toc_container), toc_scrolled, TRUE, TRUE, 0);
 
-    gtk_box_pack_start(GTK_BOX(sidebar), toc_container, TRUE, TRUE, 0);
-    gtk_widget_hide(toc_container);
+    gtk_box_pack_start(GTK_BOX(app.sidebar), app.toc_container, TRUE, TRUE, 0);
+    gtk_widget_hide(app.toc_container);
 
     /* Settings container */
-    settings_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
-    gtk_container_set_border_width(GTK_CONTAINER(settings_container), 5);
-    g_object_ref(settings_container);
+    app.settings_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 5);
+    gtk_container_set_border_width(GTK_CONTAINER(app.settings_container), 5);
+    g_object_ref(app.settings_container);
 
     GtkWidget *settings_title = gtk_label_new("Siters Preferences");
     gtk_widget_set_halign(settings_title, GTK_ALIGN_START);
@@ -6020,7 +5647,7 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(sattr, pango_attr_scale_new(PANGO_SCALE_LARGE));
     gtk_label_set_attributes(GTK_LABEL(settings_title), sattr);
     pango_attr_list_unref(sattr);
-    gtk_box_pack_start(GTK_BOX(settings_container), settings_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), settings_title, FALSE, FALSE, 0);
 
     GtkWidget *version_label = gtk_label_new("Version 0.1.0-19");
     gtk_widget_set_halign(version_label, GTK_ALIGN_START);
@@ -6028,7 +5655,7 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(vattr, pango_attr_foreground_alpha_new(32768));
     gtk_label_set_attributes(GTK_LABEL(version_label), vattr);
     pango_attr_list_unref(vattr);
-    gtk_box_pack_start(GTK_BOX(settings_container), version_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), version_label, FALSE, FALSE, 0);
 
     /* Tab section */
     GtkWidget *tab_section_label = gtk_label_new("Tab");
@@ -6037,46 +5664,46 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(ts_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
     gtk_label_set_attributes(GTK_LABEL(tab_section_label), ts_attr);
     pango_attr_list_unref(ts_attr);
-    gtk_box_pack_start(GTK_BOX(settings_container), tab_section_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), tab_section_label, FALSE, FALSE, 0);
 
     GtkWidget *tabbar_label = gtk_label_new("Tab bar position:");
     gtk_widget_set_halign(tabbar_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), tabbar_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), tabbar_label, FALSE, FALSE, 0);
 
-    tabbar_combo = gtk_combo_box_text_new();
-    gtk_widget_set_halign(tabbar_combo, GTK_ALIGN_START);
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "left", "Left");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "top", "Top");
-    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(tabbar_combo), "right", "Right");
-    if (sessions_model) {
-        const char *cur = sessions_model_get_tabbar_position(sessions_model);
+    app.tabbar_combo = gtk_combo_box_text_new();
+    gtk_widget_set_halign(app.tabbar_combo, GTK_ALIGN_START);
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app.tabbar_combo), "left", "Left");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app.tabbar_combo), "top", "Top");
+    gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(app.tabbar_combo), "right", "Right");
+    if (app.sessions_model) {
+        const char *cur = sessions_model_get_tabbar_position(app.sessions_model);
         if (g_strcmp0(cur, "left") == 0)
-            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 0);
+            gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 0);
         else if (g_strcmp0(cur, "right") == 0)
-            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 2);
+            gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 2);
         else
-            gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+            gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 1);
     } else {
-        gtk_combo_box_set_active(GTK_COMBO_BOX(tabbar_combo), 1);
+        gtk_combo_box_set_active(GTK_COMBO_BOX(app.tabbar_combo), 1);
     }
-    gtk_box_pack_start(GTK_BOX(settings_container), tabbar_combo, FALSE, FALSE, 0);
-    g_signal_connect(G_OBJECT(tabbar_combo), "changed", G_CALLBACK(on_tabbar_combo_changed), NULL);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), app.tabbar_combo, FALSE, FALSE, 0);
+    g_signal_connect(G_OBJECT(app.tabbar_combo), "changed", G_CALLBACK(on_tabbar_combo_changed), NULL);
 
     /* Tab text width */
     GtkWidget *tab_width_label = gtk_label_new("Tab text width:");
     gtk_widget_set_halign(tab_width_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), tab_width_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), tab_width_label, FALSE, FALSE, 0);
 
-    tab_width_spin = gtk_spin_button_new_with_range(5, 50, 1);
-    gtk_widget_set_halign(tab_width_spin, GTK_ALIGN_START);
-    if (sessions_model)
-        gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), sessions_model_get_tab_width(sessions_model));
+    app.tab_width_spin = gtk_spin_button_new_with_range(5, 50, 1);
+    gtk_widget_set_halign(app.tab_width_spin, GTK_ALIGN_START);
+    if (app.sessions_model)
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app.tab_width_spin), sessions_model_get_tab_width(app.sessions_model));
     else
-        gtk_spin_button_set_value(GTK_SPIN_BUTTON(tab_width_spin), 50);
-    gtk_box_pack_start(GTK_BOX(settings_container), tab_width_spin, FALSE, FALSE, 0);
-    g_signal_connect(G_OBJECT(tab_width_spin), "value-changed", G_CALLBACK(on_tab_width_spin_changed), NULL);
+        gtk_spin_button_set_value(GTK_SPIN_BUTTON(app.tab_width_spin), 50);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), app.tab_width_spin, FALSE, FALSE, 0);
+    g_signal_connect(G_OBJECT(app.tab_width_spin), "value-changed", G_CALLBACK(on_tab_width_spin_changed), NULL);
 
-    gtk_box_pack_start(GTK_BOX(settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
 
     /* Page Colors section */
     GtkWidget *color_title = gtk_label_new("Page Colors");
@@ -6085,27 +5712,27 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(cat, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
     gtk_label_set_attributes(GTK_LABEL(color_title), cat);
     pango_attr_list_unref(cat);
-    gtk_box_pack_start(GTK_BOX(settings_container), color_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), color_title, FALSE, FALSE, 0);
 
     GtkWidget *left_color_label = gtk_label_new("Left notebook:");
     gtk_widget_set_halign(left_color_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), left_color_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), left_color_label, FALSE, FALSE, 0);
 
-    left_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
-    gtk_widget_set_halign(left_color_btn, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), left_color_btn, FALSE, FALSE, 0);
-    g_signal_connect(left_color_btn, "color-set", G_CALLBACK(on_left_color_set), NULL);
+    app.left_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_widget_set_halign(app.left_color_btn, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), app.left_color_btn, FALSE, FALSE, 0);
+    g_signal_connect(app.left_color_btn, "color-set", G_CALLBACK(on_left_color_set), NULL);
 
     GtkWidget *right_color_label = gtk_label_new("Right notebook:");
     gtk_widget_set_halign(right_color_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), right_color_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), right_color_label, FALSE, FALSE, 0);
 
-    right_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
-    gtk_widget_set_halign(right_color_btn, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), right_color_btn, FALSE, FALSE, 0);
-    g_signal_connect(right_color_btn, "color-set", G_CALLBACK(on_right_color_set), NULL);
+    app.right_color_btn = gtk_color_button_new_with_rgba(&(GdkRGBA){1.0, 1.0, 1.0, 1.0});
+    gtk_widget_set_halign(app.right_color_btn, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), app.right_color_btn, FALSE, FALSE, 0);
+    g_signal_connect(app.right_color_btn, "color-set", G_CALLBACK(on_right_color_set), NULL);
 
-    gtk_box_pack_start(GTK_BOX(settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), gtk_separator_new(GTK_ORIENTATION_HORIZONTAL), FALSE, FALSE, 0);
 
     /* Theme section */
     GtkWidget *theme_section_label = gtk_label_new("Theme");
@@ -6114,20 +5741,20 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(th_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
     gtk_label_set_attributes(GTK_LABEL(theme_section_label), th_attr);
     pango_attr_list_unref(th_attr);
-    gtk_box_pack_start(GTK_BOX(settings_container), theme_section_label, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), theme_section_label, FALSE, FALSE, 0);
 
-    keep_dark_check = gtk_check_button_new_with_label("Keep dark theme");
-    gtk_widget_set_halign(keep_dark_check, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(settings_container), keep_dark_check, FALSE, FALSE, 0);
-    g_signal_connect(keep_dark_check, "toggled", G_CALLBACK(on_keep_dark_toggled), NULL);
+    app.keep_dark_check = gtk_check_button_new_with_label("Keep dark theme");
+    gtk_widget_set_halign(app.keep_dark_check, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.settings_container), app.keep_dark_check, FALSE, FALSE, 0);
+    g_signal_connect(app.keep_dark_check, "toggled", G_CALLBACK(on_keep_dark_toggled), NULL);
 
-    gtk_box_pack_start(GTK_BOX(sidebar), settings_container, TRUE, TRUE, 0);
-    gtk_widget_hide(settings_container);
+    gtk_box_pack_start(GTK_BOX(app.sidebar), app.settings_container, TRUE, TRUE, 0);
+    gtk_widget_hide(app.settings_container);
 
     /* File info container */
-    file_info_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
-    gtk_container_set_border_width(GTK_CONTAINER(file_info_container), 8);
-    g_object_ref(file_info_container);
+    app.file_info_container = gtk_box_new(GTK_ORIENTATION_VERTICAL, 4);
+    gtk_container_set_border_width(GTK_CONTAINER(app.file_info_container), 8);
+    g_object_ref(app.file_info_container);
 
     GtkWidget *file_info_title = gtk_label_new("File Information");
     gtk_widget_set_halign(file_info_title, GTK_ALIGN_START);
@@ -6136,31 +5763,31 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(fi_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
     gtk_label_set_attributes(GTK_LABEL(file_info_title), fi_attr);
     pango_attr_list_unref(fi_attr);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), file_info_title, FALSE, FALSE, 0);
 
-    file_info_name_label = gtk_label_new("Name: (no file)");
-    gtk_widget_set_halign(file_info_name_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_name_label, FALSE, FALSE, 0);
+    app.file_info_name_label = gtk_label_new("Name: (no file)");
+    gtk_widget_set_halign(app.file_info_name_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), app.file_info_name_label, FALSE, FALSE, 0);
 
-    file_info_path_label = gtk_label_new("Path: (none)");
-    gtk_widget_set_halign(file_info_path_label, GTK_ALIGN_FILL);
-    gtk_label_set_xalign(GTK_LABEL(file_info_path_label), 0.0);
-    gtk_label_set_line_wrap(GTK_LABEL(file_info_path_label), TRUE);
-    gtk_label_set_line_wrap_mode(GTK_LABEL(file_info_path_label), PANGO_WRAP_WORD_CHAR);
-    gtk_label_set_max_width_chars(GTK_LABEL(file_info_path_label), 30);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_path_label, FALSE, FALSE, 0);
+    app.file_info_path_label = gtk_label_new("Path: (none)");
+    gtk_widget_set_halign(app.file_info_path_label, GTK_ALIGN_FILL);
+    gtk_label_set_xalign(GTK_LABEL(app.file_info_path_label), 0.0);
+    gtk_label_set_line_wrap(GTK_LABEL(app.file_info_path_label), TRUE);
+    gtk_label_set_line_wrap_mode(GTK_LABEL(app.file_info_path_label), PANGO_WRAP_WORD_CHAR);
+    gtk_label_set_max_width_chars(GTK_LABEL(app.file_info_path_label), 30);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), app.file_info_path_label, FALSE, FALSE, 0);
 
-    file_info_size_label = gtk_label_new("Size: (none)");
-    gtk_widget_set_halign(file_info_size_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_size_label, FALSE, FALSE, 0);
+    app.file_info_size_label = gtk_label_new("Size: (none)");
+    gtk_widget_set_halign(app.file_info_size_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), app.file_info_size_label, FALSE, FALSE, 0);
 
-    file_info_pages_label = gtk_label_new("Pages: (none)");
-    gtk_widget_set_halign(file_info_pages_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), file_info_pages_label, FALSE, FALSE, 0);
+    app.file_info_pages_label = gtk_label_new("Pages: (none)");
+    gtk_widget_set_halign(app.file_info_pages_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), app.file_info_pages_label, FALSE, FALSE, 0);
 
     /* Separator before search */
     GtkWidget *search_sep = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
-    gtk_box_pack_start(GTK_BOX(file_info_container), search_sep, FALSE, FALSE, 5);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), search_sep, FALSE, FALSE, 5);
 
     /* Search title */
     GtkWidget *search_title = gtk_label_new("Search in Document");
@@ -6170,97 +5797,97 @@ GtkWidget* create_main_window(void) {
     pango_attr_list_insert(sa, pango_attr_scale_new(PANGO_SCALE_LARGE));
     gtk_label_set_attributes(GTK_LABEL(search_title), sa);
     pango_attr_list_unref(sa);
-    gtk_box_pack_start(GTK_BOX(file_info_container), search_title, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), search_title, FALSE, FALSE, 0);
 
     /* Search entry + button row */
     GtkWidget *search_hbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    search_entry = gtk_entry_new();
-    gtk_entry_set_placeholder_text(GTK_ENTRY(search_entry), "Search text...");
-    gtk_box_pack_start(GTK_BOX(search_hbox), search_entry, TRUE, TRUE, 0);
-    g_signal_connect(search_entry, "activate", G_CALLBACK(on_search_activated), NULL);
+    app.search_entry = gtk_entry_new();
+    gtk_entry_set_placeholder_text(GTK_ENTRY(app.search_entry), "Search text...");
+    gtk_box_pack_start(GTK_BOX(search_hbox), app.search_entry, TRUE, TRUE, 0);
+    g_signal_connect(app.search_entry, "activate", G_CALLBACK(on_search_activated), NULL);
 
-    search_btn = gtk_button_new_with_label("Search");
-    gtk_box_pack_start(GTK_BOX(search_hbox), search_btn, FALSE, FALSE, 0);
-    g_signal_connect(search_btn, "clicked", G_CALLBACK(on_search_clicked), NULL);
+    app.search_btn = gtk_button_new_with_label("Search");
+    gtk_box_pack_start(GTK_BOX(search_hbox), app.search_btn, FALSE, FALSE, 0);
+    g_signal_connect(app.search_btn, "clicked", G_CALLBACK(on_search_clicked), NULL);
 
-    gtk_box_pack_start(GTK_BOX(file_info_container), search_hbox, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), search_hbox, FALSE, FALSE, 0);
 
     /* Results tree view */
-    search_results_store = gtk_list_store_new(SEARCH_COL_NCOL, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
-    search_results_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(search_results_store));
-    g_object_unref(search_results_store);
+    app.search_results_store = gtk_list_store_new(SEARCH_COL_NCOL, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING);
+    app.search_results_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app.search_results_store));
+    g_object_unref(app.search_results_store);
 
     GtkCellRenderer *search_renderer = gtk_cell_renderer_text_new();
     GtkTreeViewColumn *search_col = gtk_tree_view_column_new_with_attributes("Page", search_renderer,
         "text", SEARCH_COL_LABEL, NULL);
-    gtk_tree_view_append_column(GTK_TREE_VIEW(search_results_view), search_col);
-    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(search_results_view), TRUE);
-    g_signal_connect(search_results_view, "row-activated", G_CALLBACK(on_search_row_activated), NULL);
+    gtk_tree_view_append_column(GTK_TREE_VIEW(app.search_results_view), search_col);
+    gtk_tree_view_set_activate_on_single_click(GTK_TREE_VIEW(app.search_results_view), TRUE);
+    g_signal_connect(app.search_results_view, "row-activated", G_CALLBACK(on_search_row_activated), NULL);
 
     GtkWidget *search_scrolled = gtk_scrolled_window_new(NULL, NULL);
     gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(search_scrolled), GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
     gtk_scrolled_window_set_min_content_height(GTK_SCROLLED_WINDOW(search_scrolled), 80);
-    gtk_container_add(GTK_CONTAINER(search_scrolled), search_results_view);
-    gtk_box_pack_start(GTK_BOX(file_info_container), search_scrolled, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(search_scrolled), app.search_results_view);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), search_scrolled, TRUE, TRUE, 0);
 
     /* No results label */
-    search_no_results_label = gtk_label_new("No results found");
-    gtk_widget_set_halign(search_no_results_label, GTK_ALIGN_START);
-    gtk_box_pack_start(GTK_BOX(file_info_container), search_no_results_label, FALSE, FALSE, 0);
-    gtk_widget_hide(search_no_results_label);
+    app.search_no_results_label = gtk_label_new("No results found");
+    gtk_widget_set_halign(app.search_no_results_label, GTK_ALIGN_START);
+    gtk_box_pack_start(GTK_BOX(app.file_info_container), app.search_no_results_label, FALSE, FALSE, 0);
+    gtk_widget_hide(app.search_no_results_label);
 
-    gtk_widget_set_size_request(file_info_container, 300, -1);
-    gtk_box_pack_start(GTK_BOX(sidebar), file_info_container, TRUE, TRUE, 0);
-    gtk_widget_hide(file_info_container);
+    gtk_widget_set_size_request(app.file_info_container, 300, -1);
+    gtk_box_pack_start(GTK_BOX(app.sidebar), app.file_info_container, TRUE, TRUE, 0);
+    gtk_widget_hide(app.file_info_container);
 
     /* Content area on the right*/
-    content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
-    gtk_box_pack_start(GTK_BOX(main_hbox), content_vbox, TRUE, TRUE, 0);
+    app.content_vbox = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.content_vbox, TRUE, TRUE, 0);
 
     /* Buttons*/
     /* Sessions button */
     GtkWidget *sessions_icon = create_toolbar_icon("sessions");
-    sessions_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(sessions_btn), sessions_icon);
-    g_object_set_data_full(G_OBJECT(sessions_btn), "icon-name", g_strdup("sessions"), g_free);
-    gtk_widget_set_tooltip_text(sessions_btn, "Sessions");
-    atk_object_set_name(gtk_widget_get_accessible(sessions_btn), "Sessions");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(sessions_btn), FALSE);
-    g_signal_connect(sessions_btn, "toggled", G_CALLBACK(on_sessions_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(toolbar), sessions_btn, FALSE, FALSE, 1);
+    app.sessions_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(app.sessions_btn), sessions_icon);
+    g_object_set_data_full(G_OBJECT(app.sessions_btn), "icon-name", g_strdup("sessions"), g_free);
+    gtk_widget_set_tooltip_text(app.sessions_btn, "Sessions");
+    atk_object_set_name(gtk_widget_get_accessible(app.sessions_btn), "Sessions");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
+    g_signal_connect(app.sessions_btn, "toggled", G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(toolbar), app.sessions_btn, FALSE, FALSE, 1);
 
     /* Table of contents button */
     GtkWidget *toc_icon = create_toolbar_icon("toc");
-    toc_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(toc_btn), toc_icon);
-    g_object_set_data_full(G_OBJECT(toc_btn), "icon-name", g_strdup("toc"), g_free);
-    gtk_widget_set_tooltip_text(toc_btn, "Table of contents");
-    atk_object_set_name(gtk_widget_get_accessible(toc_btn), "Table of contents");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(toc_btn), FALSE);
-    g_signal_connect(toc_btn, "toggled", G_CALLBACK(on_toc_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(toolbar), toc_btn, FALSE, FALSE, 1);
+    app.toc_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(app.toc_btn), toc_icon);
+    g_object_set_data_full(G_OBJECT(app.toc_btn), "icon-name", g_strdup("toc"), g_free);
+    gtk_widget_set_tooltip_text(app.toc_btn, "Table of contents");
+    atk_object_set_name(gtk_widget_get_accessible(app.toc_btn), "Table of contents");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
+    g_signal_connect(app.toc_btn, "toggled", G_CALLBACK(on_toc_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(toolbar), app.toc_btn, FALSE, FALSE, 1);
 
     /* Settings button */
     GtkWidget *settings_icon = create_toolbar_icon("settings");
-    settings_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(settings_btn), settings_icon);
-    g_object_set_data_full(G_OBJECT(settings_btn), "icon-name", g_strdup("settings"), g_free);
-    gtk_widget_set_tooltip_text(settings_btn, "Settings");
-    atk_object_set_name(gtk_widget_get_accessible(settings_btn), "Settings");
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(settings_btn), FALSE);
-    g_signal_connect(settings_btn, "toggled", G_CALLBACK(on_settings_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(toolbar), settings_btn, FALSE, FALSE, 1);
+    app.settings_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(app.settings_btn), settings_icon);
+    g_object_set_data_full(G_OBJECT(app.settings_btn), "icon-name", g_strdup("settings"), g_free);
+    gtk_widget_set_tooltip_text(app.settings_btn, "Settings");
+    atk_object_set_name(gtk_widget_get_accessible(app.settings_btn), "Settings");
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.settings_btn), FALSE);
+    g_signal_connect(app.settings_btn, "toggled", G_CALLBACK(on_settings_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(toolbar), app.settings_btn, FALSE, FALSE, 1);
 
     /* File information button */
     GtkWidget *file_info_icon = create_toolbar_icon("file");
-    file_info_btn = gtk_toggle_button_new();
-    gtk_button_set_image(GTK_BUTTON(file_info_btn), file_info_icon);
-    g_object_set_data_full(G_OBJECT(file_info_btn), "icon-name", g_strdup("file"), g_free);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(file_info_btn), FALSE);
-    gtk_widget_set_tooltip_text(file_info_btn, "File information");
-    atk_object_set_name(gtk_widget_get_accessible(file_info_btn), "File information");
-    g_signal_connect(file_info_btn, "toggled", G_CALLBACK(on_left_file_info_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(toolbar), file_info_btn, FALSE, FALSE, 1);
+    app.file_info_btn = gtk_toggle_button_new();
+    gtk_button_set_image(GTK_BUTTON(app.file_info_btn), file_info_icon);
+    g_object_set_data_full(G_OBJECT(app.file_info_btn), "icon-name", g_strdup("file"), g_free);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
+    gtk_widget_set_tooltip_text(app.file_info_btn, "File information");
+    atk_object_set_name(gtk_widget_get_accessible(app.file_info_btn), "File information");
+    g_signal_connect(app.file_info_btn, "toggled", G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(toolbar), app.file_info_btn, FALSE, FALSE, 1);
 
     /* Separator */
     GtkWidget *separator_a = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -6315,24 +5942,24 @@ GtkWidget* create_main_window(void) {
     gtk_box_pack_start(GTK_BOX(middle_box), page_down_btn, FALSE, FALSE, 1);
 
     /* Page navigation (entry + label) — placed in floating overlay later */
-    page_entry = gtk_entry_new();
-    gtk_widget_set_size_request(page_entry, 42, -1);
-    gtk_entry_set_max_length(GTK_ENTRY(page_entry), 4);
-    gtk_entry_set_width_chars(GTK_ENTRY(page_entry), 2);
-    gtk_entry_set_max_width_chars(GTK_ENTRY(page_entry), 3);
-    gtk_entry_set_input_purpose(GTK_ENTRY(page_entry), GTK_INPUT_PURPOSE_DIGITS);
-    gtk_widget_set_tooltip_text(page_entry, "Current page (press Enter to jump)");
-    atk_object_set_name(gtk_widget_get_accessible(page_entry), "Current page");
+    app.page_entry = gtk_entry_new();
+    gtk_widget_set_size_request(app.page_entry, 42, -1);
+    gtk_entry_set_max_length(GTK_ENTRY(app.page_entry), 4);
+    gtk_entry_set_width_chars(GTK_ENTRY(app.page_entry), 2);
+    gtk_entry_set_max_width_chars(GTK_ENTRY(app.page_entry), 3);
+    gtk_entry_set_input_purpose(GTK_ENTRY(app.page_entry), GTK_INPUT_PURPOSE_DIGITS);
+    gtk_widget_set_tooltip_text(app.page_entry, "Current page (press Enter to jump)");
+    atk_object_set_name(gtk_widget_get_accessible(app.page_entry), "Current page");
 
-    page_total_label = gtk_label_new("/ 0");
-    gtk_label_set_width_chars(GTK_LABEL(page_total_label), 4);
-    gtk_label_set_xalign(GTK_LABEL(page_total_label), 0.0f);
+    app.page_total_label = gtk_label_new("/ 0");
+    gtk_label_set_width_chars(GTK_LABEL(app.page_total_label), 4);
+    gtk_label_set_xalign(GTK_LABEL(app.page_total_label), 0.0f);
 
     /* Allow only digits to be entered */
-    g_signal_connect(page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
+    g_signal_connect(app.page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
 
     /* Enter in spin jumps to page */
-    g_signal_connect(page_entry, "activate", G_CALLBACK(on_page_entry_activate), NULL);
+    g_signal_connect(app.page_entry, "activate", G_CALLBACK(on_page_entry_activate), NULL);
 
     /* Separator */
     GtkWidget *separator_c = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -6364,39 +5991,39 @@ GtkWidget* create_main_window(void) {
 
     /* Column view button*/
     GtkWidget *column_view_icon = create_toolbar_icon("column");
-    left_column_btn = gtk_radio_button_new(NULL);
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_column_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(left_column_btn), column_view_icon);
-    g_object_set_data_full(G_OBJECT(left_column_btn), "icon-name", g_strdup("column"), g_free);
-    gtk_widget_set_tooltip_text(left_column_btn, "Page column");
-    atk_object_set_name(gtk_widget_get_accessible(left_column_btn), "Page column");
-    g_object_set_data(G_OBJECT(left_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
-    g_signal_connect(left_column_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(middle_box), left_column_btn, FALSE, FALSE, 1);
+    app.left_column_btn = gtk_radio_button_new(NULL);
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.left_column_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.left_column_btn), column_view_icon);
+    g_object_set_data_full(G_OBJECT(app.left_column_btn), "icon-name", g_strdup("column"), g_free);
+    gtk_widget_set_tooltip_text(app.left_column_btn, "Page column");
+    atk_object_set_name(gtk_widget_get_accessible(app.left_column_btn), "Page column");
+    g_object_set_data(G_OBJECT(app.left_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
+    g_signal_connect(app.left_column_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(middle_box), app.left_column_btn, FALSE, FALSE, 1);
 
     /* Double column view button*/
     GtkWidget *double_column_view_icon = create_toolbar_icon("double-column");
-    left_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_double_column_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(left_double_column_btn), double_column_view_icon);
-    g_object_set_data_full(G_OBJECT(left_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
-    gtk_widget_set_tooltip_text(left_double_column_btn, "Page double column");
-    atk_object_set_name(gtk_widget_get_accessible(left_double_column_btn), "Page double column");
-    g_object_set_data(G_OBJECT(left_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
-    g_signal_connect(left_double_column_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(middle_box), left_double_column_btn, FALSE, FALSE, 1);
+    app.left_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(app.left_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.left_double_column_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.left_double_column_btn), double_column_view_icon);
+    g_object_set_data_full(G_OBJECT(app.left_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
+    gtk_widget_set_tooltip_text(app.left_double_column_btn, "Page double column");
+    atk_object_set_name(gtk_widget_get_accessible(app.left_double_column_btn), "Page double column");
+    g_object_set_data(G_OBJECT(app.left_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
+    g_signal_connect(app.left_double_column_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(middle_box), app.left_double_column_btn, FALSE, FALSE, 1);
 
     /* Row view button*/
     GtkWidget *row_view_icon = create_toolbar_icon("row");
-    left_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(left_column_btn));
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(left_row_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(left_row_btn), row_view_icon);
-    g_object_set_data_full(G_OBJECT(left_row_btn), "icon-name", g_strdup("row"), g_free);
-    gtk_widget_set_tooltip_text(left_row_btn, "Page row");
-    atk_object_set_name(gtk_widget_get_accessible(left_row_btn), "Page row");
-    g_object_set_data(G_OBJECT(left_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
-    g_signal_connect(left_row_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(middle_box), left_row_btn, FALSE, FALSE, 1);
+    app.left_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(app.left_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.left_row_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.left_row_btn), row_view_icon);
+    g_object_set_data_full(G_OBJECT(app.left_row_btn), "icon-name", g_strdup("row"), g_free);
+    gtk_widget_set_tooltip_text(app.left_row_btn, "Page row");
+    atk_object_set_name(gtk_widget_get_accessible(app.left_row_btn), "Page row");
+    g_object_set_data(G_OBJECT(app.left_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
+    g_signal_connect(app.left_row_btn, "toggled", G_CALLBACK(on_layout_left_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(middle_box), app.left_row_btn, FALSE, FALSE, 1);
 
     /* Separator */
     GtkWidget *separator_e = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
@@ -6447,7 +6074,7 @@ GtkWidget* create_main_window(void) {
     g_object_set_data_full(G_OBJECT(maximize_btn), "icon-name", g_strdup("maximize-2"), g_free);
     gtk_widget_set_tooltip_text(maximize_btn, "Maximize");
     atk_object_set_name(gtk_widget_get_accessible(maximize_btn), "Maximize");
-    g_signal_connect(maximize_btn, "clicked", G_CALLBACK(on_maximize_clicked), window);
+    g_signal_connect(maximize_btn, "clicked", G_CALLBACK(on_maximize_clicked), app.window);
     gtk_box_pack_end(GTK_BOX(toolbar), maximize_btn, FALSE, FALSE, 1);
 
     /* Minimize button*/
@@ -6457,105 +6084,105 @@ GtkWidget* create_main_window(void) {
     g_object_set_data_full(G_OBJECT(minimize_btn), "icon-name", g_strdup("minimize-2"), g_free);
     gtk_widget_set_tooltip_text(minimize_btn, "Minimize");
     atk_object_set_name(gtk_widget_get_accessible(minimize_btn), "Minimize");
-    g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), window);
+    g_signal_connect(minimize_btn, "clicked", G_CALLBACK(on_minimize_clicked), app.window);
     gtk_box_pack_end(GTK_BOX(toolbar), minimize_btn, FALSE, FALSE, 1);
 
     /* MAIN WINDOW PANED */
     /* Create a horizontal paned splitter containing two notebooks */
-    paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
+    app.paned = gtk_paned_new(GTK_ORIENTATION_HORIZONTAL);
 
     /* Wrap paned in an overlay for floating page navigation widget */
     GtkWidget *overlay = gtk_overlay_new();
-    gtk_box_pack_start(GTK_BOX(content_vbox), overlay, TRUE, TRUE, 0);
-    gtk_container_add(GTK_CONTAINER(overlay), paned);
+    gtk_box_pack_start(GTK_BOX(app.content_vbox), overlay, TRUE, TRUE, 0);
+    gtk_container_add(GTK_CONTAINER(overlay), app.paned);
 
     /* Floating page navigation overlay (lower-left corner) */
-    page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_set_name(page_nav_overlay, "page-nav-overlay");
-    gtk_widget_set_halign(page_nav_overlay, GTK_ALIGN_START);
-    gtk_widget_set_valign(page_nav_overlay, GTK_ALIGN_END);
-    gtk_widget_set_margin_start(page_nav_overlay, 8);
-    gtk_widget_set_margin_bottom(page_nav_overlay, 8);
-    gtk_box_pack_start(GTK_BOX(page_nav_overlay), page_entry, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(page_nav_overlay), page_total_label, FALSE, FALSE, 0);
-    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), page_nav_overlay);
+    app.page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(app.page_nav_overlay, "page-nav-overlay");
+    gtk_widget_set_halign(app.page_nav_overlay, GTK_ALIGN_START);
+    gtk_widget_set_valign(app.page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_margin_start(app.page_nav_overlay, 8);
+    gtk_widget_set_margin_bottom(app.page_nav_overlay, 8);
+    gtk_box_pack_start(GTK_BOX(app.page_nav_overlay), app.page_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.page_nav_overlay), app.page_total_label, FALSE, FALSE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(overlay), app.page_nav_overlay);
 
     /* Left notebook (primary) */
-    left_notebook = gtk_notebook_new();
-    gtk_notebook_set_scrollable(GTK_NOTEBOOK(left_notebook), TRUE);
-    gtk_widget_set_size_request(left_notebook, 70, -1);
-    gtk_paned_pack1(GTK_PANED(paned), left_notebook, TRUE, TRUE);
-    atk_object_set_name(gtk_widget_get_accessible(left_notebook), "Left Notebook");
-    g_signal_connect(left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
-    g_signal_connect(left_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
+    app.left_notebook = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(app.left_notebook), TRUE);
+    gtk_widget_set_size_request(app.left_notebook, 70, -1);
+    gtk_paned_pack1(GTK_PANED(app.paned), app.left_notebook, TRUE, TRUE);
+    atk_object_set_name(gtk_widget_get_accessible(app.left_notebook), "Left Notebook");
+    g_signal_connect(app.left_notebook, "switch-page", G_CALLBACK(on_left_notebook_switch_page), NULL);
+    g_signal_connect(app.left_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
 
     // Use last open session if available, otherwise default to "Default"
     const char *initial_session = "Default";
-    if (sessions_model) {
-        const char *last_session = sessions_model_get_last_open_session(sessions_model);
+    if (app.sessions_model) {
+        const char *last_session = sessions_model_get_last_open_session(app.sessions_model);
         if (last_session) {
             initial_session = last_session;
         }
     }
 
-    current_selected_session = g_strdup(initial_session);
-    update_window_title_for_session(current_selected_session);
+    app.current_selected_session = g_strdup(initial_session);
+    update_window_title_for_session(app.current_selected_session);
 
     /* Right pane: container with notebook and toolbar */
-    right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
-    gtk_widget_set_size_request(right_pane, 36, -1);
-    gtk_paned_pack2(GTK_PANED(paned), right_pane, TRUE, TRUE);
-    gtk_paned_set_position(GTK_PANED(paned), 500);
+    app.right_pane = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 0);
+    gtk_widget_set_size_request(app.right_pane, 36, -1);
+    gtk_paned_pack2(GTK_PANED(app.paned), app.right_pane, TRUE, TRUE);
+    gtk_paned_set_position(GTK_PANED(app.paned), 500);
 
     /* Right notebook wrapper with overlay for floating page nav */
     GtkWidget *right_nb_overlay = gtk_overlay_new();
-    gtk_box_pack_start(GTK_BOX(right_pane), right_nb_overlay, TRUE, TRUE, 0);
+    gtk_box_pack_start(GTK_BOX(app.right_pane), right_nb_overlay, TRUE, TRUE, 0);
 
     /* Right notebook (secondary) */
-    right_notebook = gtk_notebook_new();
-    gtk_notebook_set_scrollable(GTK_NOTEBOOK(right_notebook), TRUE);
-    gtk_container_add(GTK_CONTAINER(right_nb_overlay), right_notebook);
-    g_signal_connect(right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
-    g_signal_connect(right_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
+    app.right_notebook = gtk_notebook_new();
+    gtk_notebook_set_scrollable(GTK_NOTEBOOK(app.right_notebook), TRUE);
+    gtk_container_add(GTK_CONTAINER(right_nb_overlay), app.right_notebook);
+    g_signal_connect(app.right_notebook, "switch-page", G_CALLBACK(on_right_notebook_switch_page), NULL);
+    g_signal_connect(app.right_notebook, "page-reordered", G_CALLBACK(on_notebook_page_reordered), NULL);
 
     /* Right page navigation entry + label */
-    right_page_entry = gtk_entry_new();
-    gtk_widget_set_size_request(right_page_entry, 42, -1);
-    gtk_entry_set_max_length(GTK_ENTRY(right_page_entry), 4);
-    gtk_entry_set_width_chars(GTK_ENTRY(right_page_entry), 2);
-    gtk_entry_set_max_width_chars(GTK_ENTRY(right_page_entry), 3);
-    gtk_entry_set_input_purpose(GTK_ENTRY(right_page_entry), GTK_INPUT_PURPOSE_DIGITS);
-    gtk_widget_set_tooltip_text(right_page_entry, "Current page (press Enter to jump)");
-    atk_object_set_name(gtk_widget_get_accessible(right_page_entry), "Current page");
+    app.right_page_entry = gtk_entry_new();
+    gtk_widget_set_size_request(app.right_page_entry, 42, -1);
+    gtk_entry_set_max_length(GTK_ENTRY(app.right_page_entry), 4);
+    gtk_entry_set_width_chars(GTK_ENTRY(app.right_page_entry), 2);
+    gtk_entry_set_max_width_chars(GTK_ENTRY(app.right_page_entry), 3);
+    gtk_entry_set_input_purpose(GTK_ENTRY(app.right_page_entry), GTK_INPUT_PURPOSE_DIGITS);
+    gtk_widget_set_tooltip_text(app.right_page_entry, "Current page (press Enter to jump)");
+    atk_object_set_name(gtk_widget_get_accessible(app.right_page_entry), "Current page");
 
-    right_page_total_label = gtk_label_new("/ 0");
-    gtk_label_set_width_chars(GTK_LABEL(right_page_total_label), 4);
-    gtk_label_set_xalign(GTK_LABEL(right_page_total_label), 0.0f);
+    app.right_page_total_label = gtk_label_new("/ 0");
+    gtk_label_set_width_chars(GTK_LABEL(app.right_page_total_label), 4);
+    gtk_label_set_xalign(GTK_LABEL(app.right_page_total_label), 0.0f);
 
-    g_signal_connect(right_page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
-    g_signal_connect(right_page_entry, "activate", G_CALLBACK(on_right_page_entry_activate), NULL);
+    g_signal_connect(app.right_page_entry, "insert-text", G_CALLBACK(on_page_entry_insert_text), NULL);
+    g_signal_connect(app.right_page_entry, "activate", G_CALLBACK(on_right_page_entry_activate), NULL);
 
     /* Floating page navigation overlay (lower-right corner of right notebook) */
-    right_page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
-    gtk_widget_set_name(right_page_nav_overlay, "right-page-nav-overlay");
-    gtk_widget_set_halign(right_page_nav_overlay, GTK_ALIGN_END);
-    gtk_widget_set_valign(right_page_nav_overlay, GTK_ALIGN_END);
-    gtk_widget_set_margin_end(right_page_nav_overlay, 8);
-    gtk_widget_set_margin_bottom(right_page_nav_overlay, 8);
-    gtk_box_pack_start(GTK_BOX(right_page_nav_overlay), right_page_entry, FALSE, FALSE, 0);
-    gtk_box_pack_start(GTK_BOX(right_page_nav_overlay), right_page_total_label, FALSE, FALSE, 0);
-    gtk_overlay_add_overlay(GTK_OVERLAY(right_nb_overlay), right_page_nav_overlay);
+    app.right_page_nav_overlay = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 4);
+    gtk_widget_set_name(app.right_page_nav_overlay, "right-page-nav-overlay");
+    gtk_widget_set_halign(app.right_page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_valign(app.right_page_nav_overlay, GTK_ALIGN_END);
+    gtk_widget_set_margin_end(app.right_page_nav_overlay, 8);
+    gtk_widget_set_margin_bottom(app.right_page_nav_overlay, 8);
+    gtk_box_pack_start(GTK_BOX(app.right_page_nav_overlay), app.right_page_entry, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.right_page_nav_overlay), app.right_page_total_label, FALSE, FALSE, 0);
+    gtk_overlay_add_overlay(GTK_OVERLAY(right_nb_overlay), app.right_page_nav_overlay);
     /* Initially hidden until there are documents */
-    gtk_widget_hide(right_page_nav_overlay);
+    gtk_widget_hide(app.right_page_nav_overlay);
 
     // Note: restore_open_tabs_for_session already handles both notebooks
-    current_selected_session = g_strdup(initial_session);
-    update_window_title_for_session(current_selected_session);
+    app.current_selected_session = g_strdup(initial_session);
+    update_window_title_for_session(app.current_selected_session);
 
     /* Right pane toolbar (vertical) */
     GtkWidget *right_toolbar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
     gtk_style_context_add_class(gtk_widget_get_style_context(right_toolbar), "Toolbar");
-    gtk_box_pack_start(GTK_BOX(right_pane), right_toolbar, FALSE, FALSE, 0);
+    gtk_box_pack_start(GTK_BOX(app.right_pane), right_toolbar, FALSE, FALSE, 0);
 
     /* Centered section for right toolbar buttons */
     GtkWidget *right_middle_box = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -6646,49 +6273,49 @@ GtkWidget* create_main_window(void) {
 
     /* Right toolbar - Page column */
     GtkWidget *right_column_icon = create_toolbar_icon("column");
-    right_column_btn = gtk_radio_button_new(NULL);
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_column_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(right_column_btn), right_column_icon);
-    g_object_set_data_full(G_OBJECT(right_column_btn), "icon-name", g_strdup("column"), g_free);
-    gtk_widget_set_tooltip_text(right_column_btn, "Page column");
-    atk_object_set_name(gtk_widget_get_accessible(right_column_btn), "Page column");
-    g_object_set_data(G_OBJECT(right_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
-    g_signal_connect(right_column_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(right_middle_box), right_column_btn, FALSE, FALSE, 1);
+    app.right_column_btn = gtk_radio_button_new(NULL);
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.right_column_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.right_column_btn), right_column_icon);
+    g_object_set_data_full(G_OBJECT(app.right_column_btn), "icon-name", g_strdup("column"), g_free);
+    gtk_widget_set_tooltip_text(app.right_column_btn, "Page column");
+    atk_object_set_name(gtk_widget_get_accessible(app.right_column_btn), "Page column");
+    g_object_set_data(G_OBJECT(app.right_column_btn), "layout-id", GINT_TO_POINTER(0 + 1));
+    g_signal_connect(app.right_column_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(right_middle_box), app.right_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page double column */
     GtkWidget *right_double_column_icon = create_toolbar_icon("double-column");
-    right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_double_column_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(right_double_column_btn), right_double_column_icon);
-    g_object_set_data_full(G_OBJECT(right_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
-    gtk_widget_set_tooltip_text(right_double_column_btn, "Page double column");
-    atk_object_set_name(gtk_widget_get_accessible(right_double_column_btn), "Page double column");
-    g_object_set_data(G_OBJECT(right_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
-    g_signal_connect(right_double_column_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(right_middle_box), right_double_column_btn, FALSE, FALSE, 1);
+    app.right_double_column_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(app.right_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.right_double_column_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.right_double_column_btn), right_double_column_icon);
+    g_object_set_data_full(G_OBJECT(app.right_double_column_btn), "icon-name", g_strdup("double-column"), g_free);
+    gtk_widget_set_tooltip_text(app.right_double_column_btn, "Page double column");
+    atk_object_set_name(gtk_widget_get_accessible(app.right_double_column_btn), "Page double column");
+    g_object_set_data(G_OBJECT(app.right_double_column_btn), "layout-id", GINT_TO_POINTER(1 + 1));
+    g_signal_connect(app.right_double_column_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(right_middle_box), app.right_double_column_btn, FALSE, FALSE, 1);
 
     /* Right toolbar - Page row */
     GtkWidget *right_row_icon = create_toolbar_icon("row");
-    right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(right_column_btn));
-    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(right_row_btn), FALSE);
-    gtk_button_set_image(GTK_BUTTON(right_row_btn), right_row_icon);
-    g_object_set_data_full(G_OBJECT(right_row_btn), "icon-name", g_strdup("row"), g_free);
-    gtk_widget_set_tooltip_text(right_row_btn, "Page row");
-    atk_object_set_name(gtk_widget_get_accessible(right_row_btn), "Page row");
-    g_object_set_data(G_OBJECT(right_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
-    g_signal_connect(right_row_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
-    gtk_box_pack_start(GTK_BOX(right_middle_box), right_row_btn, FALSE, FALSE, 1);
+    app.right_row_btn = gtk_radio_button_new_from_widget(GTK_RADIO_BUTTON(app.right_column_btn));
+    gtk_toggle_button_set_mode(GTK_TOGGLE_BUTTON(app.right_row_btn), FALSE);
+    gtk_button_set_image(GTK_BUTTON(app.right_row_btn), right_row_icon);
+    g_object_set_data_full(G_OBJECT(app.right_row_btn), "icon-name", g_strdup("row"), g_free);
+    gtk_widget_set_tooltip_text(app.right_row_btn, "Page row");
+    atk_object_set_name(gtk_widget_get_accessible(app.right_row_btn), "Page row");
+    g_object_set_data(G_OBJECT(app.right_row_btn), "layout-id", GINT_TO_POINTER(2 + 1));
+    g_signal_connect(app.right_row_btn, "toggled", G_CALLBACK(on_layout_right_toggled), NULL);
+    gtk_box_pack_start(GTK_BOX(right_middle_box), app.right_row_btn, FALSE, FALSE, 1);
 
     /* Right toolbar separator */
     GtkWidget *right_sep_d = gtk_separator_new(GTK_ORIENTATION_HORIZONTAL);
     gtk_box_pack_start(GTK_BOX(right_middle_box), right_sep_d, FALSE, FALSE, 5);
 
-    return window;
+    return app.window;
 }
 
 void hide_right_pane(void) {
-    if (right_pane) {
-        gtk_widget_hide(GTK_WIDGET(right_pane));
+    if (app.right_pane) {
+        gtk_widget_hide(GTK_WIDGET(app.right_pane));
     }
 }

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """
 Dogtail GUI tests for Siters PDF Viewer
 

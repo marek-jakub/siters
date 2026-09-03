@@ -4,6 +4,10 @@ project(siters C)
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
+# Export a fresh compile_commands.json (used by clangd and other LSP tooling)
+# so it reflects the current module layout rather than going stale.
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
 # Find required packages
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(GTK REQUIRED gtk+-3.0)
@@ -21,8 +25,10 @@ separate_arguments(MUPDF_STATIC_LIBS NATIVE_COMMAND "${MUPDF_STATIC_LIBS}")
 # MuPDF's pkg-config --static lists -lgumbo and -lmujs as shared libs,
 # but neither libgumbo2 nor libmujs3 are available on Debian 12 (MX Linux 23).
 # Replace them with static versions to eliminate runtime NEEDED entries.
-find_library(GUMBO_STATIC_LIB libgumbo.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
-find_library(MUJS_STATIC_LIB libmujs.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+find_library(GUMBO_STATIC_LIB libgumbo.a
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+find_library(MUJS_STATIC_LIB libmujs.a
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
 if(GUMBO_STATIC_LIB)
     list(REMOVE_ITEM MUPDF_STATIC_LIBS -lgumbo)
     list(APPEND MUPDF_STATIC_LIBS ${GUMBO_STATIC_LIB})
@@ -31,30 +37,35 @@ if(MUJS_STATIC_LIB)
     list(REMOVE_ITEM MUPDF_STATIC_LIBS -lmujs)
     list(APPEND MUPDF_STATIC_LIBS ${MUJS_STATIC_LIB})
 endif()
-find_library(JPEG_STATIC_LIB libjpeg.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+find_library(JPEG_STATIC_LIB libjpeg.a
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
 if(JPEG_STATIC_LIB)
     list(REMOVE_ITEM MUPDF_STATIC_LIBS -ljpeg)
     list(APPEND MUPDF_STATIC_LIBS ${JPEG_STATIC_LIB})
 endif()
 
-# Statically link jbig2dec and openjp2 to avoid header/library version mismatches
-# between the build system (Ubuntu) and target system (Debian 12 / MX Linux).
-find_library(JBIG2DEC_STATIC_LIB libjbig2dec.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+# Statically link jbig2dec and openjp2 to avoid header/library
+# version mismatches between the build system (Ubuntu) and the target
+# system (Debian 12 / MX Linux).
+find_library(JBIG2DEC_STATIC_LIB libjbig2dec.a
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
 if(JBIG2DEC_STATIC_LIB)
     list(REMOVE_ITEM MUPDF_STATIC_LIBS -ljbig2dec)
     list(APPEND MUPDF_STATIC_LIBS ${JBIG2DEC_STATIC_LIB})
 endif()
-find_library(OPENJP2_STATIC_LIB libopenjp2.a PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
+find_library(OPENJP2_STATIC_LIB libopenjp2.a
+    PATHS /usr/lib/x86_64-linux-gnu /usr/lib /usr/local/lib NO_DEFAULT_PATH)
 if(OPENJP2_STATIC_LIB)
     list(REMOVE_ITEM MUPDF_STATIC_LIBS -lopenjp2)
     list(APPEND MUPDF_STATIC_LIBS ${OPENJP2_STATIC_LIB})
 endif()
 
 # Include directories
-include_directories(include include/json-glib src
+include_directories(include include/json-glib src src/search
     ${GTK_INCLUDE_DIRS} ${MUPDF_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
-# Data directory — default to source root for development, override with -DDATADIR=... for install
+# Data directory — default to source root for development; override with
+# -DDATADIR=... for install.
 include(GNUInstallDirs)
 if(NOT DEFINED DATADIR)
   set(DATADIR "${CMAKE_SOURCE_DIR}")
@@ -65,6 +76,7 @@ add_definitions(-DDATADIR="${DATADIR}")
 add_executable(siters
     src/main.c
     src/siters.c
+    src/search/search.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
@@ -95,6 +107,7 @@ enable_testing()
 # CMocka unit tests
 add_executable(test_siters_unit
     tests/test_siters_unit.c
+    src/search/search.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
@@ -131,13 +144,21 @@ target_link_options(test_siters_unit PRIVATE
 add_test(NAME unit_tests COMMAND test_siters_unit)
 
 # Installation
+set(SITERS_ICON_DIR "${CMAKE_INSTALL_DATADIR}/icons/hicolor")
 install(TARGETS siters RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(DIRECTORY data/ DESTINATION ${CMAKE_INSTALL_DATADIR}/siters/data
         PATTERN "test_pdfs" EXCLUDE)
-install(FILES data/icons/siters.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
-install(FILES data/icons/siters_16.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/16x16/apps RENAME siters.png)
-install(FILES data/icons/siters_24.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/24x24/apps RENAME siters.png)
-install(FILES data/icons/siters_32.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/32x32/apps RENAME siters.png)
-install(FILES data/icons/siters_48.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/48x48/apps RENAME siters.png)
-install(FILES data/icons/siters_64.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/64x64/apps RENAME siters.png)
-install(FILES data/icons/siters_128.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/128x128/apps RENAME siters.png)
+install(FILES data/icons/siters.svg
+        DESTINATION ${SITERS_ICON_DIR}/scalable/apps)
+install(FILES data/icons/siters_16.png
+        DESTINATION ${SITERS_ICON_DIR}/16x16/apps RENAME siters.png)
+install(FILES data/icons/siters_24.png
+        DESTINATION ${SITERS_ICON_DIR}/24x24/apps RENAME siters.png)
+install(FILES data/icons/siters_32.png
+        DESTINATION ${SITERS_ICON_DIR}/32x32/apps RENAME siters.png)
+install(FILES data/icons/siters_48.png
+        DESTINATION ${SITERS_ICON_DIR}/48x48/apps RENAME siters.png)
+install(FILES data/icons/siters_64.png
+        DESTINATION ${SITERS_ICON_DIR}/64x64/apps RENAME siters.png)
+install(FILES data/icons/siters_128.png
+        DESTINATION ${SITERS_ICON_DIR}/128x128/apps RENAME siters.png)
