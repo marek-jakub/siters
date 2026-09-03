@@ -10,7 +10,6 @@
 #include <string.h>
 #include <errno.h>
 #include "app.h"
-#include "tab.h"
 #include "document_model.h"
 #include "session_model.h"
 #include "sessions_model.h"
