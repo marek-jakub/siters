@@ -23,17 +23,6 @@
 #define MAX_SURFACE_DIM 2000
 #define MAX_CACHE_BYTES (40 * 1024 * 1024)
 
-/* Upper bound for widget size requests in pixels (int-safe). */
-#define MAX_SIZE_REQUEST 100000000
-
-/* Clamp a double to [0, max] before converting to int. This avoids
-   implementation-defined (and potentially UB) behavior when absurd PDF page
-   sizes or zoom values produce doubles beyond the int range. */
-static int clamp_double_to_int(double v, int max) {
-    if (!(v > 0.0)) return 0;
-    if (v >= (double)max) return max;
-    return (int)v;
-}
 
 /* DATADIR is normally defined by -DDATADIR=... at build time.
    This fallback lets clang-based tools parse the file without flags. */
@@ -112,7 +101,6 @@ static void cancel_tab_deferred_load(TabData *tab);
 static void load_file_into_tab(TabData *tab, const char *filename);
 void queue_draw(TabData *tab);
 static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data);
-static void build_continuous_view(TabData *tab);
 void scroll_to_page(TabData *tab, int page, double target_y);
 static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data);
 static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpointer user_data);
@@ -3032,79 +3020,6 @@ static gboolean on_draw(GtkWidget *widget, cairo_t *cr, gpointer user_data) {
     return FALSE;
 }
 
-static void build_continuous_view(TabData *tab) {
-    if (!tab || !tab->cached_page_widths || !tab->pages_drawing) return;
-    invalidate_page_cache(tab);
-    tab->built_layout_mode = tab->layout_mode;
-    const double spacing = 6.0;
-    double scale = get_ppi_scale(tab);
-    int page_width_px = tab->n_pages > 0 ? clamp_double_to_int(ceil(tab->cached_page_widths[0] * scale), MAX_SIZE_REQUEST) : 800;
-    if (page_width_px < 1) page_width_px = 800;
-
-    if (tab->layout_mode == 0) {
-        double total_h = spacing;
-        for (int i = 0; i < tab->n_pages; ++i) {
-            total_h += tab->cached_page_heights[i] * scale + spacing;
-        }
-        if (total_h < 1.0) total_h = 1.0;
-        if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
-        gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, clamp_double_to_int(ceil(total_h), MAX_SIZE_REQUEST));
-        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    } else if (tab->layout_mode == 1) {
-        int n = tab->n_pages;
-        double total_h = spacing;
-        double max_row_w = 0.0;
-        for (int i = 0; i < n; i += 2) {
-            double pw1 = tab->cached_page_widths[i];
-            double ph1 = tab->cached_page_heights[i];
-            double page_w1 = pw1 * scale;
-            double page_h1 = ph1 * scale;
-            double row_w = page_w1;
-            double row_h = page_h1;
-            double page_w2 = 0, page_h2 = 0;
-            if (i + 1 < n) {
-                page_w2 = tab->cached_page_widths[i + 1] * scale;
-                page_h2 = tab->cached_page_heights[i + 1] * scale;
-            }
-            if (page_w2 > 0) row_w += spacing + page_w2;
-            if (page_h2 > row_h) row_h = page_h2;
-            if (row_w > max_row_w) max_row_w = row_w;
-            if (row_h < 1.0) row_h = 1.0;
-            total_h += row_h + spacing;
-        }
-        if (total_h < 1.0) total_h = 1.0;
-        if (max_row_w < 1.0) max_row_w = page_width_px;
-        if (tab->h_scrollbar) gtk_widget_hide(tab->h_scrollbar);
-        gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, clamp_double_to_int(ceil(max_row_w), MAX_SIZE_REQUEST), clamp_double_to_int(ceil(total_h), MAX_SIZE_REQUEST));
-        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_AUTOMATIC, GTK_POLICY_AUTOMATIC);
-    } else if (tab->layout_mode == 2) {
-        double total_w = 0.0;
-        double max_h = 0.0;
-        for (int i = 0; i < tab->n_pages; ++i) {
-            double page_w = tab->cached_page_widths[i] * scale;
-            double page_h = tab->cached_page_heights[i] * scale;
-            total_w += page_w + spacing;
-            if (page_h > max_h) max_h = page_h;
-        }
-        if (total_w < 1.0) total_w = 1.0;
-        if (max_h < 1.0) max_h = 1.0;
-        tab->max_page_h = max_h;
-        if (tab->h_scrollbar) {
-            GtkAdjustment *adj = gtk_range_get_adjustment(GTK_RANGE(tab->h_scrollbar));
-            gtk_adjustment_set_lower(adj, 0.0);
-            gtk_adjustment_set_upper(adj, total_w);
-        }
-        gtk_widget_set_size_request(tab->scrolled, -1, -1);
-        gtk_widget_set_size_request(tab->pages_drawing, page_width_px, clamp_double_to_int(ceil(max_h), MAX_SIZE_REQUEST));
-        gtk_scrolled_window_set_policy(GTK_SCROLLED_WINDOW(tab->scrolled),
-                                       GTK_POLICY_NEVER, GTK_POLICY_AUTOMATIC);
-    }
-    gtk_widget_queue_draw(tab->pages_drawing);
-}
 
 TabData *get_current_left_tab(void) {
     if (!app.left_notebook) return NULL;
