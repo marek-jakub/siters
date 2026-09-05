@@ -62,7 +62,7 @@ endif()
 
 # Include directories
 include_directories(include include/json-glib src src/search src/session
-    src/view src/ui src/pdf src/settings src/nav
+    src/view src/ui src/pdf src/settings src/nav src/fileinfo
     ${GTK_INCLUDE_DIRS} ${MUPDF_INCLUDE_DIRS} ${CMOCKA_INCLUDE_DIRS})
 
 # Data directory — default to source root for development; override with
@@ -85,6 +85,7 @@ add_executable(siters
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
+    src/fileinfo/fileinfo.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
@@ -123,6 +124,7 @@ add_executable(test_siters_unit
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
+    src/fileinfo/fileinfo.c
     src/sessions_model.c
     src/session_model.c
     src/document_model.c
