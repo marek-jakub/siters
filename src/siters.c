@@ -18,6 +18,7 @@
 #include "links.h"
 #include "settings/settings.h"
 #include "nav.h"
+#include "ui/sidebar.h"
 
 #include "mem_debug.h"
 
@@ -107,10 +108,6 @@ static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
 static void on_close_file_clicked(GtkButton *btn, gpointer user_data);
 static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data);
 static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
-static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data);
-static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data);
-static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data);
-static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
 static void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
@@ -1363,7 +1360,7 @@ cleanup:
     g_free(doc_uri);
 }
 
-static void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data) {
+void on_sessions_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {
@@ -1616,7 +1613,7 @@ static void on_toc_row_activated(GtkTreeView *tree_view, GtkTreePath *path, GtkT
     g_free(named_dest);
 }
 
-static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data) {
+void on_toc_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {
@@ -1664,53 +1661,7 @@ static void on_toc_toggled(GtkToggleButton *btn, gpointer user_data) {
 }
 
 
-static void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
-    (void)user_data;
-
-    if (!gtk_toggle_button_get_active(btn)) {
-        if (app.current_sidebar_mode == SIDEBAR_SETTINGS) {
-            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
-            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
-            app.current_sidebar_mode = SIDEBAR_NONE;
-        }
-        return;
-    }
-
-    if (gtk_widget_get_parent(app.sidebar) != NULL) {
-        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
-    }
-
-    /* Deactivate other toggle buttons */
-    g_signal_handlers_block_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
-    g_signal_handlers_unblock_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
-
-    g_signal_handlers_block_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
-    g_signal_handlers_unblock_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
-
-    g_signal_handlers_block_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
-    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
-    g_signal_handlers_unblock_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
-
-    /* Hide other sidebar contents */
-    gtk_widget_hide(app.sidebar_label);
-    gtk_widget_hide(app.sessions_container);
-    gtk_widget_hide(app.toc_container);
-    gtk_widget_hide(app.file_info_container);
-    gtk_tree_store_clear(app.toc_tree_store);
-
-    /* Show settings container */
-    gtk_widget_show_all(app.settings_container);
-
-    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
-    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
-    gtk_widget_set_size_request(app.sidebar, 300, -1);
-    gtk_widget_show(app.sidebar);
-    app.current_sidebar_mode = SIDEBAR_SETTINGS;
-}
-
-static void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data) {
+void on_left_file_info_toggled(GtkToggleButton *btn, gpointer user_data) {
     (void)user_data;
 
     if (!gtk_toggle_button_get_active(btn)) {

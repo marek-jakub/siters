@@ -6,6 +6,7 @@
 #include "view.h"
 #include "theme.h"
 #include "sessions_model.h"
+#include "ui/sidebar.h"
 
 extern App app;
 
@@ -180,4 +181,50 @@ void on_right_color_set(GtkColorButton *btn, gpointer user_data) {
     apply_page_color_to_notebook(app.right_notebook, str);
     g_free(str);
     save_state();
+}
+
+void on_settings_toggled(GtkToggleButton *btn, gpointer user_data) {
+    (void)user_data;
+
+    if (!gtk_toggle_button_get_active(btn)) {
+        if (app.current_sidebar_mode == SIDEBAR_SETTINGS) {
+            gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+            gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 1);
+            app.current_sidebar_mode = SIDEBAR_NONE;
+        }
+        return;
+    }
+
+    if (gtk_widget_get_parent(app.sidebar) != NULL) {
+        gtk_container_remove(GTK_CONTAINER(app.main_hbox), app.sidebar);
+    }
+
+    /* Deactivate other toggle buttons */
+    g_signal_handlers_block_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.sessions_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.sessions_btn, G_CALLBACK(on_sessions_toggled), NULL);
+
+    g_signal_handlers_block_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.toc_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.toc_btn, G_CALLBACK(on_toc_toggled), NULL);
+
+    g_signal_handlers_block_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+    gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(app.file_info_btn), FALSE);
+    g_signal_handlers_unblock_by_func(app.file_info_btn, G_CALLBACK(on_left_file_info_toggled), NULL);
+
+    /* Hide other sidebar contents */
+    gtk_widget_hide(app.sidebar_label);
+    gtk_widget_hide(app.sessions_container);
+    gtk_widget_hide(app.toc_container);
+    gtk_widget_hide(app.file_info_container);
+    gtk_tree_store_clear(app.toc_tree_store);
+
+    /* Show settings container */
+    gtk_widget_show_all(app.settings_container);
+
+    gtk_box_pack_start(GTK_BOX(app.main_hbox), app.sidebar, FALSE, FALSE, 0);
+    gtk_box_reorder_child(GTK_BOX(app.main_hbox), app.content_vbox, 2);
+    gtk_widget_set_size_request(app.sidebar, 300, -1);
+    gtk_widget_show(app.sidebar);
+    app.current_sidebar_mode = SIDEBAR_SETTINGS;
 }
