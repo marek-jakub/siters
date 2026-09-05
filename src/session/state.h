@@ -32,5 +32,7 @@ void                apply_page_color_to_notebook(GtkWidget *notebook, const char
 void                on_keep_dark_toggled(GtkToggleButton *btn, gpointer user_data);
 void                on_left_color_set(GtkColorButton *btn, gpointer user_data);
 void                on_right_color_set(GtkColorButton *btn, gpointer user_data);
+void                open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
+void                close_tab_in_notebook(GtkNotebook *notebook);
 
 #endif /* SITERS_SESSION_STATE_H */

@@ -18,6 +18,7 @@
 #include "links.h"
 #include "settings/settings.h"
 #include "nav.h"
+#include "ui/toolbar.h"
 #include "ui/sidebar.h"
 
 #include "mem_debug.h"
@@ -102,11 +103,6 @@ static gboolean on_drawing_scroll(GtkWidget *widget, GdkEventScroll *event, gpoi
 static gboolean on_drawing_button_press(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean on_drawing_button_release(GtkWidget *widget, GdkEventButton *event, gpointer user_data);
 static gboolean restore_zoom_scroll_cb(gpointer user_data);
-static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper);
-static void on_open_file_clicked(GtkButton *button, gpointer user_data);
-static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
-static void on_close_file_clicked(GtkButton *btn, gpointer user_data);
-static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data);
 static void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
 static void on_right_file_info_clicked(GtkButton *btn, gpointer user_data);
 static void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data);
@@ -227,35 +223,6 @@ static void destroy_tab_data(gpointer data) {
     g_free(tab->cached_page_x0);
     g_free(tab->cached_page_y0);
     g_free(tab);
-}
-
-static void on_window_destroy(GtkWidget *widget, gpointer user_data) {
-    (void)widget;
-    (void)user_data;
-    save_state();
-    gtk_main_quit();
-}
-
-static gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event, gpointer user_data) {
-    (void)user_data;
-
-    // Update current geometry
-    app.current_width = event->width;
-    app.current_height = event->height;
-    app.current_x = event->x;
-    app.current_y = event->y;
-    app.current_maximized = gtk_window_is_maximized(GTK_WINDOW(widget));
-
-    return FALSE; // Allow further processing
-}
-
-void update_window_title_for_session(const char *session_name) {
-    if (!app.window) return;
-
-    const char *name = (session_name && *session_name) ? session_name : "Default";
-    gchar *title = g_strdup_printf("Siters - %s", name);
-    gtk_window_set_title(GTK_WINDOW(app.window), title);
-    g_free(title);
 }
 
 gboolean ensure_tab_doc_loaded(TabData *tab) {
@@ -3093,7 +3060,7 @@ static TabData *create_new_tab(GtkWidget *notebook) {
     return tab;
 }
 
-static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
+void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     if (!notebook) return;
     GtkWidget *dialog = gtk_file_chooser_dialog_new("Open PDF",
                                                    GTK_WINDOW(app.window),
@@ -3165,19 +3132,7 @@ static void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     gtk_widget_destroy(dialog);
 }
 
-static void on_open_file_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
-    (void)user_data;
-    open_file_in_notebook(app.left_notebook, FALSE);
-}
-
-static void on_open_helper_file_clicked(GtkButton *button, gpointer user_data) {
-    (void)button;
-    (void)user_data;
-    open_file_in_notebook(app.right_notebook, TRUE);
-}
-
-static void close_tab_in_notebook(GtkNotebook *notebook) {
+void close_tab_in_notebook(GtkNotebook *notebook) {
     if (!notebook) return;
     int page_idx = gtk_notebook_get_current_page(notebook);
     if (page_idx < 0) return;
@@ -3302,18 +3257,6 @@ static void close_tab_in_notebook(GtkNotebook *notebook) {
     if (is_left) {
         populate_sessions_treeview();
     }
-}
-
-static void on_close_file_clicked(GtkButton *btn, gpointer user_data) {
-    (void)btn;
-    (void)user_data;
-    close_tab_in_notebook(GTK_NOTEBOOK(app.left_notebook));
-}
-
-static void on_close_helper_file_clicked(GtkButton *btn, gpointer user_data) {
-    (void)btn;
-    (void)user_data;
-    close_tab_in_notebook(GTK_NOTEBOOK(app.right_notebook));
 }
 
 static int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri) {

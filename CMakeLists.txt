@@ -81,6 +81,7 @@ add_executable(siters
     src/search/search.c
     src/view/view.c
     src/ui/theme.c
+    src/ui/toolbar.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
@@ -118,6 +119,7 @@ add_executable(test_siters_unit
     src/search/search.c
     src/view/view.c
     src/ui/theme.c
+    src/ui/toolbar.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
