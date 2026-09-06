@@ -29,7 +29,6 @@ void    on_search_row_activated(GtkTreeView *tv, GtkTreePath *path,
 /* Internal helpers provided by siters.c (the app hub). Declared here so the
    search module can drive navigation/redraw on the current document. */
 TabData *get_current_left_tab(void);
-gboolean ensure_tab_doc_loaded(TabData *tab);
 void     queue_draw(TabData *tab);
 void     cancel_doc_model_debounce(TabData *tab);
 void     scroll_to_page(TabData *tab, int page, double target_y);

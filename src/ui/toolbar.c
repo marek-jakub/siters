@@ -1,6 +1,7 @@
 #include "toolbar.h"
 #include "app.h"
 #include "state.h"
+#include "ui/notebook.h"
 
 extern App app;
 

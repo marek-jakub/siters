@@ -2,6 +2,7 @@
 #include <cairo.h>
 #include "app.h"
 #include "search.h"
+#include "ui/tab_lifecycle.h"
 #include "pdf.h"
 
 /* Cap per-page matches and per-idle-step batch so a huge page / document

@@ -4,6 +4,7 @@
 #include "view.h"
 #include "search.h"
 #include "pdf.h"
+#include "ui/tab_lifecycle.h"
 #include "ui/sidebar.h"
 
 extern App app;

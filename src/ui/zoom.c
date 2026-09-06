@@ -4,6 +4,7 @@
 #include "state.h"
 #include "view.h"
 #include "search.h"
+#include "ui/tab_lifecycle.h"
 #include "siters.h"
 
 extern App app;
