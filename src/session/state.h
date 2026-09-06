@@ -20,8 +20,6 @@ void                populate_sessions_treeview(void);
 TabData*            get_current_left_tab(void);
 TabData*            get_current_right_tab(void);
 session_model_t*    get_current_session_model(void);
-void                sync_left_layout_buttons(TabData *tab);
-void                sync_right_layout_buttons(TabData *tab);
 void                sync_page_widget_from_tab(TabData *tab);
 void                update_window_title_for_session(const char *session_name);
 void                apply_tabbar_position(const char *pos);

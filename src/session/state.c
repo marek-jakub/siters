@@ -15,6 +15,7 @@
 #include "sessions_model.h"
 #include "log.h"
 #include "state.h"
+#include "ui/layout.h"
 
 /* State management functions */
 static void json_emit_document(JsonBuilder *builder, const char *uri, const char *side, document_model_t *dm) {
