@@ -84,6 +84,7 @@ add_executable(siters
     src/ui/toolbar.c
     src/ui/zoom.c
     src/ui/layout.c
+    src/ui/toc.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
@@ -125,6 +126,7 @@ add_executable(test_siters_unit
     src/ui/toolbar.c
     src/ui/zoom.c
     src/ui/layout.c
+    src/ui/toc.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
