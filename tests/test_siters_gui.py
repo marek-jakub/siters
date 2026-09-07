@@ -240,24 +240,46 @@ class TestSitersBasicOperation(SitersGUITestCase):
                 except Exception:
                     return None
 
+            # Helper to poll for the sidebar label appearing/disappearing
+            def wait_for_sidebar_label(
+                should_exist: bool, timeout: float = 5.0
+            ) -> Node | None:
+                end = time.time() + timeout
+                while time.time() < end:
+                    label = find_sidebar_label()
+                    if (label is not None) == should_exist:
+                        return label
+                    time.sleep(0.2)
+                return None
+
+            # Try to force focus to the button to make action events work reliably.
+            if hasattr(sessions_btn, "grab_focus"):
+                try:
+                    sessions_btn.grab_focus()
+                    time.sleep(0.2)
+                except Exception:
+                    pass
+
             # Click once: sidebar should show the label
             if hasattr(sessions_btn, "do_action"):
                 sessions_btn.do_action(0)
             else:
                 sessions_btn.click()
-            time.sleep(0.5)
-            label = find_sidebar_label()
+
+            label = wait_for_sidebar_label(True, timeout=5.0)
             if label:
                 print("SUCCESS: Sidebar label found after clicking Sessions")
-            time.sleep(0.5)
             self.assertIsNotNone(
                 label, "Sidebar label not found after opening sessions"
             )
 
             # Click again: sidebar should hide, label should disappear
-            sessions_btn.click()
-            time.sleep(0.5)
-            label = find_sidebar_label()
+            if hasattr(sessions_btn, "do_action"):
+                sessions_btn.do_action(0)
+            else:
+                sessions_btn.click()
+
+            label = wait_for_sidebar_label(False, timeout=5.0)
             if not label:
                 print("SUCCESS: Sidebar label not found after closing sessions")
             self.assertIsNone(
