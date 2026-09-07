@@ -622,7 +622,7 @@ static void on_sessions_remove_clicked(GtkButton *button, gpointer user_data) {
 
     if (gtk_tree_selection_get_selected(selection, &model, &iter)) {
         gchar *session_name;
-        gtk_tree_model_get(model, &iter, 0, &session_name, -1);
+        gtk_tree_model_get(model, &iter, SESSION_COL_SESSION_NAME, &session_name, -1);
 
         // Prevent removing the "Default" session
         if (strcmp(session_name, "Default") == 0) {
@@ -700,7 +700,7 @@ static void on_sessions_update_clicked(GtkButton *button, gpointer user_data) {
         const char *new_name = gtk_entry_get_text(GTK_ENTRY(app.sessions_entry));
         if (new_name && strlen(new_name) > 0) {
             gchar *old_name;
-            gtk_tree_model_get(model, &iter, 0, &old_name, -1);
+            gtk_tree_model_get(model, &iter, SESSION_COL_SESSION_NAME, &old_name, -1);
 
             // Prevent renaming the "Default" session
             if (strcmp(old_name, "Default") == 0) {

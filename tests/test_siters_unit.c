@@ -642,6 +642,172 @@ static void test_create_main_window_initialization_sequence(void **state) {
 }
 
 /* ================================================================
+   Regression: renaming a session when a DOCUMENT row is highlighted
+   ================================================================
+   Reported bug: with the sessions tree open and a document row
+   highlighted, entering a new name and clicking Update created a
+   brand-new session instead of renaming the session that owns the
+   highlighted document. Root cause: the rename path read the session
+   name from tree column 0 (SESSION_COL_LABEL), which holds the
+   document basename on file rows. It must read the owning-session
+   column (SESSION_COL_SESSION_NAME).
+   ================================================================ */
+
+static void test_sessions_update_renames_session_of_highlighted_document(void **state) {
+    (void)state;
+
+    /* Keep save_state() (triggered at the end of the update handler)
+       inside the throwaway test dir, never the real user config dir. */
+    g_setenv("SITERS_CONFIG_DIR", tests_log_dir, TRUE);
+
+    /* Save whatever earlier tests left on the global app. */
+    GtkWidget *saved_window = app.window;
+    GtkWidget *saved_left_notebook = app.left_notebook;
+    GtkWidget *saved_right_notebook = app.right_notebook;
+    GtkWidget *saved_tree_view = app.sessions_tree_view;
+    GtkTreeStore *saved_tree_store = app.sessions_tree_store;
+    GtkWidget *saved_entry = app.sessions_entry;
+    sessions_model_t *saved_sessions_model = app.sessions_model;
+    GHashTable *saved_session_models = app.session_models;
+    GHashTable *saved_document_models = app.document_models;
+    gchar *saved_current_session = app.current_selected_session;
+    SidebarMode saved_mode = app.current_sidebar_mode;
+
+    /* Build a self-contained sessions sidebar (mirrors create_main_window). */
+    app.sessions_tree_store = gtk_tree_store_new(
+        SESSION_COL_COUNT,
+        G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING, G_TYPE_STRING, NULL);
+    app.sessions_tree_view = gtk_tree_view_new_with_model(GTK_TREE_MODEL(app.sessions_tree_store));
+    g_object_unref(app.sessions_tree_store); /* the tree view retains the only reference */
+    GtkTreeSelection *init_sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
+    gtk_tree_selection_set_mode(init_sel, GTK_SELECTION_SINGLE); /* click semantics used by the app */
+    app.sessions_entry = gtk_entry_new();
+    g_object_ref_sink(app.sessions_entry);
+
+    app.sessions_model = sessions_model_new();
+    sessions_model_add_session_name(app.sessions_model, "Default");
+    sessions_model_add_session_name(app.sessions_model, "Alpha");
+
+    app.session_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                               (GDestroyNotify)session_model_free);
+    app.document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                (GDestroyNotify)document_model_free);
+
+    session_model_t *default_sm = session_model_new();
+    session_model_set_session_name(default_sm, "Default");
+    g_hash_table_insert(app.session_models, g_strdup("Default"), default_sm);
+
+    session_model_t *alpha_sm = session_model_new();
+    session_model_set_session_name(alpha_sm, "Alpha");
+    session_model_add_document_url(alpha_sm, "file:///tmp/doc.pdf");
+    g_hash_table_insert(app.session_models, g_strdup("Alpha"), alpha_sm);
+
+    document_model_t *doc_model = document_model_new();
+    document_model_set_url(doc_model, "file:///tmp/doc.pdf");
+    g_hash_table_insert(app.document_models, g_strdup("Alpha:left:file:///tmp/doc.pdf"), doc_model);
+
+    app.window = NULL; /* no title/dialog updates needed */
+    app.left_notebook = NULL;
+    app.right_notebook = NULL;
+    app.current_selected_session = g_strdup("Alpha");
+    app.current_sidebar_mode = SIDEBAR_NONE; /* skip populate's auto-select */
+    g_clear_pointer(&app.last_tree_selection_key, g_free);
+
+    /* Session row "Alpha" with a child document row "doc.pdf". */
+    GtkTreeIter parent, child;
+    gtk_tree_store_append(app.sessions_tree_store, &parent, NULL);
+    gtk_tree_store_set(app.sessions_tree_store, &parent,
+                       SESSION_COL_LABEL, "Alpha",
+                       SESSION_COL_ROW_KIND, SESSION_ROW_SESSION,
+                       SESSION_COL_SESSION_NAME, "Alpha",
+                       SESSION_COL_DOC_URI, "",
+                       -1);
+    gtk_tree_store_append(app.sessions_tree_store, &child, &parent);
+    gtk_tree_store_set(app.sessions_tree_store, &child,
+                       SESSION_COL_LABEL, "doc.pdf",
+                       SESSION_COL_ROW_KIND, SESSION_ROW_FILE,
+                       SESSION_COL_SESSION_NAME, "Alpha",
+                       SESSION_COL_DOC_URI, "file:///tmp/doc.pdf",
+                       -1);
+
+    /* Reproduce the reported state: the DOCUMENT row is highlighted.
+       (The parent must be expanded first, like the real app's sidebar,
+       or the child row cannot anchor the tree-view selection.) */
+    GtkTreePath *parent_path = gtk_tree_model_get_path(GTK_TREE_MODEL(app.sessions_tree_store), &parent);
+    gtk_tree_view_expand_row(GTK_TREE_VIEW(app.sessions_tree_view), parent_path, FALSE);
+    gtk_tree_path_free(parent_path);
+    GtkTreeSelection *sel = gtk_tree_view_get_selection(GTK_TREE_VIEW(app.sessions_tree_view));
+    gtk_tree_selection_select_iter(sel, &child);
+
+    /* Type a new name and click Update. */
+    gtk_entry_set_text(GTK_ENTRY(app.sessions_entry), "Beta");
+    on_sessions_update_clicked(NULL, NULL);
+
+    /* The session must be RENAMED, not duplicated. */
+    const GList *names = sessions_model_get_session_names(app.sessions_model);
+    assert_null(g_list_find_custom((GList *)names, "Alpha", (GCompareFunc)g_strcmp0));
+    assert_non_null(g_list_find_custom((GList *)names, "Beta", (GCompareFunc)g_strcmp0));
+
+    /* Hash entries re-keyed to the new session name (no orphans). */
+    assert_null(g_hash_table_lookup(app.session_models, "Alpha"));
+    assert_non_null(g_hash_table_lookup(app.session_models, "Beta"));
+    assert_null(g_hash_table_lookup(app.document_models, "Alpha:left:file:///tmp/doc.pdf"));
+    assert_non_null(g_hash_table_lookup(app.document_models, "Beta:left:file:///tmp/doc.pdf"));
+
+    /* current_selected_session follows the rename. */
+    assert_string_equal(app.current_selected_session, "Beta");
+
+    /* Repopulated tree shows the renamed session with its document row. */
+    gboolean found_beta = FALSE;
+    gboolean found_doc = FALSE;
+    GtkTreeIter r;
+    if (gtk_tree_model_get_iter_first(GTK_TREE_MODEL(app.sessions_tree_store), &r)) {
+        do {
+            gchar *name = NULL;
+            gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &r,
+                               SESSION_COL_SESSION_NAME, &name, -1);
+            if (name && strcmp(name, "Beta") == 0) {
+                found_beta = TRUE;
+                GtkTreeIter c;
+                if (gtk_tree_model_iter_children(GTK_TREE_MODEL(app.sessions_tree_store), &c, &r)) {
+                    gchar *doc_uri = NULL;
+                    gtk_tree_model_get(GTK_TREE_MODEL(app.sessions_tree_store), &c,
+                                       SESSION_COL_DOC_URI, &doc_uri, -1);
+                    found_doc = (doc_uri && strcmp(doc_uri, "file:///tmp/doc.pdf") == 0);
+                    g_free(doc_uri);
+                }
+            }
+            g_free(name);
+        } while (gtk_tree_model_iter_next(GTK_TREE_MODEL(app.sessions_tree_store), &r));
+    }
+    assert_true(found_beta);
+    assert_true(found_doc);
+
+    /* Entry cleared after the rename. */
+    assert_string_equal(gtk_entry_get_text(GTK_ENTRY(app.sessions_entry)), "");
+
+    /* Cleanup this test's objects, then restore the prior app state. */
+    g_object_unref(app.sessions_tree_view); /* releases the tree store too */
+    g_object_unref(app.sessions_entry);
+    sessions_model_free(app.sessions_model);
+    g_hash_table_destroy(app.session_models);
+    g_hash_table_destroy(app.document_models);
+    g_free(app.current_selected_session);
+
+    app.window = saved_window;
+    app.left_notebook = saved_left_notebook;
+    app.right_notebook = saved_right_notebook;
+    app.sessions_tree_view = saved_tree_view;
+    app.sessions_tree_store = saved_tree_store;
+    app.sessions_entry = saved_entry;
+    app.sessions_model = saved_sessions_model;
+    app.session_models = saved_session_models;
+    app.document_models = saved_document_models;
+    app.current_selected_session = saved_current_session;
+    app.current_sidebar_mode = saved_mode;
+}
+
+/* ================================================================
    Tests for has_link_at
    ================================================================ */
 
@@ -956,6 +1122,8 @@ int main(void) {
         cmocka_unit_test(test_outline_refuses_too_deep),
         /* vulnerability #3: async-signal-safe termination */
         cmocka_unit_test(test_signal_handler_terminates_child),
+        /* regression: session rename with a highlighted document row */
+        cmocka_unit_test_setup_teardown(test_sessions_update_renames_session_of_highlighted_document, setup, teardown),
     };
 
     int rc = cmocka_run_group_tests(tests, NULL, NULL);
