@@ -3,7 +3,6 @@
 #include <glib/gstdio.h>
 #include <json-glib/json-glib.h>
 #include "pdf.h"
-#include "log.h"
 #include <math.h>
 #include "siters.h"
 #include "sessions_model.h"
