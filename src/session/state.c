@@ -15,6 +15,7 @@
 #include "sessions_model.h"
 #include "log.h"
 #include "state.h"
+#include "sessions_tree.h"
 #include "ui/layout.h"
 
 /* State management functions */

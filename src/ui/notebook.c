@@ -1,6 +1,7 @@
 #include "notebook.h"
 #include "app.h"
 #include "state.h"
+#include "sessions_tree.h"
 #include "nav.h"
 #include "ui/tab_lifecycle.h"
 #include "ui/layout.h"
