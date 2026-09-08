@@ -17,6 +17,20 @@ static int mock_alloc_height = 1200;
 /* Mock control variable for gtk_adjustment_get_value */
 static double mock_adjustment_value = 0.0;
 
+/* Mock control objects returned by the gtk_scrolled_window/gtk_range wraps.
+   When NULL the wraps fall back to a fresh dummy object so existing tests
+   that only check non-NULL behaviour are unaffected. */
+static GtkAdjustment *mock_vadjustment_obj = NULL;
+static GtkAdjustment *mock_sadj_obj = NULL;
+
+/* Mock controls for gtk_widget_queue_draw. The handlers call
+   gtk_widget_queue_draw(tab->pages_drawing); since the tab used in unit
+   tests is a stack object with a fake/NULL pages_drawing, the real GTK
+   implementation would trip a Gtk-CRITICAL, so it is wrapped into a no-op
+   that records the call. */
+static int mock_queue_draw_called = 0;
+static GtkWidget *mock_draw_widget = NULL;
+
 /* Mock for gtk_widget_get_allocation */
 void __wrap_gtk_widget_get_allocation(GtkWidget *widget, GtkAllocation *allocation) {
     (void)widget;
@@ -26,9 +40,19 @@ void __wrap_gtk_widget_get_allocation(GtkWidget *widget, GtkAllocation *allocati
     allocation->height = mock_alloc_height;
 }
 
-/* Mock for gtk_range_get_adjustment — returns a dummy GtkAdjustment pointer */
+/* Mock for gtk_widget_queue_draw — records the request instead of touching
+   a real GtkWidget so the page-drawing area pointer used in scroll tests
+   never reaches GTK. */
+void __wrap_gtk_widget_queue_draw(GtkWidget *widget) {
+    mock_queue_draw_called++;
+    mock_draw_widget = widget;
+}
+
+/* Mock for gtk_range_get_adjustment — returns a controlled object or a dummy */
 GtkAdjustment *__wrap_gtk_range_get_adjustment(GtkRange *range) {
     (void)range;
+    if (mock_sadj_obj)
+        return mock_sadj_obj;
     return (GtkAdjustment *)g_object_new(GTK_TYPE_ADJUSTMENT, NULL);
 }
 
@@ -38,9 +62,12 @@ double __wrap_gtk_adjustment_get_value(GtkAdjustment *adjustment) {
     return mock_adjustment_value;
 }
 
-/* Mock for gtk_scrolled_window_get_vadjustment — returns a dummy pointer */
+/* Mock for gtk_scrolled_window_get_vadjustment — returns a controlled object
+   or a dummy pointer */
 GtkAdjustment *__wrap_gtk_scrolled_window_get_vadjustment(GtkScrolledWindow *sw) {
     (void)sw;
+    if (mock_vadjustment_obj)
+        return mock_vadjustment_obj;
     return (GtkAdjustment *)g_object_new(GTK_TYPE_ADJUSTMENT, NULL);
 }
 
@@ -1070,6 +1097,285 @@ static void test_cache_evict_idx_null_safety(void **state) {
 }
 
 /* ================================================================
+   Regression: no spurious jump to the last page
+   ================================================================
+   These tests pin the scroll-driven page tracking. A document that fits the
+   viewport, or whose scroll adjustment is still being set up during an
+   open/restore, must NOT be classified as "at the very bottom": the buggy
+   shortcut matched any scroll position in those situations and jumped the
+   page counter (and the saved doc model) to the last page.
+   Landing on the last page IS legitimate when the document was scrolled to
+   the real bottom, or when a restored session resumes at the page the user
+   last read. Only documents opened manually through the Open dialog are
+   forced back to page 1 (see the fresh-open section further below). */
+
+/* Helper: minimal multi-page tab for on_scroll_value_changed (mode 0) */
+static void setup_tab_scroll_test(TabData *tab, int n_pages) {
+    memset(tab, 0, sizeof(*tab));
+    tab->layout_mode = 0;
+    tab->n_pages = n_pages;
+    tab->zoom = 72.0; /* get_ppi_scale → 1.0 */
+    tab->scrolled = (GtkWidget *)0x1;
+    tab->cached_page_widths = g_malloc(sizeof(double) * n_pages);
+    tab->cached_page_heights = g_malloc(sizeof(double) * n_pages);
+    for (int i = 0; i < n_pages; i++) {
+        tab->cached_page_widths[i] = 600.0;
+        tab->cached_page_heights[i] = 800.0;
+    }
+}
+
+static void teardown_tab_scroll_test(TabData *tab) {
+    cancel_doc_model_debounce(tab);
+    g_free(tab->cached_page_widths);
+    g_free(tab->cached_page_heights);
+    tab->cached_page_widths = NULL;
+    tab->cached_page_heights = NULL;
+    tab->scrolled = NULL;
+    tab->h_scrollbar = NULL;
+    mock_adjustment_value = 0.0;
+    mock_vadjustment_obj = NULL;
+    mock_sadj_obj = NULL;
+    mock_queue_draw_called = 0;
+    mock_draw_widget = NULL;
+}
+
+/* When the whole document fits the viewport (upper == page_size, so no real
+   scroll range), a value-changed at the top must keep the current page on
+   page 1. Previously the "at the very bottom" shortcut matched any scroll
+   position in that situation and jumped the page counter (and the saved doc
+   model) to the last page. */
+static void test_scroll_fits_viewport_stays_first_page(void **state) {
+    (void)state;
+    TabData tab;
+    setup_tab_scroll_test(&tab, 3);
+    GtkAdjustment *adj = GTK_ADJUSTMENT(gtk_adjustment_new(0.0, 0.0, 810.0, 1.0, 1.0, 810.0));
+    mock_vadjustment_obj = adj;
+    mock_adjustment_value = 0.0;
+    tab.cur_page = 0;
+
+    on_scroll_value_changed(adj, &tab);
+
+    assert_int_equal(tab.cur_page, 0);
+    g_object_unref(adj);
+    teardown_tab_scroll_test(&tab);
+}
+
+/* A genuinely scrolled-to-the-bottom document must still pin the current
+   page to the last page even after the fit-viewport guard is introduced. */
+static void test_scroll_at_true_bottom_reports_last_page(void **state) {
+    (void)state;
+    TabData tab;
+    setup_tab_scroll_test(&tab, 3);
+    GtkAdjustment *adj = GTK_ADJUSTMENT(gtk_adjustment_new(2700.0, 0.0, 3000.0, 10.0, 10.0, 300.0));
+    mock_vadjustment_obj = adj;
+    mock_adjustment_value = 2700.0;
+
+    on_scroll_value_changed(adj, &tab);
+
+    assert_int_equal(tab.cur_page, 2);
+    g_object_unref(adj);
+    teardown_tab_scroll_test(&tab);
+}
+
+/* Programmatic scroll adjustments that happen while the document is still
+   loading (initial_scroll_pending) or its post-load restore is in flight
+   (pending_restore) must not rewrite the current page. */
+static void test_scroll_ignored_while_loading_or_restoring(void **state) {
+    (void)state;
+    TabData tab;
+    setup_tab_scroll_test(&tab, 3);
+    GtkAdjustment *adj = GTK_ADJUSTMENT(gtk_adjustment_new(0.0, 0.0, 810.0, 1.0, 1.0, 810.0));
+    mock_vadjustment_obj = adj;
+    mock_adjustment_value = 0.0;
+    tab.cur_page = 1;
+
+    tab.initial_scroll_pending = TRUE;
+    on_scroll_value_changed(adj, &tab);
+    assert_int_equal(tab.cur_page, 1);
+
+    tab.initial_scroll_pending = FALSE;
+    RestoreState rs;
+    memset(&rs, 0, sizeof(rs));
+    tab.pending_restore = &rs;
+    on_scroll_value_changed(adj, &tab);
+    assert_int_equal(tab.cur_page, 1);
+
+    tab.pending_restore = NULL;
+    g_object_unref(adj);
+    teardown_tab_scroll_test(&tab);
+}
+
+/* Row layout (mode 2) uses the horizontal scrollbar: the same fit-range
+   guard must keep the page on page 1 when the document is narrower than
+   the viewport. */
+static void test_row_layout_fits_viewport_stays_first_page(void **state) {
+    (void)state;
+    TabData tab;
+    setup_tab_scroll_test(&tab, 3);
+    tab.layout_mode = 2;
+    GtkAdjustment *adj = GTK_ADJUSTMENT(gtk_adjustment_new(0.0, 0.0, 500.0, 1.0, 1.0, 500.0));
+    GtkAdjustment *vadj_other = GTK_ADJUSTMENT(gtk_adjustment_new(0.0, 0.0, 9999.0, 1.0, 1.0, 100.0));
+    mock_vadjustment_obj = vadj_other;
+    mock_sadj_obj = adj;
+    mock_adjustment_value = 0.0;
+    tab.h_scrollbar = (GtkWidget *)0x1;
+    tab.cur_page = 0;
+
+    on_scroll_value_changed(adj, &tab);
+
+    /* A redraw of the page-drawing area must have been requested (through
+       the wrapped gtk_widget_queue_draw, so no real widget is needed). */
+    assert_int_equal(tab.cur_page, 0);
+    assert_int_equal(mock_queue_draw_called, 1);
+    g_object_unref(adj);
+    g_object_unref(vadj_other);
+    teardown_tab_scroll_test(&tab);
+}
+
+/* ================================================================
+   Regression: freshly opened documents carry no leftover state
+   ================================================================
+   A document opened through the Open dialog is brand new: it must start at
+   the first page with default settings even if a saved document model for
+   the same file (same session key, from a past use or a previous app run)
+   still exists — including when that leftover saved the LAST page.
+   Only session-restored tabs apply the saved state, and a restore may
+   legitimately land on the last page if that is where the user last read. */
+
+/* Install an app.document_models table holding a left-pane model for
+   file:///tmp/doc.pdf under the "Alpha" session, saved at page
+   saved_page, zoom 55, row layout — the leftover a fresh open must ignore. */
+static GHashTable *saved_restore_doc_models = NULL;
+static gchar *saved_restore_current_session = NULL;
+static GtkWidget *saved_restore_left_nb = NULL;
+static GtkWidget *saved_restore_right_nb = NULL;
+
+static void setup_app_with_leftover_doc_state(int saved_page) {
+    saved_restore_doc_models = app.document_models;
+    saved_restore_current_session = app.current_selected_session;
+    saved_restore_left_nb = app.left_notebook;
+    saved_restore_right_nb = app.right_notebook;
+
+    app.document_models = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                                (GDestroyNotify)document_model_free);
+    document_model_t *dm = document_model_new();
+    document_model_set_url(dm, "file:///tmp/doc.pdf");
+    document_model_set_current_page(dm, saved_page);
+    document_model_set_zoom(dm, 55.0);
+    document_model_set_visualization_mode(dm, 1);
+    g_hash_table_insert(app.document_models, g_strdup("Alpha:left:file:///tmp/doc.pdf"), dm);
+
+    app.current_selected_session = g_strdup("Alpha");
+    app.left_notebook = NULL;
+    app.right_notebook = NULL;
+}
+
+static void teardown_app_with_leftover_doc_state(void) {
+    g_hash_table_destroy(app.document_models);
+    app.document_models = saved_restore_doc_models;
+    g_free(app.current_selected_session);
+    app.current_selected_session = saved_restore_current_session;
+    app.left_notebook = saved_restore_left_nb;
+    app.right_notebook = saved_restore_right_nb;
+}
+
+static void setup_tab_restore_test(TabData *tab) {
+    memset(tab, 0, sizeof(*tab));
+    tab->is_helper = FALSE;
+    tab->n_pages = 20;
+    tab->zoom = 96.0;
+    tab->layout_mode = 0;
+    tab->current_file = g_strdup("/tmp/doc.pdf");
+}
+
+static void teardown_tab_restore_test(TabData *tab) {
+    cancel_tab_restore(tab);
+    g_free(tab->current_file);
+    tab->current_file = NULL;
+}
+
+static void test_fresh_open_ignores_leftover_state(void **state) {
+    (void)state;
+    setup_app_with_leftover_doc_state(8);
+
+    TabData tab;
+    setup_tab_restore_test(&tab);
+    tab.fresh_open = TRUE;
+
+    /* A leftover "Alpha:left:...:doc.pdf" model exists (page 8, zoom 55,
+       row layout) but the fresh open must land on page 1 with defaults. */
+    restore_document_model_to_tab(&tab);
+
+    assert_int_equal(tab.cur_page, 0);
+    assert_true(fabs(tab.zoom - 96.0) < 0.001);
+    assert_int_equal(tab.layout_mode, 0);
+    assert_non_null(tab.pending_restore);
+
+    teardown_tab_restore_test(&tab);
+    teardown_app_with_leftover_doc_state();
+}
+
+static void test_session_restore_still_applies_saved_state(void **state) {
+    (void)state;
+    setup_app_with_leftover_doc_state(8);
+
+    TabData tab;
+    setup_tab_restore_test(&tab);
+
+    /* Not fresh: restoring a session tab must keep applying the saved page,
+       zoom and layout (page 8 -> cur_page 7, zoom 55, row layout 1). */
+    restore_document_model_to_tab(&tab);
+
+    assert_int_equal(tab.cur_page, 7);
+    assert_true(fabs(tab.zoom - 55.0) < 0.001);
+    assert_int_equal(tab.layout_mode, 1);
+
+    teardown_tab_restore_test(&tab);
+    teardown_app_with_leftover_doc_state();
+}
+
+/* The leftover saved position is the LAST page (n_pages = 20). A fresh open
+   must still land on page 1 — it must never land on the last page. */
+static void test_fresh_open_ignores_leftover_last_page(void **state) {
+    (void)state;
+    setup_app_with_leftover_doc_state(20);
+
+    TabData tab;
+    setup_tab_restore_test(&tab);
+    tab.fresh_open = TRUE;
+
+    restore_document_model_to_tab(&tab);
+
+    assert_int_equal(tab.cur_page, 0);
+    assert_true(fabs(tab.zoom - 96.0) < 0.001);
+    assert_non_null(tab.pending_restore);
+
+    teardown_tab_restore_test(&tab);
+    teardown_app_with_leftover_doc_state();
+}
+
+/* A session-restored tab whose saved position is the LAST page must
+   legitimately resume on the last page — only manually opened documents are
+   forced back to page 1. */
+static void test_session_restore_can_land_on_last_page(void **state) {
+    (void)state;
+    setup_app_with_leftover_doc_state(20);
+
+    TabData tab;
+    setup_tab_restore_test(&tab);
+
+    restore_document_model_to_tab(&tab);
+
+    assert_int_equal(tab.cur_page, 19);
+    assert_true(fabs(tab.zoom - 55.0) < 0.001);
+    assert_int_equal(tab.layout_mode, 1);
+    assert_non_null(tab.pending_restore);
+
+    teardown_tab_restore_test(&tab);
+    teardown_app_with_leftover_doc_state();
+}
+
+/* ================================================================
    Main
    ================================================================ */
 
@@ -1124,6 +1430,16 @@ int main(void) {
         cmocka_unit_test(test_signal_handler_terminates_child),
         /* regression: session rename with a highlighted document row */
         cmocka_unit_test_setup_teardown(test_sessions_update_renames_session_of_highlighted_document, setup, teardown),
+        /* regression: opening/restoring must not jump to the last page */
+        cmocka_unit_test_setup_teardown(test_scroll_fits_viewport_stays_first_page, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_scroll_at_true_bottom_reports_last_page, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_scroll_ignored_while_loading_or_restoring, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_row_layout_fits_viewport_stays_first_page, setup, teardown),
+        /* regression: freshly opened documents carry no leftover state */
+        cmocka_unit_test_setup_teardown(test_fresh_open_ignores_leftover_state, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_fresh_open_ignores_leftover_last_page, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_session_restore_still_applies_saved_state, setup, teardown),
+        cmocka_unit_test_setup_teardown(test_session_restore_can_land_on_last_page, setup, teardown),
     };
 
     int rc = cmocka_run_group_tests(tests, NULL, NULL);

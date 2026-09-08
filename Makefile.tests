@@ -52,7 +52,8 @@ build-unit-tests:
 		-Wl,--wrap=gtk_widget_get_allocation \
 		-Wl,--wrap=gtk_range_get_adjustment \
 		-Wl,--wrap=gtk_adjustment_get_value \
-		-Wl,--wrap=gtk_scrolled_window_get_vadjustment
+		-Wl,--wrap=gtk_scrolled_window_get_vadjustment \
+		-Wl,--wrap=gtk_widget_queue_draw
 
 run-unit-tests: build-unit-tests
 	@echo "Running unit tests..."

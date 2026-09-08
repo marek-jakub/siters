@@ -160,7 +160,20 @@ void update_document_model_from_tab(TabData *tab) {
 }
 
 void restore_document_model_to_tab(TabData *tab) {
-    if (!tab || !tab->current_file || !app.document_models) return;
+    if (!tab || !tab->current_file) return;
+
+    /* A freshly opened document is treated as brand new: it must never
+       inherit saved state (page/zoom/layout), whether left over from a past
+       use of the same file in this session, or carried over from another
+       session's saved data. Start at the first page with default settings. */
+    if (tab->fresh_open) {
+        tab->cur_page = 0;
+        tab->zoom = 96.0;
+        start_initial_scroll_restore(tab, 0, 96.0, 0.0);
+        return;
+    }
+
+    if (!app.document_models) return;
 
     char *uri = g_filename_to_uri(tab->current_file, NULL, NULL);
     if (!uri) return;
@@ -253,6 +266,15 @@ static int compute_page_from_scroll(TabData *tab, double scroll_y) {
             }
             y += page_h + spacing;
         }
+    }
+
+    /* A scroll position above the top of the first page (its leading spacing)
+       still belongs to the first page; only positions at/below the end of the
+       last page map to the last page. */
+    if (scroll_y < spacing) {
+        tab->last_known_page = 0;
+        tab->last_known_page_start = spacing;
+        return 0;
     }
 
     tab->last_known_page = visible_page;
@@ -432,6 +454,14 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             sync_right_page_widget_from_tab(tab);
         }
 
+        /* A freshly opened document stops being "new" once it has actually
+           been shown, i.e. its restore completes while it is the current tab.
+           Hidden tabs keep fresh_open so the first time the user opens them
+           they still get page 1 rather than any leftover saved state. */
+        if (tab == get_current_left_tab() || tab == get_current_right_tab()) {
+            tab->fresh_open = FALSE;
+        }
+
         /* Done - return FALSE to remove this idle callback */
         restore->tab->pending_restore = NULL;
         g_free(restore);
@@ -449,12 +479,19 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
             sync_right_page_widget_from_tab(tab);
         }
 
+        if (tab == get_current_left_tab() || tab == get_current_right_tab()) {
+            tab->fresh_open = FALSE;
+        }
+
         restore->tab->pending_restore = NULL;
         g_free(restore);
         return FALSE;
     }
 
     if (restore->tab) {
+        if (restore->tab == get_current_left_tab() || restore->tab == get_current_right_tab()) {
+            restore->tab->fresh_open = FALSE;
+        }
         restore->tab->pending_restore = NULL;
     }
     g_free(restore);
@@ -1116,7 +1153,10 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
     TabData *tab = user_data;
     if (!tab || !tab->cached_page_widths) return;
 
-    if (tab->initial_scroll_pending) {
+    /* Ignore programmatic scroll adjustments while a document is still loading
+       or its post-load restore is in flight: those movements are not user
+       scrolling and must not update the current page or the saved doc model. */
+    if (tab->initial_scroll_pending || tab->pending_restore) {
         return;
     }
 
@@ -1132,7 +1172,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
 
         double upper = gtk_adjustment_get_upper(adj);
         double page_size = gtk_adjustment_get_page_size(adj);
-        if (page_size > 0 && tab->n_pages > 0 && scroll_x >= (upper - page_size - 1.0)) {
+        if (page_size > 0 && tab->n_pages > 0
+            && (upper - page_size) > 1.0
+            && scroll_x >= (upper - page_size - 1.0)) {
             tab->cur_page = tab->n_pages - 1;
             if (tab == get_current_left_tab()) {
                 sync_page_widget_from_tab(tab);
@@ -1176,7 +1218,9 @@ static void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
 
     double upper = gtk_adjustment_get_upper(adj);
     double page_size = gtk_adjustment_get_page_size(adj);
-    if (tab->n_pages > 0 && scroll_y >= (upper - page_size - 1.0)) {
+    if (tab->n_pages > 0
+        && (upper - page_size) > 1.0
+        && scroll_y >= (upper - page_size - 1.0)) {
         tab->cur_page = tab->n_pages - 1;
         if (tab == get_current_left_tab()) {
             sync_page_widget_from_tab(tab);

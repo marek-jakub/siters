@@ -41,6 +41,12 @@ struct TabDataStruct {
     int built_layout_mode;
     double last_zoom;
     gboolean initial_scroll_pending;
+    /* Set for documents added through the Open dialog (as opposed to tabs
+       restored from a session). While fresh, saved document state (page,
+       zoom, layout) from a past use or another session must NOT be applied:
+       the document starts at page 1 with default settings. Cleared once the
+       freshly opened document has actually been shown. */
+    gboolean fresh_open;
     RestoreState *pending_restore;
     double scroll_offset;
     gboolean is_helper;

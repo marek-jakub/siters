@@ -92,6 +92,10 @@ void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
                 /* Not open yet: create tab and load */
                 TabData *tab = create_new_tab(notebook);
                 if (tab) {
+                    /* Newly opened documents are brand-new: never inherit
+                       saved position/zoom state left over from a past use of
+                       the same file or from another session. */
+                    tab->fresh_open = TRUE;
                     load_file_into_tab(tab, fname);
                     /* Add to session model only for newly opened docs */
                     if (app.current_selected_session) {
