@@ -87,6 +87,7 @@ add_executable(siters
     src/ui/toc.c
     src/ui/tab_lifecycle.c
     src/ui/notebook.c
+    src/ui/notebook_switching.c
     src/session/sessions_sidebar.c
     src/session/sessions_tree.c
     src/pdf/links.c
@@ -133,6 +134,7 @@ add_executable(test_siters_unit
     src/ui/toc.c
     src/ui/tab_lifecycle.c
     src/ui/notebook.c
+    src/ui/notebook_switching.c
     src/session/sessions_sidebar.c
     src/session/sessions_tree.c
     src/pdf/links.c
