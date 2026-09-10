@@ -172,7 +172,6 @@ target_link_options(test_siters_unit PRIVATE
     -Wl,--wrap=gtk_range_get_adjustment
     -Wl,--wrap=gtk_adjustment_get_value
     -Wl,--wrap=gtk_scrolled_window_get_vadjustment
-    -Wl,--wrap=gtk_widget_queue_draw
 )
 
 add_test(NAME unit_tests COMMAND test_siters_unit)
