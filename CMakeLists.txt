@@ -77,6 +77,7 @@ add_definitions(-DDATADIR="${DATADIR}")
 add_executable(siters
     src/main.c
     src/siters.c
+    src/document_state.c
     src/session/state.c
     src/search/search.c
     src/view/view.c
@@ -127,6 +128,7 @@ enable_testing()
 add_executable(test_siters_unit
     tests/test_siters_unit.c
     src/session/state.c
+    src/document_state.c
     src/search/search.c
     src/view/view.c
     src/view/render.c

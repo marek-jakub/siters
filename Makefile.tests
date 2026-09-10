@@ -17,12 +17,12 @@ CFLAGS=-Wall -Wextra -Werror -g -O2 -DDATADIR=\"$(DATADIR)\" \
 LIBS=$(ORDERED_LIBS)
 
 # Main application
-SITERS_SRC=src/main.c src/siters.c src/session/state.c src/search/search.c src/view/view.c src/view/render.c src/view/scroll.c src/ui/theme.c src/ui/toolbar.c src/ui/zoom.c src/ui/layout.c src/ui/toc.c src/ui/tab_lifecycle.c src/ui/notebook.c src/ui/notebook_switching.c src/session/sessions_sidebar.c src/session/sessions_tree.c src/pdf/links.c src/settings/settings.c src/nav/nav.c src/fileinfo/fileinfo.c src/log.c src/sessions_model.c src/session_model.c \
+SITERS_SRC=src/main.c src/siters.c src/document_state.c src/session/state.c src/search/search.c src/view/view.c src/view/render.c src/view/scroll.c src/ui/theme.c src/ui/toolbar.c src/ui/zoom.c src/ui/layout.c src/ui/toc.c src/ui/tab_lifecycle.c src/ui/notebook.c src/ui/notebook_switching.c src/session/sessions_sidebar.c src/session/sessions_tree.c src/pdf/links.c src/settings/settings.c src/nav/nav.c src/fileinfo/fileinfo.c src/log.c src/sessions_model.c src/session_model.c \
            src/document_model.c src/pdf_mupdf.c src/glibc_compat.c
 SITERS_TARGET=siters
 
 # Unit tests
-UNIT_TEST_SRC=tests/test_siters_unit.c src/session/state.c src/search/search.c src/view/view.c src/view/render.c src/view/scroll.c src/ui/theme.c src/ui/toolbar.c src/ui/zoom.c src/ui/layout.c src/ui/toc.c src/ui/tab_lifecycle.c src/ui/notebook.c src/ui/notebook_switching.c src/session/sessions_sidebar.c src/session/sessions_tree.c src/pdf/links.c src/settings/settings.c src/nav/nav.c src/fileinfo/fileinfo.c src/sessions_model.c src/session_model.c \
+UNIT_TEST_SRC=tests/test_siters_unit.c src/document_state.c src/session/state.c src/search/search.c src/view/view.c src/view/render.c src/view/scroll.c src/ui/theme.c src/ui/toolbar.c src/ui/zoom.c src/ui/layout.c src/ui/toc.c src/ui/tab_lifecycle.c src/ui/notebook.c src/ui/notebook_switching.c src/session/sessions_sidebar.c src/session/sessions_tree.c src/pdf/links.c src/settings/settings.c src/nav/nav.c src/fileinfo/fileinfo.c src/sessions_model.c src/session_model.c \
               src/document_model.c src/pdf_mupdf.c src/glibc_compat.c src/log.c
 UNIT_TEST_TARGET=test_siters_unit
 
