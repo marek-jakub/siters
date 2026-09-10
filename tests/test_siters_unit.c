@@ -23,6 +23,14 @@ static double mock_adjustment_value = 0.0;
 static GtkAdjustment *mock_vadjustment_obj = NULL;
 static GtkAdjustment *mock_sadj_obj = NULL;
 
+/* Mock controls for gtk_widget_queue_draw. The handlers call
+   gtk_widget_queue_draw(tab->pages_drawing); since the tab used in unit
+   tests is a stack object with a fake/NULL pages_drawing, the real GTK
+   implementation would trip a Gtk-CRITICAL, so it is wrapped into a no-op
+   that records the call. */
+static int mock_queue_draw_called = 0;
+static GtkWidget *mock_draw_widget = NULL;
+
 /* Mock for gtk_widget_get_allocation */
 void __wrap_gtk_widget_get_allocation(GtkWidget *widget, GtkAllocation *allocation) {
     (void)widget;
@@ -30,6 +38,14 @@ void __wrap_gtk_widget_get_allocation(GtkWidget *widget, GtkAllocation *allocati
     allocation->y = 0;
     allocation->width = mock_alloc_width;
     allocation->height = mock_alloc_height;
+}
+
+/* Mock for gtk_widget_queue_draw — records the request instead of touching
+   a real GtkWidget so the page-drawing area pointer used in scroll tests
+   never reaches GTK. */
+void __wrap_gtk_widget_queue_draw(GtkWidget *widget) {
+    mock_queue_draw_called++;
+    mock_draw_widget = widget;
 }
 
 /* Mock for gtk_range_get_adjustment — returns a controlled object or a dummy */
@@ -1119,6 +1135,8 @@ static void teardown_tab_scroll_test(TabData *tab) {
     mock_adjustment_value = 0.0;
     mock_vadjustment_obj = NULL;
     mock_sadj_obj = NULL;
+    mock_queue_draw_called = 0;
+    mock_draw_widget = NULL;
 }
 
 /* When the whole document fits the viewport (upper == page_size, so no real
@@ -1205,7 +1223,10 @@ static void test_row_layout_fits_viewport_stays_first_page(void **state) {
 
     on_scroll_value_changed(adj, &tab);
 
+    /* A redraw of the page-drawing area must have been requested (through
+       the wrapped gtk_widget_queue_draw, so no real widget is needed). */
     assert_int_equal(tab.cur_page, 0);
+    assert_int_equal(mock_queue_draw_called, 1);
     g_object_unref(adj);
     g_object_unref(vadj_other);
     teardown_tab_scroll_test(&tab);
