@@ -80,6 +80,7 @@ add_executable(siters
     src/session/state.c
     src/search/search.c
     src/view/view.c
+    src/view/render.c
     src/ui/theme.c
     src/ui/toolbar.c
     src/ui/zoom.c
@@ -127,6 +128,7 @@ add_executable(test_siters_unit
     src/session/state.c
     src/search/search.c
     src/view/view.c
+    src/view/render.c
     src/ui/theme.c
     src/ui/toolbar.c
     src/ui/zoom.c
