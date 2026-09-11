@@ -92,7 +92,7 @@ add_executable(siters
     src/ui/notebook.c
     src/ui/notebook_switching.c
     src/session/sessions_sidebar.c
-    src/session/sessions_tree.c
+    src/session/sessions_tree.c src/session/sessions_actions.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
@@ -142,7 +142,7 @@ add_executable(test_siters_unit
     src/ui/notebook.c
     src/ui/notebook_switching.c
     src/session/sessions_sidebar.c
-    src/session/sessions_tree.c
+    src/session/sessions_tree.c src/session/sessions_actions.c
     src/pdf/links.c
     src/settings/settings.c
     src/nav/nav.c
