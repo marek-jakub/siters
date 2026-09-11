@@ -136,7 +136,6 @@ gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_sig
 /* Pull in the module headers the tests exercise directly. The app-wide state
    object itself is defined in src/main.c, which is included below. */
 #include "ui/window.h"
-#include "session/state.h"
 #include "sessions_model.h"
 #include "session_model.h"
 #include "document_model.h"
