@@ -200,3 +200,9 @@ GtkWidget* create_main_window(void) {
 
     return app.window;
 }
+
+void hide_right_pane(void) {
+    if (app.right_pane) {
+        gtk_widget_hide(GTK_WIDGET(app.right_pane));
+    }
+}

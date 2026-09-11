@@ -33,6 +33,8 @@
 #include "ui/toc.h"
 #include "fileinfo/fileinfo.h"
 
+/* Keep this include list intact: tests/test_siters_unit.c includes this file
+   directly as its declaration umbrella (none of the app-only modules use it). */
 #include "mem_debug.h"
 
 /* DATADIR is normally defined by -DDATADIR=... at build time.
@@ -44,22 +46,3 @@
 /* Single application-wide state object. All former module-level statics now
    live as fields of this struct (defined in app.h). */
 App app;
-
-
-
-/* Function prototypes */
-void save_state(void);
-
-
-void hide_right_pane(void);
-
-/* PDF handling function prototypes */
-void queue_draw(TabData *tab);
-void scroll_to_page(TabData *tab, int page, double target_y);
-/* Build a compound key "side:uri" to differentiate left vs right notebook state */
-
-void hide_right_pane(void) {
-    if (app.right_pane) {
-        gtk_widget_hide(GTK_WIDGET(app.right_pane));
-    }
-}

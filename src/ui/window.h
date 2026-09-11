@@ -12,4 +12,7 @@ void       window_fill_main_toolbar(GtkWidget *toolbar);
 void       window_build_sidebar(void);
 void       window_build_right_toolbar(void);
 
+/* Hide the right helper pane (used by the app entry point). */
+void hide_right_pane(void);
+
 #endif /* SITERS_UI_WINDOW_H */
