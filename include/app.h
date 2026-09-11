@@ -17,7 +17,7 @@ typedef enum {
 } SidebarMode;
 
 /* Single global application state. All module-level state that used
-   to be scattered as statics in siters.c now lives here. */
+   to be scattered as statics in the monolithic siters.c now lives here. */
 typedef struct App {
     gint current_width;
     gint current_height;

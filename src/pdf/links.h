@@ -7,7 +7,7 @@
 /* PDF link handling: lazy per-page link loading, hit-testing, and activation
    (internal GOTO/NAMED navigation and external URI opening with safe-scheme
    confirmation). Exported entry points are driven by the drawing-area mouse
-   callbacks wired up in siters.c create_main_window. */
+   callbacks wired up in create_main_window (src/ui/window.c). */
 void     ensure_page_links_loaded(TabData *tab, int page);
 gboolean has_link_at(TabData *tab, int page, double px, double py);
 gboolean activate_link_at(TabData *tab, int page, double px, double py);

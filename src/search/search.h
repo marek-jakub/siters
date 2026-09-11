@@ -20,14 +20,14 @@ void    search_free(TabData *tab);
 void    search_highlight_page(TabData *tab, cairo_t *cr, int page_1based,
                               double ox, double oy, double sc);
 
-/* Signal-handler entry points wired up by create_main_window in siters.c */
+/* Signal-handler entry points wired up by create_main_window in src/ui/window.c */
 void    on_search_activated(GtkEntry *entry, gpointer user_data);
 void    on_search_clicked(GtkButton *btn, gpointer user_data);
 void    on_search_row_activated(GtkTreeView *tv, GtkTreePath *path,
                                 GtkTreeViewColumn *col, gpointer user_data);
 
-/* Internal helpers provided by siters.c (the app hub). Declared here so the
-   search module can drive navigation/redraw on the current document. */
+/* Internal navigation/redraw helpers on the current document. Declared here so
+   the search module can drive them without depending on the window module. */
 TabData *get_current_left_tab(void);
 void     queue_draw(TabData *tab);
 void     cancel_doc_model_debounce(TabData *tab);

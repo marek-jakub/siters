@@ -3,7 +3,7 @@
 
 #include <gtk/gtk.h>
 
-/* Window/session action handlers, wired up by create_main_window in siters.c. */
+/* Window/session action handlers, wired up by create_main_window in src/ui/window.c. */
 void on_title_bar_toggle(GtkToggleButton *button, gpointer user_data);
 void on_helper_toggle(GtkToggleButton *button, gpointer user_data);
 void on_minimize_clicked(GtkButton *button, gpointer user_data);

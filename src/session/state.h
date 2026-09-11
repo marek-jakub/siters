@@ -8,11 +8,11 @@
 #include "session_model.h"
 #include "sessions_model.h"
 
-/* Public persistence entry points (also declared in src/siters.h). */
+/* Public persistence entry points. */
 void save_state(void);
 void load_state(void);
 
-/* Helpers provided by siters.c (the app hub) used by the persistence module. */
+/* Helpers implemented in src/document_state.c, used by the persistence module. */
 char*               make_document_key(const char *session_name, const char *uri, gboolean is_helper);
 void                save_open_tabs_for_session(const char *session_name);
 void                restore_open_tabs_for_session(const char *session_name);

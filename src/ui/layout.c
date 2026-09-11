@@ -4,7 +4,7 @@
 #include "view.h"
 #include "nav.h"
 #include "search.h"
-#include "siters.h"
+#include "session/state.h"
 
 extern App app;
 

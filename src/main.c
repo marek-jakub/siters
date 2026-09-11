@@ -6,11 +6,14 @@
 #include <signal.h>
 #include <string.h>
 #include <unistd.h>
-#include "siters.h"
+#include "ui/window.h"
+#include "session/state.h"
+#include "app.h"
 #include "log.h"
 #include "pdf.h"
 
-extern void load_state(void);
+/* Single application-wide state object (extern-declared in app.h). */
+App app;
 
 static GLogWriterOutput suppress_gtk_box_critical(GLogLevelFlags log_level,
                                                    const GLogField *fields,

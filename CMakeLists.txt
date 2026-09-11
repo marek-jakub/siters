@@ -76,7 +76,6 @@ add_definitions(-DDATADIR="${DATADIR}")
 # Main application
 add_executable(siters
     src/main.c
-    src/siters.c
     src/document_state.c
     src/session/state.c
     src/search/search.c
@@ -86,7 +85,10 @@ add_executable(siters
     src/ui/theme.c
     src/ui/toolbar.c
     src/ui/zoom.c
-    src/ui/layout.c src/ui/window.c src/ui/window_sidebar.c src/ui/window_toolbars.c
+    src/ui/layout.c
+    src/ui/window.c
+    src/ui/window_sidebar.c
+    src/ui/window_toolbars.c
     src/ui/toc.c
     src/ui/tab_lifecycle.c
     src/ui/notebook.c
@@ -136,7 +138,10 @@ add_executable(test_siters_unit
     src/ui/theme.c
     src/ui/toolbar.c
     src/ui/zoom.c
-    src/ui/layout.c src/ui/window.c src/ui/window_sidebar.c src/ui/window_toolbars.c
+    src/ui/layout.c
+    src/ui/window.c
+    src/ui/window_sidebar.c
+    src/ui/window_toolbars.c
     src/ui/toc.c
     src/ui/tab_lifecycle.c
     src/ui/notebook.c

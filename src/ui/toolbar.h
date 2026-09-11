@@ -9,7 +9,7 @@ gboolean on_window_configure(GtkWidget *widget, GdkEventConfigure *event, gpoint
 void update_window_title_for_session(const char *session_name);
 
 /* Toolbar Open/Close buttons. The underlying file-open/close helpers are
-   provided by the app hub (siters.c) and declared via state.h. */
+   declared via state.h. */
 void on_open_file_clicked(GtkButton *button, gpointer user_data);
 void on_open_helper_file_clicked(GtkButton *button, gpointer user_data);
 void on_close_file_clicked(GtkButton *btn, gpointer user_data);

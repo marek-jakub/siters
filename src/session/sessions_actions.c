@@ -1,4 +1,4 @@
-/* Window/session action handlers, wired up by create_main_window in siters.c. */
+/* Window/session action handlers, wired up by create_main_window in src/ui/window.c. */
 
 #include "sessions_actions.h"
 #include "app.h"

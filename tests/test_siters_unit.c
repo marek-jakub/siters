@@ -133,10 +133,10 @@ gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_sig
     return 1;
 }
 
-/* Define the app-wide state object itself (siters.c is compiled as a separate
-   object for the app binary only, so its definition must live here for the
-   unit binary), and pull in the module headers the tests exercise directly. */
-#include "siters.h"
+/* Pull in the module headers the tests exercise directly. The app-wide state
+   object itself is defined in src/main.c, which is included below. */
+#include "ui/window.h"
+#include "session/state.h"
 #include "sessions_model.h"
 #include "session_model.h"
 #include "document_model.h"
@@ -150,8 +150,6 @@ gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_sig
 #include "view.h"
 #include "render.h"
 #include "view/scroll.h"
-
-App app;
 
 /* Include main.c (renaming its main() away) so the self-pipe signal handling
    internals (install_terminate_handlers, on_terminate_signal, signal_pipe)

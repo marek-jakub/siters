@@ -2,7 +2,7 @@
 #include "app.h"
 #include "tab.h"
 #include "state.h"
-#include "siters.h"
+#include "session/state.h"
 #include "view.h"
 #include "theme.h"
 #include "sessions_model.h"
