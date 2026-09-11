@@ -151,7 +151,7 @@ void window_build_sidebar(void) {
     pango_attr_list_unref(sattr);
     gtk_box_pack_start(GTK_BOX(app.settings_container), settings_title, FALSE, FALSE, 0);
 
-    GtkWidget *version_label = gtk_label_new("Version 0.1.0-19");
+    GtkWidget *version_label = gtk_label_new("Version 0.1.0-23");
     gtk_widget_set_halign(version_label, GTK_ALIGN_START);
     PangoAttrList *vattr = pango_attr_list_new();
     pango_attr_list_insert(vattr, pango_attr_foreground_alpha_new(32768));
