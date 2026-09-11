@@ -133,13 +133,25 @@ gulong __wrap_g_signal_connect_data(gpointer instance, const gchar *detailed_sig
     return 1;
 }
 
-/* Include siters.c to access static functions and types.
-   Suppress -Wunused-function: many static callbacks are registered
-   via g_signal_connect (function pointer) and appear unused to the compiler. */
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wunused-function"
-#include "../src/siters.c"
-#pragma GCC diagnostic pop
+/* Define the app-wide state object itself (siters.c is compiled as a separate
+   object for the app binary only, so its definition must live here for the
+   unit binary), and pull in the module headers the tests exercise directly. */
+#include "siters.h"
+#include "sessions_model.h"
+#include "session_model.h"
+#include "document_model.h"
+#include "app.h"
+#include "tab.h"
+#include "search.h"
+#include "pdf/links.h"
+#include "ui/tab_lifecycle.h"
+#include "sessions_sidebar.h"
+#include "session/sessions_actions.h"
+#include "view.h"
+#include "render.h"
+#include "view/scroll.h"
+
+App app;
 
 /* Include main.c (renaming its main() away) so the self-pipe signal handling
    internals (install_terminate_handlers, on_terminate_signal, signal_pipe)
