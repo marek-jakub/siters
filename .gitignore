@@ -64,6 +64,7 @@ CMakeFiles/
 CMakeCache.txt
 cmake_install.cmake
 CTestTestfile.cmake
+compile_commands.json
 
 # log files generated during builds
 *.log
@@ -79,3 +80,10 @@ test_siters_unit
 .vscode/
 .idea/
 *.swp
+
+# local tool configuration (personal, not shared)
+.vtcode/
+vtcode.toml
+
+# packaging build artifacts (tracked source files remain tracked)
+debian/
