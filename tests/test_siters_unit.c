@@ -1385,6 +1385,92 @@ static void test_session_restore_can_land_on_last_page(void **state) {
 }
 
 /* ================================================================
+   Tier-1 dedup: shared tab teardown helpers
+   ================================================================
+   unload_tab_document() is the single unload path every tab close/switch now
+   goes through, and free_page_cached_arrays() is the shared page-geometry
+   teardown it calls. These pin that the helpers free and NULL every
+   allocation they own (no leaks, no dangling pointers), matching what the
+   duplicated per-site blocks used to do by hand. */
+
+static void test_unload_tab_document_releases_document_resources(void **state) {
+    (void)state;
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+    tab.n_pages = 2;
+
+    /* Cached page geometry a loaded document owns */
+    tab.cached_page_widths  = g_malloc(sizeof(double) * tab.n_pages);
+    tab.cached_page_heights = g_malloc(sizeof(double) * tab.n_pages);
+    tab.cached_page_x0      = g_malloc(sizeof(double) * tab.n_pages);
+    tab.cached_page_y0      = g_malloc(sizeof(double) * tab.n_pages);
+
+    /* A rendered page surface held in the page cache */
+    tab.page_cache = g_malloc0(sizeof(cairo_surface_t *) * tab.n_pages);
+    tab.page_cache[0] = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 4, 4);
+    tab.total_cache_bytes = 4 * 4 * 4;
+
+    /* Per-page link chains — each entry of page_links is its own chain, and
+       pdfr_free_links() walks the whole chain, so the two fabricated links
+       must be independent (no shared nodes). */
+    PdfrLink *l2 = g_malloc0(sizeof(PdfrLink));
+    l2->uri = g_strdup("https://example.com/");
+    PdfrLink *l1 = g_malloc0(sizeof(PdfrLink));
+    l1->named_dest = g_strdup("chapter-1");
+    tab.page_links = g_malloc(sizeof(PdfrLink *) * 2);
+    tab.page_links[0] = l1;
+    tab.page_links[1] = l2;
+    tab.page_links_n = 2;
+
+    /* In-flight search state */
+    tab.search_results = g_malloc0(sizeof(*tab.search_results));
+    tab.search_results[0].rects = g_malloc(sizeof(PdfrRect));
+    tab.search_results_n = 1;
+    tab.search_text = g_strdup("needle");
+
+    /* doc is NULL so the MuPDF path is never touched; pdfr_close(NULL) is a
+       no-op, matching a tab whose document failed to open. */
+    unload_tab_document(&tab);
+
+    assert_null(tab.cached_page_widths);
+    assert_null(tab.cached_page_heights);
+    assert_null(tab.cached_page_x0);
+    assert_null(tab.cached_page_y0);
+    assert_null(tab.page_cache);
+    assert_int_equal(tab.total_cache_bytes, 0);
+    assert_null(tab.page_links);
+    assert_int_equal(tab.page_links_n, 0);
+    assert_null(tab.search_results);
+    assert_int_equal(tab.search_results_n, 0);
+    assert_null(tab.search_text);
+    assert_null(tab.doc);
+
+    /* NULL tab must be a safe no-op (the shared helper guards first). */
+    unload_tab_document(NULL);
+}
+
+static void test_free_page_cached_arrays_releases_all_arrays(void **state) {
+    (void)state;
+
+    /* NULL tab must be a safe no-op (the shared helper guards first). */
+    free_page_cached_arrays(NULL);
+
+    TabData tab;
+    memset(&tab, 0, sizeof(tab));
+    tab.cached_page_widths  = g_malloc(sizeof(double) * 3);
+    tab.cached_page_heights = g_malloc(sizeof(double) * 3);
+    tab.cached_page_x0      = g_malloc(sizeof(double) * 3);
+    tab.cached_page_y0      = g_malloc(sizeof(double) * 3);
+
+    free_page_cached_arrays(&tab);
+
+    assert_null(tab.cached_page_widths);
+    assert_null(tab.cached_page_heights);
+    assert_null(tab.cached_page_x0);
+    assert_null(tab.cached_page_y0);
+}
+
+/* ================================================================
    Main
    ================================================================ */
 
@@ -1449,6 +1535,9 @@ int main(void) {
         cmocka_unit_test_setup_teardown(test_fresh_open_ignores_leftover_last_page, setup, teardown),
         cmocka_unit_test_setup_teardown(test_session_restore_still_applies_saved_state, setup, teardown),
         cmocka_unit_test_setup_teardown(test_session_restore_can_land_on_last_page, setup, teardown),
+        /* tier-1 dedup: shared tab teardown helpers */
+        cmocka_unit_test(test_unload_tab_document_releases_document_resources),
+        cmocka_unit_test(test_free_page_cached_arrays_releases_all_arrays),
     };
 
     int rc = cmocka_run_group_tests(tests, NULL, NULL);
