@@ -12,6 +12,14 @@
 #include "search.h"
 #include "settings/settings.h"
 
+static void style_section_header(GtkWidget *label) {
+    PangoAttrList *attrs = pango_attr_list_new();
+    pango_attr_list_insert(attrs, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
+    pango_attr_list_insert(attrs, pango_attr_scale_new(PANGO_SCALE_LARGE));
+    gtk_label_set_attributes(GTK_LABEL(label), attrs);
+    pango_attr_list_unref(attrs);
+}
+
 void window_build_sidebar(void) {
     /* Sidebar for sessions, toc, settings */
     app.sidebar = gtk_box_new(GTK_ORIENTATION_VERTICAL, 0);
@@ -35,13 +43,7 @@ void window_build_sidebar(void) {
     // Title
     app.sessions_title = gtk_label_new("Sessions");
     gtk_widget_set_halign(app.sessions_title, GTK_ALIGN_START);
-    PangoAttrList *attr_list = pango_attr_list_new();
-    PangoAttribute *attr = pango_attr_weight_new(PANGO_WEIGHT_BOLD);
-    pango_attr_list_insert(attr_list, attr);
-    attr = pango_attr_scale_new(PANGO_SCALE_LARGE);
-    pango_attr_list_insert(attr_list, attr);
-    gtk_label_set_attributes(GTK_LABEL(app.sessions_title), attr_list);
-    pango_attr_list_unref(attr_list);
+    style_section_header(app.sessions_title);
     gtk_box_pack_start(GTK_BOX(app.sessions_container), app.sessions_title, FALSE, FALSE, 0);
 
     // Entry field
@@ -110,11 +112,7 @@ void window_build_sidebar(void) {
 
     GtkWidget *toc_title = gtk_label_new("Table of Contents");
     gtk_widget_set_halign(toc_title, GTK_ALIGN_START);
-    PangoAttrList *toc_attr = pango_attr_list_new();
-    pango_attr_list_insert(toc_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-    pango_attr_list_insert(toc_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
-    gtk_label_set_attributes(GTK_LABEL(toc_title), toc_attr);
-    pango_attr_list_unref(toc_attr);
+    style_section_header(toc_title);
     gtk_box_pack_start(GTK_BOX(app.toc_container), toc_title, FALSE, FALSE, 0);
 
     app.toc_tree_store = gtk_tree_store_new(TOC_COL_COUNT, G_TYPE_STRING, G_TYPE_INT, G_TYPE_STRING);
@@ -144,11 +142,7 @@ void window_build_sidebar(void) {
 
     GtkWidget *settings_title = gtk_label_new("Siters Preferences");
     gtk_widget_set_halign(settings_title, GTK_ALIGN_START);
-    PangoAttrList *sattr = pango_attr_list_new();
-    pango_attr_list_insert(sattr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-    pango_attr_list_insert(sattr, pango_attr_scale_new(PANGO_SCALE_LARGE));
-    gtk_label_set_attributes(GTK_LABEL(settings_title), sattr);
-    pango_attr_list_unref(sattr);
+    style_section_header(settings_title);
     gtk_box_pack_start(GTK_BOX(app.settings_container), settings_title, FALSE, FALSE, 0);
 
     GtkWidget *version_label = gtk_label_new("Version 0.1.0-23");
@@ -260,11 +254,7 @@ void window_build_sidebar(void) {
 
     GtkWidget *file_info_title = gtk_label_new("File Information");
     gtk_widget_set_halign(file_info_title, GTK_ALIGN_START);
-    PangoAttrList *fi_attr = pango_attr_list_new();
-    pango_attr_list_insert(fi_attr, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-    pango_attr_list_insert(fi_attr, pango_attr_scale_new(PANGO_SCALE_LARGE));
-    gtk_label_set_attributes(GTK_LABEL(file_info_title), fi_attr);
-    pango_attr_list_unref(fi_attr);
+    style_section_header(file_info_title);
     gtk_box_pack_start(GTK_BOX(app.file_info_container), file_info_title, FALSE, FALSE, 0);
 
     app.file_info_name_label = gtk_label_new("Name: (no file)");
@@ -294,11 +284,7 @@ void window_build_sidebar(void) {
     /* Search title */
     GtkWidget *search_title = gtk_label_new("Search in Document");
     gtk_widget_set_halign(search_title, GTK_ALIGN_START);
-    PangoAttrList *sa = pango_attr_list_new();
-    pango_attr_list_insert(sa, pango_attr_weight_new(PANGO_WEIGHT_BOLD));
-    pango_attr_list_insert(sa, pango_attr_scale_new(PANGO_SCALE_LARGE));
-    gtk_label_set_attributes(GTK_LABEL(search_title), sa);
-    pango_attr_list_unref(sa);
+    style_section_header(search_title);
     gtk_box_pack_start(GTK_BOX(app.file_info_container), search_title, FALSE, FALSE, 0);
 
     /* Search entry + button row */

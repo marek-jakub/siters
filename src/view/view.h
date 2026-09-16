@@ -26,6 +26,7 @@ double get_page_height_ppi(TabData *tab, int page_idx);
 void   cache_evict_idx(TabData *tab, int idx);
 void   cache_page_dimensions(TabData *tab);
 void   invalidate_page_cache(TabData *tab);
+void   free_page_cached_arrays(TabData *tab);
 
 /* Scrolling / redraw entry points (also wired up by the view rendering). */
 void   queue_draw(TabData *tab);

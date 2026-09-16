@@ -11,6 +11,11 @@
 void sync_page_widget_from_tab(TabData *tab);
 void sync_right_page_widget_from_tab(TabData *tab);
 
+/* Convenience: sync whichever side (left/right notebook) the given tab
+   belongs to — equivalent to the `if (tab == get_current_left_tab())
+   ... if (tab == get_current_right_tab())` pattern. */
+void sync_nav_for_tab(TabData *tab);
+
 /* Page-number entry handlers: digit-only insertion filter and Enter-to-jump. */
 void on_page_entry_insert_text(GtkEditable *editable,
                                const gchar *text,

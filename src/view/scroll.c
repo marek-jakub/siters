@@ -248,13 +248,7 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         /* Update cur_page based on actual scroll position */
         tab->cur_page = compute_page_from_scroll(tab, actual_scroll);
 
-        /* Update UI */
-        if (tab == get_current_left_tab()) {
-            sync_page_widget_from_tab(tab);
-        }
-        if (tab == get_current_right_tab()) {
-            sync_right_page_widget_from_tab(tab);
-        }
+        sync_nav_for_tab(tab);
 
         /* A freshly opened document stops being "new" once it has actually
            been shown, i.e. its restore completes while it is the current tab.
@@ -268,25 +262,6 @@ static gboolean do_initial_scroll_stage(gpointer user_data) {
         restore->tab->pending_restore = NULL;
         g_free(restore);
 
-        return FALSE;
-    }
-
-    /* ========== STAGE 4: Finalize ========== */
-    if (restore->restore_stage == 4) {
-        /* Update UI */
-        if (tab == get_current_left_tab()) {
-            sync_page_widget_from_tab(tab);
-        }
-        if (tab == get_current_right_tab()) {
-            sync_right_page_widget_from_tab(tab);
-        }
-
-        if (tab == get_current_left_tab() || tab == get_current_right_tab()) {
-            tab->fresh_open = FALSE;
-        }
-
-        restore->tab->pending_restore = NULL;
-        g_free(restore);
         return FALSE;
     }
 
@@ -350,12 +325,7 @@ void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
             && (upper - page_size) > 1.0
             && scroll_x >= (upper - page_size - 1.0)) {
             tab->cur_page = tab->n_pages - 1;
-            if (tab == get_current_left_tab()) {
-                sync_page_widget_from_tab(tab);
-            }
-            if (tab == get_current_right_tab()) {
-                sync_right_page_widget_from_tab(tab);
-            }
+            sync_nav_for_tab(tab);
             schedule_doc_model_update(tab);
             gtk_widget_queue_draw(tab->pages_drawing);
             return;
@@ -373,12 +343,7 @@ void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         }
 
         tab->cur_page = visible_page;
-        if (tab == get_current_left_tab()) {
-            sync_page_widget_from_tab(tab);
-        }
-        if (tab == get_current_right_tab()) {
-            sync_right_page_widget_from_tab(tab);
-        }
+        sync_nav_for_tab(tab);
         schedule_doc_model_update(tab);
         gtk_widget_queue_draw(tab->pages_drawing);
         return;
@@ -396,12 +361,7 @@ void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
         && (upper - page_size) > 1.0
         && scroll_y >= (upper - page_size - 1.0)) {
         tab->cur_page = tab->n_pages - 1;
-        if (tab == get_current_left_tab()) {
-            sync_page_widget_from_tab(tab);
-        }
-        if (tab == get_current_right_tab()) {
-            sync_right_page_widget_from_tab(tab);
-        }
+        sync_nav_for_tab(tab);
         schedule_doc_model_update(tab);
         return;
     }
@@ -439,12 +399,7 @@ void on_scroll_value_changed(GtkAdjustment *adj, gpointer user_data) {
 
     tab->cur_page = visible_page;
 
-    if (tab == get_current_left_tab()) {
-        sync_page_widget_from_tab(tab);
-    }
-    if (tab == get_current_right_tab()) {
-        sync_right_page_widget_from_tab(tab);
-    }
+    sync_nav_for_tab(tab);
 
     schedule_doc_model_update(tab);
 }

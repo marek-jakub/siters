@@ -10,6 +10,11 @@ void close_tab_in_notebook(GtkNotebook *notebook);
 int find_matching_tab_index(GtkNotebook *notebook, const char *target_uri);
 void update_last_read_for_notebook(GtkNotebook *notebook, GtkWidget *page, guint page_num);
 
+/* Current-tab accessors.  Return the active TabData for the left or right
+   notebook respectively, or NULL when the notebook is empty. */
+TabData *get_current_left_tab(void);
+TabData *get_current_right_tab(void);
+
 /* Tab factory: creates a notebook page wired with the shared view widgets. */
 TabData *create_new_tab(GtkWidget *notebook);
 

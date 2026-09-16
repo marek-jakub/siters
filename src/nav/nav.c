@@ -3,6 +3,7 @@
 #include "state.h"
 #include "search.h"
 #include "view.h"
+#include "ui/notebook.h"
 
 #include <stdlib.h>
 
@@ -113,6 +114,11 @@ void sync_right_page_widget_from_tab(TabData *tab) {
         else
             gtk_widget_hide(app.right_page_nav_overlay);
     }
+}
+
+void sync_nav_for_tab(TabData *tab) {
+    if (tab == get_current_left_tab()) sync_page_widget_from_tab(tab);
+    if (tab == get_current_right_tab()) sync_right_page_widget_from_tab(tab);
 }
 
 void on_right_page_entry_activate(GtkEntry *entry, gpointer user_data) {

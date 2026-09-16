@@ -17,4 +17,9 @@ void on_right_file_info_clicked(GtkButton *button, gpointer user_data);
    refreshes the right popover after closing a tab). */
 gchar* format_file_size(goffset size);
 
+/* Refresh the Name/Path/Size/Pages labels inside the right file-info
+   popover for the current right-tab.  No-op when the popover is not
+   mapped. */
+void refresh_right_popover_labels(void);
+
 #endif /* SITERS_FILEINFO_H */

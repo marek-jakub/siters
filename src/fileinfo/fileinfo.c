@@ -3,6 +3,8 @@
 #include "state.h"
 #include "search.h"
 #include "ui/sidebar.h"
+#include "ui/notebook.h"
+#include "view.h"
 
 extern App app;
 
@@ -63,6 +65,53 @@ void update_file_info_labels(TabData *tab) {
         g_free(pages_text);
     } else {
         gtk_label_set_text(GTK_LABEL(app.file_info_pages_label), "Pages: N/A");
+    }
+}
+
+void refresh_right_popover_labels(void) {
+    if (!app.right_file_info_popover || !gtk_widget_get_mapped(app.right_file_info_popover))
+        return;
+
+    TabData *rtab = get_current_right_tab();
+
+    if (rtab && rtab->current_file) {
+        gchar *basename = g_path_get_basename(rtab->current_file);
+        gchar *text = g_strdup_printf("Name: %s", basename);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
+        g_free(text);
+        g_free(basename);
+
+        text = g_strdup_printf("Path: %s", rtab->current_file);
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
+        g_free(text);
+
+        GFile *gf = g_file_new_for_path(rtab->current_file);
+        GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
+                                             G_FILE_QUERY_INFO_NONE, NULL, NULL);
+        if (info) {
+            gchar *size_str = format_file_size(g_file_info_get_size(info));
+            text = g_strdup_printf("Size: %s", size_str);
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), text);
+            g_free(text);
+            g_free(size_str);
+            g_object_unref(info);
+        } else {
+            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
+        }
+        g_object_unref(gf);
+
+        if (rtab->doc) {
+            gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
+            g_free(pages_text);
+        } else {
+            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
+        }
+    } else {
+        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), "Name: (no file)");
+        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), "Path: (none)");
+        gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
+        gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
     }
 }
 

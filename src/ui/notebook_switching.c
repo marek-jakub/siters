@@ -33,36 +33,7 @@ void on_left_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint 
         GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
         TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
         if (t && t != tab && t->doc) {
-            cancel_tab_restore(t);
-            cancel_doc_model_debounce(t);
-            search_cancel(t);
-            search_free(t);
-            if (t->zoom_scroll_source_id) {
-                g_source_remove(t->zoom_scroll_source_id);
-                t->zoom_scroll_source_id = 0;
-            }
-            if (t->page_links) {
-                for (int j = 0; j < t->page_links_n; j++) {
-                    if (t->page_links[j])
-                        pdfr_free_links(t->doc, t->page_links[j]);
-                }
-                g_free(t->page_links);
-                t->page_links = NULL;
-                t->page_links_n = 0;
-            }
-            pdfr_close(t->doc);
-            t->doc = NULL;
-            g_free(t->cached_page_widths);
-            g_free(t->cached_page_heights);
-            g_free(t->cached_page_x0);
-            g_free(t->cached_page_y0);
-            t->cached_page_widths = NULL;
-            t->cached_page_heights = NULL;
-            t->cached_page_x0 = NULL;
-            t->cached_page_y0 = NULL;
-            invalidate_page_cache(t);
-            g_free(t->page_cache);
-            t->page_cache = NULL;
+            unload_tab_document(t);
         }
     }
     pdfr_purge_store();
@@ -131,36 +102,7 @@ void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint
         GtkWidget *p = gtk_notebook_get_nth_page(notebook, i);
         TabData *t = g_object_get_data(G_OBJECT(p), "tab-data");
         if (t && t != tab && t->doc) {
-            cancel_tab_restore(t);
-            cancel_doc_model_debounce(t);
-            search_cancel(t);
-            search_free(t);
-            if (t->zoom_scroll_source_id) {
-                g_source_remove(t->zoom_scroll_source_id);
-                t->zoom_scroll_source_id = 0;
-            }
-            if (t->page_links) {
-                for (int j = 0; j < t->page_links_n; j++) {
-                    if (t->page_links[j])
-                        pdfr_free_links(t->doc, t->page_links[j]);
-                }
-                g_free(t->page_links);
-                t->page_links = NULL;
-                t->page_links_n = 0;
-            }
-            pdfr_close(t->doc);
-            t->doc = NULL;
-            g_free(t->cached_page_widths);
-            g_free(t->cached_page_heights);
-            g_free(t->cached_page_x0);
-            g_free(t->cached_page_y0);
-            t->cached_page_widths = NULL;
-            t->cached_page_heights = NULL;
-            t->cached_page_x0 = NULL;
-            t->cached_page_y0 = NULL;
-            invalidate_page_cache(t);
-            g_free(t->page_cache);
-            t->page_cache = NULL;
+            unload_tab_document(t);
         }
     }
     pdfr_purge_store();
@@ -180,46 +122,7 @@ void on_right_notebook_switch_page(GtkNotebook *notebook, GtkWidget *page, guint
     sync_page_widget_from_tab(get_current_left_tab());
     sync_right_page_widget_from_tab(tab);
 
-    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
-        TabData *rtab = tab;
-        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
-        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
-        g_free(text);
-        g_free(basename);
-
-        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
-        g_free(text);
-
-        if (rtab && rtab->current_file) {
-            GFile *gf = g_file_new_for_path(rtab->current_file);
-            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
-                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
-            if (info) {
-                gchar *size_str = format_file_size(g_file_info_get_size(info));
-                gchar *size_text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), size_text);
-                g_free(size_text);
-                g_free(size_str);
-                g_object_unref(info);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
-            }
-            g_object_unref(gf);
-
-            if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
-                g_free(pages_text);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
-            }
-        } else {
-            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
-        }
-    }
+    refresh_right_popover_labels();
 }
 
 void on_notebook_page_reordered(GtkNotebook *notebook, GtkWidget *page, guint page_num, gpointer user_data) {

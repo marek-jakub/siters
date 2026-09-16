@@ -6,6 +6,11 @@
 
 /* Tab document lifecycle: manages a TabData from creation through destroy. */
 
+/* Release the doc handle and all cached per-document resources (page cache,
+   dimension arrays, page links) so the tab becomes lightweight while hidden.
+   Does NOT free the TabData itself. */
+void unload_tab_document(TabData *tab);
+
 /* Destroy-notify stored on notebook pages (owns the TabData). */
 void destroy_tab_data(gpointer data);
 

@@ -41,4 +41,10 @@ void session_model_remove_document_url(session_model_t* model, const char* url);
 void session_model_add_helper_document_url(session_model_t* model, const char* url);
 void session_model_remove_helper_document_url(session_model_t* model, const char* url);
 
+/* Shared GList copy-deep callback: duplicates each string node. */
+static inline void* model_copy_string(const void* src, void* data) {
+    (void)data;
+    return g_strdup((const char*)src);
+}
+
 #endif // SESSION_MODEL_H

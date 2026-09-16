@@ -1,10 +1,6 @@
 #include "sessions_model.h"
+#include "session_model.h"
 #include <string.h>
-
-static void* copy_string(const void* src, void* data) {
-    (void)data;
-    return g_strdup((const char*)src);
-}
 
 sessions_model_t* sessions_model_new() {
     sessions_model_t* model = g_new(sessions_model_t, 1);
@@ -59,7 +55,7 @@ void sessions_model_set_session_names(sessions_model_t* model, GList* names) {
     if (model->session_names) {
         g_list_free_full(model->session_names, g_free);
     }
-    model->session_names = g_list_copy_deep(names, copy_string, NULL);
+    model->session_names = g_list_copy_deep(names, model_copy_string, NULL);
 }
 
 void sessions_model_set_last_open_session(sessions_model_t* model, const char* session) {

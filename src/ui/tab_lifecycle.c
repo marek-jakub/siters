@@ -30,6 +30,33 @@ static void cancel_tab_deferred_load(TabData *tab) {
     tab->load_idle_id = 0;
 }
 
+void unload_tab_document(TabData *tab) {
+    if (!tab) return;
+    cancel_tab_restore(tab);
+    cancel_doc_model_debounce(tab);
+    search_cancel(tab);
+    search_free(tab);
+    if (tab->zoom_scroll_source_id) {
+        g_source_remove(tab->zoom_scroll_source_id);
+        tab->zoom_scroll_source_id = 0;
+    }
+    if (tab->page_links) {
+        for (int i = 0; i < tab->page_links_n; i++) {
+            if (tab->page_links[i])
+                pdfr_free_links(tab->doc, tab->page_links[i]);
+        }
+        g_free(tab->page_links);
+        tab->page_links = NULL;
+        tab->page_links_n = 0;
+    }
+    pdfr_close(tab->doc);
+    tab->doc = NULL;
+    free_page_cached_arrays(tab);
+    invalidate_page_cache(tab);
+    g_free(tab->page_cache);
+    tab->page_cache = NULL;
+}
+
 void destroy_tab_data(gpointer data) {
     TabData *tab = data;
     if (!tab) return;
@@ -62,10 +89,7 @@ void destroy_tab_data(gpointer data) {
     g_free(tab->current_file);
     invalidate_page_cache(tab);
     g_free(tab->page_cache);
-    g_free(tab->cached_page_widths);
-    g_free(tab->cached_page_heights);
-    g_free(tab->cached_page_x0);
-    g_free(tab->cached_page_y0);
+    free_page_cached_arrays(tab);
     g_free(tab);
 }
 
@@ -183,12 +207,11 @@ void open_document_in_tab(TabData *tab) {
         /* Ensure page counter and layout buttons show real values immediately after load. */
         if (tab == get_current_left_tab()) {
             sync_left_layout_buttons(tab);
-            sync_page_widget_from_tab(tab);
         }
         if (tab == get_current_right_tab()) {
             sync_right_layout_buttons(tab);
-            sync_right_page_widget_from_tab(tab);
         }
+        sync_nav_for_tab(tab);
     }
 }
 
@@ -211,44 +234,5 @@ void load_file_into_tab(TabData *tab, const char *filename) {
     open_document_in_tab(tab);
     if (app.current_sidebar_mode == SIDEBAR_TOC) populate_toc_treeview();
     if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) update_file_info_labels(get_current_left_tab());
-    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
-        TabData *rtab = get_current_right_tab();
-        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
-        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
-        g_free(text);
-        g_free(basename);
-
-        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
-        g_free(text);
-
-        if (rtab && rtab->current_file) {
-            GFile *gf = g_file_new_for_path(rtab->current_file);
-            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
-                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
-            if (info) {
-                gchar *size_str = format_file_size(g_file_info_get_size(info));
-                gchar *size_text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), size_text);
-                g_free(size_text);
-                g_free(size_str);
-                g_object_unref(info);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
-            }
-            g_object_unref(gf);
-
-            if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
-                g_free(pages_text);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
-            }
-        } else {
-            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
-        }
-    }
+    refresh_right_popover_labels();
 }

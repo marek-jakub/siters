@@ -1,11 +1,6 @@
 #include "session_model.h"
 #include <string.h>
 
-static void* copy_string(const void* src, void* data) {
-    (void)data;
-    return g_strdup((const char*)src);
-}
-
 session_model_t* session_model_new() {
     session_model_t* model = g_new(session_model_t, 1);
     model->document_urls = NULL;
@@ -69,14 +64,14 @@ void session_model_set_document_urls(session_model_t* model, GList* urls) {
     if (model->document_urls) {
         g_list_free_full(model->document_urls, g_free);
     }
-    model->document_urls = g_list_copy_deep(urls, copy_string, NULL);
+    model->document_urls = g_list_copy_deep(urls, model_copy_string, NULL);
 }
 
 void session_model_set_helper_document_urls(session_model_t* model, GList* urls) {
     if (model->helper_document_urls) {
         g_list_free_full(model->helper_document_urls, g_free);
     }
-    model->helper_document_urls = g_list_copy_deep(urls, copy_string, NULL);
+    model->helper_document_urls = g_list_copy_deep(urls, model_copy_string, NULL);
 }
 
 void session_model_set_session_name(session_model_t* model, const char* name) {

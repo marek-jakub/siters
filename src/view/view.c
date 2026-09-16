@@ -99,21 +99,26 @@ void invalidate_page_cache(TabData *tab) {
         cache_evict_idx(tab, i);
 }
 
+void free_page_cached_arrays(TabData *tab) {
+    if (!tab) return;
+    g_free(tab->cached_page_widths);
+    g_free(tab->cached_page_heights);
+    g_free(tab->cached_page_x0);
+    g_free(tab->cached_page_y0);
+    tab->cached_page_widths = NULL;
+    tab->cached_page_heights = NULL;
+    tab->cached_page_x0 = NULL;
+    tab->cached_page_y0 = NULL;
+}
+
 void cache_page_dimensions(TabData *tab) {
     if (!tab || !tab->doc || tab->n_pages <= 0) {
-        if (tab) {
-            invalidate_page_cache(tab);
-            g_free(tab->page_cache);
-            tab->page_cache = NULL;
-            g_free(tab->cached_page_widths);
-            g_free(tab->cached_page_heights);
-            tab->cached_page_widths = NULL;
-            tab->cached_page_heights = NULL;
-            g_free(tab->cached_page_x0);
-            g_free(tab->cached_page_y0);
-            tab->cached_page_x0 = NULL;
-            tab->cached_page_y0 = NULL;
-        }
+    if (tab) {
+        invalidate_page_cache(tab);
+        g_free(tab->page_cache);
+        tab->page_cache = NULL;
+        free_page_cached_arrays(tab);
+    }
         return;
     }
     invalidate_page_cache(tab);

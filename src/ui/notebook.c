@@ -127,10 +127,15 @@ void open_file_in_notebook(GtkWidget *notebook, gboolean is_helper) {
     gtk_widget_destroy(dialog);
 }
 
+static void close_tab_page(GtkNotebook *notebook, int page_idx);
+
 void close_tab_in_notebook(GtkNotebook *notebook) {
     if (!notebook) return;
-    int page_idx = gtk_notebook_get_current_page(notebook);
-    if (page_idx < 0) return;
+    close_tab_page(notebook, gtk_notebook_get_current_page(notebook));
+}
+
+static void close_tab_page(GtkNotebook *notebook, int page_idx) {
+    if (!notebook || page_idx < 0) return;
 
     GtkWidget *page = gtk_notebook_get_nth_page(notebook, page_idx);
     if (!page) return;
@@ -208,46 +213,7 @@ void close_tab_in_notebook(GtkNotebook *notebook) {
         update_file_info_labels(get_current_left_tab());
     }
 
-    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
-        TabData *rtab = get_current_right_tab();
-        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
-        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
-        g_free(text);
-        g_free(basename);
-
-        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
-        g_free(text);
-
-        if (rtab && rtab->current_file) {
-            GFile *gf = g_file_new_for_path(rtab->current_file);
-            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
-                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
-            if (info) {
-                gchar *size_str = format_file_size(g_file_info_get_size(info));
-                text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), text);
-                g_free(text);
-                g_free(size_str);
-                g_object_unref(info);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
-            }
-            g_object_unref(gf);
-
-            if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
-                g_free(pages_text);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
-            }
-        } else {
-            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
-        }
-    }
+    refresh_right_popover_labels();
 
     if (is_left) {
         populate_sessions_treeview();
@@ -278,6 +244,7 @@ TabData *get_current_right_tab(void) {
 
 static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
     (void)btn;
+    /* CloseInfo is owned by the signal connection and freed here. */
     typedef struct {
         GtkNotebook *notebook;
         GtkWidget *page;
@@ -288,127 +255,13 @@ static void on_tab_close_clicked(GtkButton *btn, gpointer user_data) {
         return;
     }
 
-    gboolean is_left = (ci->notebook == GTK_NOTEBOOK(app.left_notebook));
-    gboolean is_right = (ci->notebook == GTK_NOTEBOOK(app.right_notebook));
-    session_model_t *session = NULL;
-    if (app.current_selected_session && app.session_models) {
-        session = g_hash_table_lookup(app.session_models, app.current_selected_session);
-    }
-
-    char *closed_uri = NULL;
+    /* Close the specific page owning this close button, not necessarily
+       the currently-active page (a reorderable notebook tab's X button can
+       be clicked without first switching to it). */
     int page_idx = gtk_notebook_page_num(ci->notebook, ci->page);
-    if (page_idx >= 0) {
-        GtkWidget *child = gtk_notebook_get_nth_page(ci->notebook, page_idx);
-        if (child) {
-            TabData *tab = g_object_get_data(G_OBJECT(child), "tab-data");
-            if (tab && tab->current_file && session) {
-                closed_uri = g_filename_to_uri(tab->current_file, NULL, NULL);
-                // Remove from open documents list
-                if (closed_uri) {
-                    if (is_left) {
-                        session_model_remove_document_url(session, closed_uri);
-                    } else if (is_right) {
-                        session_model_remove_helper_document_url(session, closed_uri);
-                    }
-                }
-                // Remove document model so reopened file starts fresh (zoom, page, view, etc.)
-                if (closed_uri && app.document_models) {
-                    char *key = make_document_key(app.current_selected_session, closed_uri, tab->is_helper);
-                    g_hash_table_remove(app.document_models, key);
-                    g_free(key);
-                }
-            }
-            /* The tab will be freed when its page widget is destroyed. */
-        }
-        gtk_notebook_remove_page(ci->notebook, page_idx);
-
-        if (session) {
-            gboolean closed_was_last_read = FALSE;
-            if (closed_uri) {
-                if (is_left) {
-                    const char *last = session_model_get_last_read_document(session);
-                    closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
-                } else if (is_right) {
-                    const char *last = session_model_get_last_read_help_document(session);
-                    closed_was_last_read = (g_strcmp0(last, closed_uri) == 0);
-                }
-            }
-            if (closed_was_last_read) {
-                int cur = gtk_notebook_get_current_page(ci->notebook);
-                if (cur >= 0) {
-                    GtkWidget *new_page = gtk_notebook_get_nth_page(ci->notebook, cur);
-                    if (new_page) {
-                        update_last_read_for_notebook(ci->notebook, new_page, (guint)cur);
-                    }
-                } else {
-                    if (is_left) {
-                        session_model_set_last_read_document(session, "");
-                    } else if (is_right) {
-                        session_model_set_last_read_help_document(session, "");
-                    }
-                }
-            }
-        }
-    }
-
-    if (closed_uri) g_free(closed_uri);
-
-    if (is_left) {
-        sync_page_widget_from_tab(get_current_left_tab());
-    } else if (is_right) {
-        sync_right_page_widget_from_tab(get_current_right_tab());
-    }
-
-    if (app.current_sidebar_mode == SIDEBAR_FILE_INFO) {
-        update_file_info_labels(get_current_left_tab());
-    }
-
-    if (app.right_file_info_popover && gtk_widget_get_mapped(app.right_file_info_popover)) {
-        TabData *rtab = get_current_right_tab();
-        gchar *basename = rtab && rtab->current_file ? g_path_get_basename(rtab->current_file) : NULL;
-        gchar *text = basename ? g_strdup_printf("Name: %s", basename) : g_strdup("Name: (no file)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_name_label), text);
-        g_free(text);
-        g_free(basename);
-
-        text = rtab && rtab->current_file ? g_strdup_printf("Path: %s", rtab->current_file) : g_strdup("Path: (none)");
-        gtk_label_set_text(GTK_LABEL(app.right_popover_path_label), text);
-        g_free(text);
-
-        if (rtab && rtab->current_file) {
-            GFile *gf = g_file_new_for_path(rtab->current_file);
-            GFileInfo *info = g_file_query_info(gf, G_FILE_ATTRIBUTE_STANDARD_SIZE,
-                                                 G_FILE_QUERY_INFO_NONE, NULL, NULL);
-            if (info) {
-                gchar *size_str = format_file_size(g_file_info_get_size(info));
-                text = g_strdup_printf("Size: %s", size_str);
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), text);
-                g_free(text);
-                g_free(size_str);
-                g_object_unref(info);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: Unknown");
-            }
-            g_object_unref(gf);
-
-            if (rtab->doc) {
-                gchar *pages_text = g_strdup_printf("Pages: %d", pdfr_count_pages(rtab->doc));
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), pages_text);
-                g_free(pages_text);
-            } else {
-                gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: N/A");
-            }
-        } else {
-            gtk_label_set_text(GTK_LABEL(app.right_popover_size_label), "Size: (none)");
-            gtk_label_set_text(GTK_LABEL(app.right_popover_pages_label), "Pages: (none)");
-        }
-    }
+    close_tab_page(ci->notebook, page_idx);
 
     g_free(ci);
-
-    if (is_left) {
-        populate_sessions_treeview();
-    }
 }
 
 TabData *create_new_tab(GtkWidget *notebook) {
