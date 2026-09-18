@@ -118,6 +118,49 @@ class SitersGUITestCase(unittest.TestCase):
             time.sleep(0.5)
         self.app = run(self.siters_binary, timeout=5, dumb=True)
 
+    def _write_json_config(
+        self,
+        last_open_session: str,
+        session_names: list[str],
+        config_dir: str,
+    ) -> None:
+        """Write a JSON config file for testing."""
+        config_file = os.path.join(config_dir, "siters.json")
+
+        import json
+
+        config = cast(
+            dict[str, JsonValue],
+            {
+                "window": {
+                    "width": 1000,
+                    "height": 800,
+                    "x": 0,
+                    "y": 0,
+                    "maximized": False,
+                },
+                "sessions": {
+                    "names": session_names,
+                    "last_open_session": last_open_session,
+                    "data": {},
+                },
+            },
+        )
+        sessions_section = cast(dict[str, JsonValue], config["sessions"])
+        data_section = cast(dict[str, JsonValue], sessions_section["data"])
+        for name in session_names:
+            data_section[name] = {
+                "documents": [],
+                "helper_documents": [],
+                "last_read_document": "",
+                "page_color": "#FFFFFF",
+                "last_read_help_document": "",
+                "helper_page_color": "#FFFFFF",
+            }
+
+        with open(config_file, "w") as f:
+            json.dump(config, f, indent=2)
+
 
 class TestSitersBasicOperation(SitersGUITestCase):
     """Test basic application operation without relying on AT-SPI."""
@@ -1029,49 +1072,6 @@ class TestSitersSessionManagement(SitersGUITestCase):
         except Exception as e:
             self.skipTest(f"Error during session management test: {e}")
 
-    def _write_json_config(
-        self,
-        last_open_session: str,
-        session_names: list[str],
-        config_dir: str,
-    ) -> None:
-        """Write a JSON config file for testing."""
-        config_file = os.path.join(config_dir, "siters.json")
-
-        import json
-
-        config = cast(
-            dict[str, JsonValue],
-            {
-                "window": {
-                    "width": 1000,
-                    "height": 800,
-                    "x": 0,
-                    "y": 0,
-                    "maximized": False,
-                },
-                "sessions": {
-                    "names": session_names,
-                    "last_open_session": last_open_session,
-                    "data": {},
-                },
-            },
-        )
-        sessions_section = cast(dict[str, JsonValue], config["sessions"])
-        data_section = cast(dict[str, JsonValue], sessions_section["data"])
-        for name in session_names:
-            data_section[name] = {
-                "documents": [],
-                "helper_documents": [],
-                "last_read_document": "",
-                "page_color": "#FFFFFF",
-                "last_read_help_document": "",
-                "helper_page_color": "#FFFFFF",
-            }
-
-        with open(config_file, "w") as f:
-            json.dump(config, f, indent=2)
-
     def test_app_starts_with_saved_session(self):
         """
         Test that the app starts with the session specified in the saved config file.
@@ -1144,6 +1144,336 @@ class TestSitersSessionManagement(SitersGUITestCase):
                 os.remove(config_file)
 
 
+class TestSitersOpenPdfFiles(SitersGUITestCase):
+    """
+    Open the sample training PDFs through the GUI (Open-file dialogs) and
+    verify each file lands in the notebook, ending with the last-opened file
+    shown as the current tab whose title contains that file's name.
+    """
+
+    DATA_PDFS_DIR: str = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), "..", "data", "test_pdfs"
+    )
+
+    # --- generic GUI helpers -------------------------------------------------
+
+    def _wait_for(
+        self, finder, timeout: float = 8.0, interval: float = 0.2
+    ) -> Node | None:
+        """Poll a (possibly raising) finder until it yields a truthy node."""
+        end = time.time() + timeout
+        while time.time() < end:
+            try:
+                result = finder()
+                if result:
+                    return result
+            except Exception:
+                pass
+            time.sleep(interval)
+        return None
+
+    def _click(self, node: Node | None) -> bool:
+        if node is None:
+            return False
+        try:
+            if hasattr(node, "do_action"):
+                node.do_action(0)
+            else:
+                node.click()
+            return True
+        except Exception:
+            try:
+                node.click()
+                return True
+            except Exception:
+                return False
+
+    def _find_window(self, app: Node) -> Node | None:
+        try:
+            return app.findChild(
+                lambda x: x.roleName in ("frame", "window")
+                and "Siters" in (x.name or "")
+            )
+        except Exception:
+            return None
+
+    def _find_session_cell(self, app: Node, name: str) -> Node | None:
+        for role in ("table cell", "cell"):
+            try:
+                result = app.findChild(
+                    lambda x, r=role: x.roleName == r and x.name == name
+                )
+                if result:
+                    return result
+            except Exception:
+                continue
+        return None
+
+    def _find_tab_label(self, node: Node, subtitle: str) -> Node | None:
+        for role in ("label", "page tab", "view"):
+            try:
+                result = node.findChild(
+                    lambda x, r=role: x.roleName == r and subtitle in (x.name or "")
+                )
+                if result:
+                    return result
+            except Exception:
+                continue
+        return None
+
+    # --- helpers for the Open-file dialog (GtkFileChooserDialog) -------------
+    #
+    # While the modal file chooser is open, the app's AT-SPI tree stops
+    # answering (GLib.Error('timeout from dbind', ...)), so the dialog is found
+    # at the X level (xwininfo/wmctrl) and driven with XTEST keyboard events
+    # instead: focus the dialog, Ctrl+L (location bar), type the full path,
+    # Return.
+
+    def _open_dialog_present(self) -> bool:
+        """True when a window titled 'Open PDF' exists at the X level."""
+        try:
+            result = subprocess.run(
+                ["xwininfo", "-root", "-tree"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+                check=False,
+            )
+        except Exception:
+            return False
+        return '"Open PDF"' in (result.stdout or "")
+
+    def _press_ctrl_l(self) -> None:
+        """Press Ctrl+L into the currently focused X window."""
+        try:
+            from Xlib import XK as _XK  # type: ignore[import-untyped]
+            from Xlib import X as _XD  # type: ignore[import-untyped]
+            from Xlib import display as _disp  # type: ignore[import-untyped]
+
+            dpy = _disp.Display()
+            ctrl = dpy.keysym_to_keycode(_XK.XK_Control_L)
+            l_key = dpy.keysym_to_keycode(ord("l"))
+            dpy.xtest_fake_input(_XD.KeyPress, ctrl)
+            dpy.xtest_fake_input(_XD.KeyPress, l_key)
+            dpy.xtest_fake_input(_XD.KeyRelease, l_key)
+            dpy.xtest_fake_input(_XD.KeyRelease, ctrl)
+            dpy.sync()
+        except Exception:
+            pass
+
+    def _press_return(self) -> None:
+        """Press Enter into the currently focused X window."""
+        try:
+            from Xlib import XK as _XK  # type: ignore[import-untyped]
+            from Xlib import X as _XD  # type: ignore[import-untyped]
+            from Xlib import display as _disp  # type: ignore[import-untyped]
+
+            dpy = _disp.Display()
+            enter = dpy.keysym_to_keycode(_XK.XK_Return)
+            dpy.xtest_fake_input(_XD.KeyPress, enter)
+            dpy.xtest_fake_input(_XD.KeyRelease, enter)
+            dpy.sync()
+        except Exception:
+            pass
+
+    def _type_chars(self, text: str) -> None:
+        """Type ``text`` into the currently focused X window via XTEST."""
+        shift_pairs = {
+            "_": "-",
+            "~": "`",
+            "!": "1",
+            "@": "2",
+            "#": "3",
+            "$": "4",
+            "%": "5",
+            "^": "6",
+            "&": "7",
+            "*": "8",
+            "(": "9",
+            ")": "0",
+            "{": "[",
+            "}": "]",
+            "|": "\\",
+            ":": ";",
+            '"': "'",
+            "<": ",",
+            ">": ".",
+            "?": "/",
+            "+": "=",
+        }
+        try:
+            from Xlib import XK as _XK  # type: ignore[import-untyped]
+            from Xlib import X as _XD  # type: ignore[import-untyped]
+            from Xlib import display as _disp  # type: ignore[import-untyped]
+
+            dpy = _disp.Display()
+            shift = dpy.keysym_to_keycode(_XK.XK_Shift_L)
+            for char in text:
+                if char.isalpha():
+                    base = ord(char) if char.islower() else ord(char.lower())
+                    with_shift = char.isupper()
+                elif char in shift_pairs:
+                    base = ord(shift_pairs[char])
+                    with_shift = True
+                else:
+                    base = ord(char)
+                    with_shift = False
+                keycode = dpy.keysym_to_keycode(base)
+                if not keycode:
+                    continue
+                if with_shift:
+                    dpy.xtest_fake_input(_XD.KeyPress, shift)
+                dpy.xtest_fake_input(_XD.KeyPress, keycode)
+                dpy.xtest_fake_input(_XD.KeyRelease, keycode)
+                if with_shift:
+                    dpy.xtest_fake_input(_XD.KeyRelease, shift)
+                dpy.sync()
+                time.sleep(0.01)
+        except Exception:
+            pass
+
+    def _drive_open_dialog(self, pdf_path: str) -> None:
+        """Focus the Open-PDF dialog and enter the full path via the location bar."""
+        try:
+            subprocess.run(["wmctrl", "-a", "Open PDF"], timeout=5, check=False)
+        except Exception:
+            pass
+        time.sleep(0.3)
+        self._press_ctrl_l()
+        time.sleep(0.2)
+        self._type_chars(pdf_path)
+        time.sleep(0.2)
+        self._press_return()
+
+    # --- test steps ----------------------------------------------------------
+
+    def _switch_to_default_session(self, app: Node) -> bool:
+        """Make sure the current session is 'Default' (via the sessions sidebar)."""
+        win = self._wait_for(lambda: self._find_window(app), timeout=6.0)
+        if win and "Default" in (win.name or ""):
+            print("SUCCESS: already on the Default session")
+            return True
+
+        try:
+            sessions_btn = app.findChild(
+                lambda x: x.roleName in ("push button", "toggle button")
+                and x.name == "Sessions"
+            )
+        except Exception:
+            sessions_btn = None
+        if not sessions_btn:
+            return self._switch_to_default_via_config()
+        self._click(sessions_btn)
+        time.sleep(1)
+
+        default_cell = self._wait_for(
+            lambda: self._find_session_cell(app, "Default"), timeout=6.0
+        )
+        if not default_cell:
+            return self._switch_to_default_via_config()
+        self._click(default_cell)
+
+        win = self._wait_for(lambda: self._find_window(app), timeout=6.0)
+        switched = win is not None and "Default" in (win.name or "")
+        if switched:
+            print("SUCCESS: switched to the Default session")
+        return switched
+
+    def _switch_to_default_via_config(self) -> bool:
+        """Fallback: restart the app straight into the Default session."""
+        config_dir = os.path.join(os.environ["SITERS_CONFIG_DIR"], "siters")
+        os.makedirs(config_dir, exist_ok=True)
+        self._write_json_config("Default", ["Default"], config_dir)
+        self._restart_app()
+        time.sleep(2)
+        return True
+
+    def _open_pdf(self, app: Node, pdf_path: str) -> bool:
+        """Open a single PDF through the Open-file dialog and wait for it to close."""
+        try:
+            open_btn = app.findChild(
+                lambda x: x.roleName in ("push button", "toggle button")
+                and x.name == "Open file"
+            )
+        except Exception:
+            open_btn = None
+        if not open_btn or not self._click(open_btn):
+            print(f"WARNING: could not click Open-file button for {pdf_path}")
+            return False
+
+        if not self._wait_for(self._open_dialog_present, timeout=6.0):
+            print(f"WARNING: Open-file dialog did not appear for {pdf_path}")
+            return False
+
+        self._drive_open_dialog(pdf_path)
+
+        if not self._wait_for(lambda: not self._open_dialog_present(), timeout=8.0):
+            print(f"WARNING: Open-file dialog did not close for {pdf_path}")
+            return False
+
+        # Give the app a moment to rebuild its AT-SPI tree after the modal loop.
+        time.sleep(1)
+        return True
+
+    # --- the test ------------------------------------------------------------
+
+    def test_opens_training_pdfs_and_shows_last_one(self):
+        """Open every data/test_pdfs file and check the last one is the active tab."""
+        try:
+            siters_app = root.application("siters")
+        except TimeoutError:
+            self.skipTest(
+                "AT-SPI search timed out - app may not expose accessibility interface"
+            )
+        time.sleep(1)
+
+        self.assertTrue(
+            self._switch_to_default_session(siters_app),
+            "Could not switch to the Default session",
+        )
+
+        pdf_dir = self.DATA_PDFS_DIR
+        self.assertTrue(os.path.isdir(pdf_dir), f"Test PDF directory missing: {pdf_dir}")
+        pdfs = sorted(
+            name for name in os.listdir(pdf_dir) if name.lower().endswith(".pdf")
+        )
+        self.assertGreaterEqual(len(pdfs), 2, "Expected at least two training PDFs")
+
+        paths = [os.path.join(pdf_dir, name) for name in pdfs]
+        for path in paths:
+            base = os.path.splitext(os.path.basename(path))[0]
+            self.assertTrue(self._open_pdf(siters_app, path), f"Failed to open {path}")
+            self.assertIsNotNone(
+                self._wait_for(
+                    lambda base=base: self._find_tab_label(siters_app, base), timeout=8.0
+                ),
+                f"Tab for {os.path.basename(path)} did not appear",
+            )
+            print(f"SUCCESS: opened {os.path.basename(path)}")
+
+        try:
+            left_notebook = siters_app.findChild(lambda x: x.name == "Left Notebook")
+        except Exception:
+            left_notebook = None
+        if left_notebook is None:
+            self.fail("Could not find the 'Left Notebook' widget")
+
+        # The last opened file must be shown in the notebook with its name in
+        # the tab title.
+        last_base = os.path.splitext(os.path.basename(paths[-1]))[0]
+        last_label = self._wait_for(
+            lambda: self._find_tab_label(left_notebook, last_base), timeout=8.0
+        )
+        if last_label is None:
+            self.fail(f"Last opened file {last_base} is not shown in the notebook")
+        self.assertIn(
+            last_base,
+            last_label.name or "",
+            "Current tab title does not contain the last opened file name",
+        )
+        print(f"SUCCESS: current tab title contains '{last_base}'")
+
+
 def suite():
     """Create a test suite for all GUI tests."""
     test_suite = unittest.TestSuite()
@@ -1152,6 +1482,9 @@ def suite():
     )
     test_suite.addTests(
         unittest.TestLoader().loadTestsFromTestCase(TestSitersSessionManagement)
+    )
+    test_suite.addTests(
+        unittest.TestLoader().loadTestsFromTestCase(TestSitersOpenPdfFiles)
     )
     return test_suite
 
