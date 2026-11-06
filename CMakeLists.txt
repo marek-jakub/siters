@@ -129,6 +129,8 @@ enable_testing()
 # CMocka unit tests
 add_executable(test_siters_unit
     tests/test_siters_unit.c
+    tests/unit/test_mocks.c
+    tests/unit/test_util.c
     src/session/state.c
     src/document_state.c
     src/search/search.c
@@ -160,7 +162,7 @@ add_executable(test_siters_unit
     src/log.c
 )
 
-target_include_directories(test_siters_unit PRIVATE ${CMAKE_SOURCE_DIR}/src)
+target_include_directories(test_siters_unit PRIVATE ${CMAKE_SOURCE_DIR}/src ${CMAKE_SOURCE_DIR}/tests/unit)
 
 target_link_libraries(test_siters_unit
     ${MUPDF_STATIC_LIBS}
