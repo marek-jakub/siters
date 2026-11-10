@@ -131,6 +131,7 @@ add_executable(test_siters_unit
     tests/test_siters_unit.c
     tests/unit/test_mocks.c
     tests/unit/test_util.c
+    tests/unit/test_window.c
     src/session/state.c
     src/document_state.c
     src/search/search.c

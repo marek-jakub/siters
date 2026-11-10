@@ -349,73 +349,6 @@ static void suppress_gtk_warnings(const gchar *log_domain, GLogLevelFlags log_le
     }
     g_log_default_handler(log_domain, log_level, message, user_data);
 }
-/* ================================================================
-   Tests for create_main_window (existing)
-   ================================================================ */
-
-static void test_create_main_window_calls_gtk_window_new(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_int_equal(gtk_window_new_called, 1);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-    assert_non_null(strstr(title_buffer, "Siters"));
-    assert_non_null(strstr(title_buffer, "Default"));
-}
-
-static void test_create_main_window_title_is_siters(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_non_null(strstr(title_buffer, "Siters"));
-    assert_non_null(strstr(title_buffer, "Default"));
-    assert_true(gtk_window_set_title_called >= 1);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-}
-
-static void test_create_main_window_sets_correct_size(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-    assert_int_equal(gtk_window_set_default_size_called, 1);
-}
-
-static void test_create_main_window_connects_destroy_signal(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-}
-
-static void test_create_main_window_returns_valid_pointer(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-}
-
-static void test_create_main_window_initialization_sequence(void **state) {
-    (void) state;
-    expect_value(__wrap_gtk_window_new, type, GTK_WINDOW_TOPLEVEL);
-    GtkWidget *win = create_main_window();
-    assert_non_null(win);
-    assert_int_equal(gtk_window_new_called, 1);
-    assert_true(gtk_window_set_title_called >= 1);
-    assert_int_equal(gtk_window_set_default_size_called, 1);
-    assert_int_equal(size_width, 1000);
-    assert_int_equal(size_height, 800);
-}
 
 /* ================================================================
    Regression: renaming a session when a DOCUMENT row is highlighted
@@ -1224,13 +1157,6 @@ int main(void) {
     g_setenv("SITERS_LOG_DIR", tests_log_dir, TRUE);
 
     const struct CMUnitTest tests[] = {
-        /* create_main_window */
-        cmocka_unit_test_setup_teardown(test_create_main_window_calls_gtk_window_new, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_create_main_window_title_is_siters, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_create_main_window_sets_correct_size, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_create_main_window_connects_destroy_signal, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_create_main_window_returns_valid_pointer, setup, teardown),
-        cmocka_unit_test_setup_teardown(test_create_main_window_initialization_sequence, setup, teardown),
         /* has_link_at */
         cmocka_unit_test(test_has_link_at_inside_rectangle),
         cmocka_unit_test(test_has_link_at_outside_rectangle),
@@ -1287,4 +1213,5 @@ int main(void) {
     tests_log_dir = NULL;
     return rc;
 }
+
 
