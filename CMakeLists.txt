@@ -133,6 +133,7 @@ add_executable(test_siters_unit
     tests/unit/test_util.c
     tests/unit/test_window.c
     tests/unit/test_links.c
+    tests/unit/test_view.c
     src/session/state.c
     src/document_state.c
     src/search/search.c
