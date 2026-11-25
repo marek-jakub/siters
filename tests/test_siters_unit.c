@@ -126,80 +126,6 @@ static void test_log_rotates_at_limit(void **state) {
 }
 
 /* ================================================================
-   Tests for vulnerability #4: outline depth guard
-   ================================================================ */
-
-static int count_outline_nodes(const PdfrOutline *o) {
-    int c = 0;
-    while (o) {
-        c++;
-        c += count_outline_nodes(o->down);
-        o = o->next;
-    }
-    return c;
-}
-
-static void test_outline_loads_shallow(void **state) {
-    (void)state;
-    char *dir = g_dir_make_tmp("siters-outline-XXXXXX", NULL);
-    assert_non_null(dir);
-    char *path = g_build_filename(dir, "outline.pdf", NULL);
-    write_deep_outline_pdf(path, 3);
-
-    PdfrDoc *doc = pdfr_open(path, NULL);
-    assert_non_null(doc);
-    PdfrOutline *o = pdfr_load_outline(doc);
-    assert_non_null(o);
-    assert_int_equal(count_outline_nodes(o), 3);
-    assert_string_equal(o->title, "L0");
-    assert_non_null(o->down);
-    assert_string_equal(o->down->title, "L1");
-    assert_non_null(o->down->down);
-    assert_string_equal(o->down->down->title, "L2");
-    pdfr_free_outline(doc, o);
-    pdfr_close(doc);
-
-    g_free(path);
-    g_free(dir);
-}
-
-static void test_outline_loads_at_max_depth(void **state) {
-    (void)state;
-    char *dir = g_dir_make_tmp("siters-outline-XXXXXX", NULL);
-    assert_non_null(dir);
-    char *path = g_build_filename(dir, "outline.pdf", NULL);
-    write_deep_outline_pdf(path, 32);
-
-    PdfrDoc *doc = pdfr_open(path, NULL);
-    assert_non_null(doc);
-    PdfrOutline *o = pdfr_load_outline(doc);
-    assert_non_null(o);
-    assert_int_equal(count_outline_nodes(o), 32);
-    pdfr_free_outline(doc, o);
-    pdfr_close(doc);
-
-    g_free(path);
-    g_free(dir);
-}
-
-static void test_outline_refuses_too_deep(void **state) {
-    (void)state;
-    char *dir = g_dir_make_tmp("siters-outline-XXXXXX", NULL);
-    assert_non_null(dir);
-    char *path = g_build_filename(dir, "outline.pdf", NULL);
-    write_deep_outline_pdf(path, 40);
-
-    PdfrDoc *doc = pdfr_open(path, NULL);
-    assert_non_null(doc);
-    PdfrOutline *o = pdfr_load_outline(doc);
-    assert_null(o); /* too deep — refused before any recursive load */
-    pdfr_close(doc);
-
-    g_free(path);
-    g_free(dir);
-}
-
-/* ================================================================
    Tests for vulnerability #3: async-signal-safe termination
    ================================================================ */
 
@@ -784,10 +710,6 @@ int main(void) {
         cmocka_unit_test(test_log_file_hardening),
         cmocka_unit_test(test_log_rejects_symlink),
         cmocka_unit_test(test_log_rotates_at_limit),
-        /* vulnerability #4: outline depth guard */
-        cmocka_unit_test(test_outline_loads_shallow),
-        cmocka_unit_test(test_outline_loads_at_max_depth),
-        cmocka_unit_test(test_outline_refuses_too_deep),
         /* vulnerability #3: async-signal-safe termination */
         cmocka_unit_test(test_signal_handler_terminates_child),
         /* regression: session rename with a highlighted document row */
@@ -814,6 +736,7 @@ int main(void) {
     tests_log_dir = NULL;
     return rc;
 }
+
 
 
 
