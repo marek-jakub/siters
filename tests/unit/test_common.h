@@ -28,6 +28,7 @@
 #include "view.h"
 #include "render.h"
 #include "view/scroll.h"
+#include "log.h"
 
 /* Shared test infrastructure. */
 #include "test_mocks.h"
